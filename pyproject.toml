@@ -61,13 +61,14 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-# This repo is a project not a library — no package to build.
-# `packages = []` prevents hatchling from trying to guess.
-packages = []
+# This repo is a project directory, not a Python library —
+# there's no package to install. We still use pyproject.toml so that
+# `pip install -e ".[<group>]"` gives us phase-scoped optional deps.
+[tool.setuptools]
+py-modules = []
 
 [tool.ruff]
 line-length = 100
