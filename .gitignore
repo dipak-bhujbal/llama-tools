@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Package managers
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Environment secrets
+.env
+.env.local
+*.pem
+*.key
+
+# ML artifacts (do NOT commit these — they can be gigabytes)
+models/
+checkpoints/
+outputs/
+runs/
+wandb/
+mlruns/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Datasets (large; store on HF)
+data/raw/
+data/processed/
+data/cache/
+*.parquet
+*.arrow
+
+# HuggingFace cache
+.cache/
+huggingface_cache/
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
