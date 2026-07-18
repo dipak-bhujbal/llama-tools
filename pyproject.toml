@@ -1,0 +1,78 @@
+[project]
+name = "llama-tools"
+version = "0.0.1"
+description = "Post-trained Llama-3.1-8B for structured tool-calling in AI agents."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Dipak Bhujbal" }]
+
+# Base dependencies — installed for every phase.
+# These are what Week 1 needs: HF ecosystem, PyTorch, tokenizer support.
+dependencies = [
+    "transformers>=4.44",   # loads models, tokenizers; core HF library
+    "torch>=2.1",           # tensor/autograd backend
+    "huggingface_hub>=0.24",# HF auth, model/dataset upload, hf CLI
+    "python-dotenv>=1.0",   # loads .env into os.environ; keeps HF_TOKEN out of code
+]
+
+# Phase-scoped optional dependency groups.
+# Install via: pip install -e ".[<group>]"
+# Only pull each group when its week arrives — keeps the venv lean and forces
+# explicit choices about what's actually needed.
+[project.optional-dependencies]
+
+# Week 3: data curation. Datasets library + dedup tooling.
+data = [
+    "datasets>=2.19",       # HF datasets: load, transform, dedup, push to HF
+    "datasketch>=1.6",      # MinHashLSH for near-duplicate detection
+    "jsonschema>=4.22",     # validate tool-call JSON against function schemas
+]
+
+# Weeks 2, 4, 6, 8: training runs (SFT + DPO + ablations).
+train = [
+    "trl>=0.10",            # SFTTrainer, DPOTrainer — the training loops we use
+    "peft>=0.12",            # LoRA adapters
+    "accelerate>=0.34",      # HF Accelerate: multi-GPU / mixed precision plumbing
+    "bitsandbytes>=0.43",    # 8-bit optimizer + optional 4-bit base loading
+    "wandb>=0.17",           # experiment tracking (training curves, hyperparams)
+]
+
+# Week 7: evaluation harness — BFCL v3 + MMLU regression check.
+eval = [
+    "lm-eval>=0.4",         # HELM/EleutherAI eval harness for MMLU-style benchmarks
+    # BFCL v3 harness is a separate repo/dependency — added when Week 7 begins
+]
+
+# Week 9: quantization (AWQ int4).
+quantize = [
+    "autoawq>=0.2",         # AWQ int4 post-training quantization
+]
+
+# Week 11: serving benchmark.
+serve = [
+    "vllm>=0.6",            # production-grade LLM serving; used for throughput/latency
+]
+
+# Dev / repo maintenance.
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",            # linter + formatter (fast, single tool)
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# This repo is a project not a library — no package to build.
+# `packages = []` prevents hatchling from trying to guess.
+packages = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = []
