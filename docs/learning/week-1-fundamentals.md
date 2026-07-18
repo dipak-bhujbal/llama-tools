@@ -64,7 +64,8 @@ Do these in order. Estimated time: 2-3 hours total including account creation an
   export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX
   ```
   Add that to `~/.zshrc` (or wherever you keep environment variables). You'll use this token in code and in `huggingface-cli login`.
-- [ ] **Accept Llama 3.1 license:** visit [huggingface.co/meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and accept the license terms. Meta requires this before you can download the model. Approval is usually near-instant.
+- [ ] **Accept Llama 3.1 license:** visit [huggingface.co/meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and accept the license terms. Meta requires this before you can download the model. Approval is usually near-instant to a few minutes.
+      - Note: the smoke test does NOT use Llama — it uses SmolLM2-135M (non-gated, tiny, fast) — because the smoke test's job is to verify your environment, not test a specific model's access. Llama-3.1-8B is verified separately as part of environment setup.
 - [ ] **Runpod account:** sign up at [runpod.io](https://runpod.io). Add payment method (add $50 to start, top up as needed — don't add $1000 upfront). Familiarize with the console but do NOT launch a pod yet.
 - [ ] **Python 3.11+:** verify with `python3 --version`. If < 3.11, install via `brew install python@3.11`.
 - [ ] **`uv` package manager:** faster than pip, better dependency resolution. Install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
@@ -88,57 +89,24 @@ Do these in order. Estimated time: 2-3 hours total including account creation an
 
 ## Smoke test
 
-The purpose: verify your local Python environment can load a small Llama variant and run one inference. This uses `Llama-3.2-1B-Instruct` (the 1-billion-parameter version) — not our target 8B model — because 1B fits comfortably in laptop memory. The 8B version will run on rented cloud GPUs, not locally.
+The purpose: verify your local Python environment can load a small model from HuggingFace and run one inference. The actual smoke test is committed at [`smoke.py`](../../smoke.py) in the repo root — read it, then run it.
 
-Save this as `smoke.py` in the repo root:
+Model used: **`HuggingFaceTB/SmolLM2-135M-Instruct`** — a tiny (~135M-parameter) non-gated instruction-tuned model that downloads in seconds and runs comfortably on CPU. We deliberately do NOT use Llama here — the smoke test verifies that transformers + torch + huggingface_hub work correctly, and it shouldn't be blocked by waiting for a Meta license approval.
 
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
+Run it:
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-
-print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-print("Loading model...")
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    torch_dtype=torch.float32,
-    device_map="cpu",  # forces CPU; slow but reliable on any machine
-)
-
-messages = [
-    {"role": "system", "content": "You are a concise, helpful assistant."},
-    {"role": "user", "content": "In one sentence, what is a transformer in machine learning?"},
-]
-
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    return_tensors="pt",
-)
-
-print("Generating...")
-outputs = model.generate(
-    inputs,
-    max_new_tokens=100,
-    do_sample=False,
-    pad_token_id=tokenizer.eos_token_id,
-)
-
-response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
-print("\n--- Output ---")
-print(response)
+```bash
+make smoke     # equivalent to: .venv/bin/python smoke.py
 ```
 
-Run it: `python smoke.py`
+First run downloads the model (~300 MB) into `~/.cache/huggingface/`. Subsequent runs use the cache. CPU generation takes 5-15 seconds.
 
-First run will download the 1B model (~2.5GB) into `~/.cache/huggingface/`. Subsequent runs use the cache. Generation on CPU takes ~30-60 seconds; that's fine.
+**Success:** the script prints a coherent one-sentence explanation of a transformer.
 
-**Success:** the script prints a one-sentence explanation of a transformer.
-
-**If it fails:** the most common issue is not having accepted the Llama license (fix: visit the model page and accept), or an old `transformers` version (fix: `uv pip install -U transformers`).
+**Common failures:**
+- **`AttributeError` on tokenizer.apply_chat_template:** transformers version mismatch — reinstall with `.venv/bin/pip install -U transformers`.
+- **Package import error:** you're not in the repo's virtualenv. Either activate it (`source .venv/bin/activate`) or invoke Python via `.venv/bin/python smoke.py`.
+- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env` and re-run `hf auth login --token $HF_TOKEN`.
 
 ---
 
