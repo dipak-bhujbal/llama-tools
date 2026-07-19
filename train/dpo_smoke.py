@@ -59,8 +59,9 @@ LEARNING_RATE = 5e-6                # conservative; DPO is loss-sensitive
 DPO_BETA = 0.1                      # standard TRL default; ablate in Week 8
 PER_DEVICE_BATCH = 2
 GRAD_ACCUM_STEPS = 8                # effective batch = 2 * 8 = 16
+# max_prompt_length was dropped from DPOConfig in newer TRL; max_length
+# alone caps the joint prompt+completion sequence, which suffices here.
 MAX_LENGTH = 2048
-MAX_PROMPT_LENGTH = 1536
 WARMUP_RATIO = 0.03
 
 # Cadence: with 500 pairs / eff-batch 16 = ~31 steps, so log/save often.
@@ -168,7 +169,6 @@ def main() -> None:
         # DPO-specific
         beta=DPO_BETA,
         max_length=MAX_LENGTH,
-        max_prompt_length=MAX_PROMPT_LENGTH,
         # Reproducibility
         seed=SPLIT_SEED,
     )
