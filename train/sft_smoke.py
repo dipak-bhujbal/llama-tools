@@ -52,6 +52,7 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 from dotenv import load_dotenv
+from huggingface_hub import HfApi
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
@@ -209,10 +210,24 @@ def main() -> None:
     print(f"Adapter saved to: {OUTPUT_DIR}")
 
     if PUSH_TO_HF:
+        # Use HfApi.upload_folder directly rather than trainer.push_to_hub.
+        # trainer.push_to_hub triggers create_model_card() with kwargs that
+        # can break under version drift between TRL and transformers (hit on
+        # the Week 2 smoke run: `create_model_card() got unexpected keyword
+        # argument 'repo_id'`). HfApi is a stable interface — direct upload
+        # avoids the trainer's model-card path entirely.
         print(f"Pushing adapter to HF: {HF_REPO_ID} (private={HF_PRIVATE})")
-        trainer.push_to_hub(
+        api = HfApi()
+        api.create_repo(
             repo_id=HF_REPO_ID,
+            repo_type="model",
             private=HF_PRIVATE,
+            exist_ok=True,
+        )
+        api.upload_folder(
+            folder_path=str(OUTPUT_DIR),
+            repo_id=HF_REPO_ID,
+            repo_type="model",
         )
         print("Pushed. Verify at: https://huggingface.co/" + HF_REPO_ID)
 
