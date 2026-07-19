@@ -107,24 +107,25 @@ def get_tool_required_args(tool: dict[str, Any]) -> list[str]:
     return list(required) if isinstance(required, list) else []
 
 
-def parse_assistant_tool_call(content: str) -> dict[str, Any] | None:
-    """Parse the assistant's tool call JSON. Returns None if unparsable.
+def parse_assistant_tool_call(content: str) -> tuple[dict[str, Any], list | None] | None:
+    """Parse the assistant's tool call. Returns (call, rest_of_list) or None.
 
-    Content may be a single call `{...}` or a list of calls `[...]`. We
-    focus on the single-call case; multi-call examples are skipped for
-    perturbation simplicity (they'd need per-call perturbation logic).
+    Content may be a single call `{...}` or a list of calls `[...]`. In the
+    list case, we return (first_call, remaining_calls) so the caller can
+    perturb just the first and preserve the rest in the rejected variant.
+    Returns None if unparsable.
     """
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
         return None
     if isinstance(parsed, list):
-        # Multi-call — take the first, or skip if we want single-call only.
-        # For MVP: skip multi-call to keep perturbation logic clean.
-        return None
+        if not parsed or not isinstance(parsed[0], dict) or "name" not in parsed[0]:
+            return None
+        return (parsed[0], parsed[1:])
     if not isinstance(parsed, dict) or "name" not in parsed:
         return None
-    return parsed
+    return (parsed, None)
 
 
 # --------------------------------------------------------------------------
@@ -151,12 +152,20 @@ def _hallucinated_tool(call: dict, tools: list[dict], rng: random.Random) -> str
 
 
 def _missing_required_arg(call: dict, tools: list[dict], rng: random.Random) -> str | None:
-    tool = next((t for t in tools if t.get("name") == call["name"]), None)
-    if not tool:
-        return None
-    required = get_tool_required_args(tool)
     args = dict(call.get("arguments") or {})
-    droppable = [a for a in required if a in args]
+    if not args:
+        return None
+    # Prefer dropping a schema-declared required arg if we can find one.
+    # Fall back to dropping any provided arg — an arg the model chose to
+    # emit is a plausible-missing-arg failure mode regardless of whether
+    # the schema explicitly marks it required.
+    tool = next((t for t in tools if t.get("name") == call["name"]), None)
+    droppable: list[str] = []
+    if tool:
+        required = get_tool_required_args(tool)
+        droppable = [a for a in required if a in args]
+    if not droppable:
+        droppable = list(args.keys())
     if not droppable:
         return None
     to_drop = rng.choice(droppable)
@@ -288,16 +297,33 @@ def main() -> None:
             continue
 
         chosen_content = assistant_msg.get("content", "")
-        call = parse_assistant_tool_call(chosen_content)
-        if call is None:
+        parsed = parse_assistant_tool_call(chosen_content)
+        if parsed is None:
             skipped_unparsable_call += 1
             continue
+        call, rest = parsed
 
         result = perturb(call, tools, rng)
         if result is None:
             skipped_no_perturbation += 1
             continue
-        p_type, rejected_content = result
+        p_type, perturbed_call_str = result
+
+        # If original was a list (multi-call), reassemble the rejected as
+        # [perturbed_first, ...original_rest] so the shape matches chosen.
+        if rest is not None:
+            try:
+                perturbed_call = json.loads(perturbed_call_str)
+                rejected_content = json.dumps([perturbed_call] + rest)
+            except json.JSONDecodeError:
+                # `malformed_json` perturbation intentionally breaks parse —
+                # still valid to embed as a raw string in a list-shaped output.
+                # Reassemble manually: replace the first element in the JSON.
+                rejected_content = "[" + perturbed_call_str + "".join(
+                    "," + json.dumps(r) for r in rest
+                ) + "]"
+        else:
+            rejected_content = perturbed_call_str
         perturbation_counts[p_type] += 1
 
         pairs.append(
