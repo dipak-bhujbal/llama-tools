@@ -62,11 +62,16 @@ from datasets import load_dataset
 # --------------------------------------------------------------------------
 
 HERMES_REPO = "NousResearch/hermes-function-calling-v1"
-HERMES_CONFIG = "func_calling"
-HERMES_TARGET = 7500  # examples to take after loading
+# Hermes ships several configs. `func_calling` is multi-turn (~1.9K examples);
+# `func_calling_singleturn` is single-turn (~5.7K). Together they give ~7.6K
+# with a healthy mix of conversation shapes. Skip json_mode configs — those
+# target structured JSON output, not tool-use.
+HERMES_CONFIGS = ["func_calling", "func_calling_singleturn"]
+HERMES_TARGET = 7500
 
 XLAM_REPO = "Salesforce/xlam-function-calling-60k"
-XLAM_TARGET = 7500
+XLAM_TARGET = 7500  # requires access approval from Salesforce; script degrades
+                    # gracefully if not yet approved (Hermes-only mode)
 
 OUTPUT_PATH = Path("data/processed/sft.jsonl")
 SEED = 42
@@ -99,38 +104,39 @@ def build_system_prompt(tools: list[dict[str, Any]]) -> str:
 # --------------------------------------------------------------------------
 
 def load_hermes() -> list[dict[str, Any]]:
-    """Load Hermes function-calling and normalize to the common schema.
+    """Load Hermes function-calling (all tool-use configs) and normalize.
 
-    Hermes `func_calling` config has a `conversations` field with a list of
-    ShareGPT-style turns (roles: `system`, `human`, `gpt`, `tool`).
+    Hermes configs have a `conversations` field: list of ShareGPT-style
+    turns (`{"from": role, "value": content}`). We combine `func_calling`
+    (multi-turn) and `func_calling_singleturn` for enough volume.
     """
-    print(f"Loading {HERMES_REPO} ({HERMES_CONFIG})...")
-    raw = load_dataset(HERMES_REPO, HERMES_CONFIG, split="train")
-
     normalized: list[dict[str, Any]] = []
     role_map = {"system": "system", "human": "user", "gpt": "assistant", "tool": "tool"}
-    for i, row in enumerate(raw):
-        # Hermes uses `conversations` = list of {"from": role, "value": content}
-        turns = row.get("conversations", [])
-        if not turns:
-            continue
-        messages = []
-        for t in turns:
-            role = role_map.get(t.get("from", ""))
-            content = t.get("value", "")
-            if role and content:
-                messages.append({"role": role, "content": content})
-        # Require at least: system, user, assistant (3+ turns)
-        if len(messages) < 3:
-            continue
-        normalized.append(
-            {
-                "messages": messages,
-                "source": "hermes",
-                "source_id": f"hermes-{i}",
-            }
-        )
-    print(f"  Hermes: loaded {len(raw)}, kept {len(normalized)}")
+    total_loaded = 0
+    for config in HERMES_CONFIGS:
+        print(f"Loading {HERMES_REPO} ({config})...")
+        raw = load_dataset(HERMES_REPO, config, split="train")
+        total_loaded += len(raw)
+        for i, row in enumerate(raw):
+            turns = row.get("conversations", [])
+            if not turns:
+                continue
+            messages = []
+            for t in turns:
+                role = role_map.get(t.get("from", ""))
+                content = t.get("value", "")
+                if role and content:
+                    messages.append({"role": role, "content": content})
+            if len(messages) < 3:
+                continue
+            normalized.append(
+                {
+                    "messages": messages,
+                    "source": "hermes",
+                    "source_id": f"hermes-{config}-{i}",
+                }
+            )
+    print(f"  Hermes: loaded {total_loaded}, kept {len(normalized)}")
     return normalized
 
 
@@ -145,9 +151,25 @@ def load_xlam() -> list[dict[str, Any]]:
         query: str                          — user request
         tools: str (JSON list of tool defs) — available tools
         answers: str (JSON list of tool calls) — expected assistant response
+
+    xLAM is gated on HuggingFace. If access is not yet granted, this function
+    returns an empty list and prints a friendly message; the caller falls
+    back to Hermes-only mode.
     """
     print(f"Loading {XLAM_REPO}...")
-    raw = load_dataset(XLAM_REPO, split="train")
+    try:
+        raw = load_dataset(XLAM_REPO, split="train")
+    except Exception as e:
+        msg = str(e)
+        if "gated" in msg or "access" in msg or "authorized" in msg:
+            print(
+                "  xLAM: SKIPPED — you don't have access yet.\n"
+                "  Request access at: https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k\n"
+                "  Then rerun this script. Hermes-only mode continues below."
+            )
+        else:
+            print(f"  xLAM: SKIPPED due to error: {type(e).__name__}: {msg[:200]}")
+        return []
 
     normalized: list[dict[str, Any]] = []
     for i, row in enumerate(raw):
@@ -211,6 +233,11 @@ def main() -> None:
     print(f"  Total examples: {len(combined)}")
     print(f"  From Hermes:    {len(hermes_sample)}")
     print(f"  From xLAM:      {len(xlam_sample)}")
+    if not xlam_sample:
+        print(
+            "\n  NOTE: xLAM was skipped — SFT set is Hermes-only for now.\n"
+            "  Once you have xLAM access, rerun to get the full 15K set."
+        )
     print("\nNext step: `python data/dedupe.py` to remove BFCL overlap.")
 
 
