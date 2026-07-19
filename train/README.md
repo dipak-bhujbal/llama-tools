@@ -91,6 +91,46 @@ Success signals (all visible in the TRL step logs / wandb):
 
 If those three don't move in the right direction on 500 pairs, do NOT proceed to the Week 6 full run — debug the data or the ref-model wiring first.
 
+## Week 6 runbook: full DPO on a Runpod pod
+
+### Pod
+
+Same 1x RTX A6000 48GB as Weeks 4-5. Pod setup is identical to the Week 5 smoke runbook (SFT adapter at `outputs/sft-full/`, `preferences_dpo.jsonl` at `data/processed/`, `hf auth login`, optional `wandb login`).
+
+### Run
+
+```bash
+python train/dpo_full.py
+```
+
+Expected duration: **~8-10 hours** (~621 optimizer steps at the smoke's observed ~17 s/step; 9,942 train pairs / eff-batch 16 × 1 epoch). Logs every 10 steps, evals every 50, checkpoints every 100 (last 3 kept). Run under `tmux` so an SSH drop doesn't kill it.
+
+### If the pod dies mid-run
+
+Checkpoints persist in `outputs/dpo-full/checkpoint-*`. Resume with:
+
+```bash
+python train/dpo_full.py --resume
+```
+
+### Health checks (smoke-informed — read the module docstring for context)
+
+- `rewards/accuracies` pinned at 1.0 is EXPECTED for this data (rule-based rejecteds are trivial for the SFT policy to separate). Do not read it as "converged".
+- `rewards/chosen` must NOT go strongly negative — that is policy degradation.
+- `eval_loss` should settle well below **0.693** (the indifference baseline) without crashing to ~0 (blown-up ref/policy gap / preference memorisation).
+- The script prints a final metrics summary (last train + last eval log entry) after training so you can eyeball these without opening wandb.
+
+### Post-run
+
+Upload `outputs/dpo-full/` to HF staging BEFORE stopping the pod — the adapter is not in git and vanishes with the pod otherwise:
+
+```bash
+# from the pod (same staging dataset repo as the smoke archive)
+hf upload centuriandip/llama-tools-sft-data outputs/dpo-full dpo-full --repo-type dataset
+```
+
+Week 8 will handle the merge + public push (analog of `merge_and_push.py`).
+
 ## Not in v1
 
 - Full-parameter fine-tuning (LoRA only; full-param defers to a stretch goal)
