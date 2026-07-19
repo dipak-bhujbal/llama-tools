@@ -73,6 +73,10 @@ XLAM_REPO = "Salesforce/xlam-function-calling-60k"
 XLAM_TARGET = 7500  # requires access approval from Salesforce; script degrades
                     # gracefully if not yet approved (Hermes-only mode)
 
+# If we hit the Hermes ceiling below target, backfill from xLAM so the final
+# combined set still hits FINAL_TARGET. Only applies when xLAM is accessible.
+FINAL_TARGET = 15000
+
 OUTPUT_PATH = Path("data/processed/sft.jsonl")
 SEED = 42
 
@@ -218,7 +222,10 @@ def main() -> None:
     # rather than always taking the first N (which could be systematically
     # biased if the dataset is ordered by creation date, topic, etc.).
     hermes_sample = random.sample(hermes, min(HERMES_TARGET, len(hermes)))
-    xlam_sample = random.sample(xlam, min(XLAM_TARGET, len(xlam)))
+    # If Hermes short-fell (its ceiling is smaller than target), backfill
+    # from xLAM to hit FINAL_TARGET total. Only if xLAM is accessible.
+    xlam_needed = max(XLAM_TARGET, FINAL_TARGET - len(hermes_sample)) if xlam else 0
+    xlam_sample = random.sample(xlam, min(xlam_needed, len(xlam))) if xlam else []
 
     combined = hermes_sample + xlam_sample
     random.shuffle(combined)  # interleave sources so a downstream reader
