@@ -25,7 +25,7 @@ Output: data/processed/sft_dedup_v2.jsonl
 import json
 from pathlib import Path
 
-from validate_preferences import PYTHON_EXPR_IN_CHOSEN
+from validate_preferences import EXCLUDED_SOURCE_IDS, PYTHON_EXPR_IN_CHOSEN
 
 INPUT_PATH = Path("data/processed/sft_dedup.jsonl")
 OUTPUT_PATH = Path("data/processed/sft_dedup_v2.jsonl")
@@ -57,7 +57,7 @@ def main() -> None:
     dropped_source_ids: list[str] = []
 
     for ex in examples:
-        if has_python_expr_in_assistant(ex):
+        if has_python_expr_in_assistant(ex) or ex.get("source_id") in EXCLUDED_SOURCE_IDS:
             dropped_source_ids.append(str(ex.get("source_id", "?")))
             continue
         kept.append(ex)

@@ -42,6 +42,11 @@ NEAR_IDENTICAL_RATIO = 0.98
 # not a preference signal. Found via the 200-pair human/model spot-check.
 PYTHON_EXPR_IN_CHOSEN = re.compile(r'\[[^\]"]*\] \* \d+')
 
+# Human adjudication 2026-07-19 (200-pair spot-check review): adult-content
+# examples excluded ahead of the planned public dataset release — zero
+# training benefit, real publication risk. Shared with clean_sft.py.
+EXCLUDED_SOURCE_IDS = {"xlam-2648"}
+
 PERTURBATIONS = [
     "wrong_tool_from_list",
     "hallucinated_tool",
@@ -227,6 +232,10 @@ def main() -> None:
     for p in pairs:
         p_type = p.get("perturbation_type", "unknown")
         total_by_type[p_type] += 1
+        if p.get("source_id") in EXCLUDED_SOURCE_IDS:
+            filtered_by_reason["excluded_source_id"] += 1
+            filtered_by_type[p_type] += 1
+            continue
         if PYTHON_EXPR_IN_CHOSEN.search(p.get("chosen", "")):
             filtered_by_reason["corrupt_chosen_python_expr"] += 1
             filtered_by_type[p_type] += 1
