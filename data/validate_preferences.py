@@ -21,6 +21,7 @@ Output: data/processed/preferences_dpo.jsonl
 import argparse
 import json
 import random
+import re
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -34,6 +35,12 @@ SEED = 42
 
 # Edit-distance ratio at or above this counts as "near-identical".
 NEAR_IDENTICAL_RATIO = 0.98
+
+# Upstream xLAM annotation bug: argument values written as Python
+# expressions ("[0.02] * 5") instead of literal JSON arrays. A chosen
+# call containing one teaches the model to emit non-JSON — corrupt data,
+# not a preference signal. Found via the 200-pair human/model spot-check.
+PYTHON_EXPR_IN_CHOSEN = re.compile(r'\[[^\]"]*\] \* \d+')
 
 PERTURBATIONS = [
     "wrong_tool_from_list",
@@ -220,6 +227,10 @@ def main() -> None:
     for p in pairs:
         p_type = p.get("perturbation_type", "unknown")
         total_by_type[p_type] += 1
+        if PYTHON_EXPR_IN_CHOSEN.search(p.get("chosen", "")):
+            filtered_by_reason["corrupt_chosen_python_expr"] += 1
+            filtered_by_type[p_type] += 1
+            continue
         sig = triviality_signals(p.get("chosen", ""), p.get("rejected", ""))
         if sig["exempt_unparseable_rejected"] and sig["near_identical"]:
             exempt_unparseable_count += 1
