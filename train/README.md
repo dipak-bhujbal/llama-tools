@@ -61,6 +61,36 @@ Merges the adapter, saves the full bf16 model to `outputs/sft-full-merged/`, and
 
 Defaults are tuned for A6000 48GB (`PER_DEVICE_BATCH=8`, `GRAD_ACCUM_STEPS=4`). On an A100 40GB, edit the config block to `PER_DEVICE_BATCH=4`, `GRAD_ACCUM_STEPS=8` — same effective batch of 32, so the loss curves stay comparable.
 
+## Week 5 runbook: DPO smoke test on a Runpod pod
+
+### Pod
+
+Same 1x RTX A6000 48GB as Week 4. ~40GB disk (base model + Week 4 adapter + small smoke output).
+
+### Setup
+
+Week 4 must have completed and `outputs/sft-full/` must be present on the pod (either the same pod, or `scp` the adapter dir up from wherever it lives). Also copy the preference set:
+
+```bash
+# from local machine
+scp -P <pod-ssh-port> data/processed/preferences_dpo.jsonl root@<pod-ip>:/workspace/llama-tools/data/processed/
+```
+
+### Run
+
+```bash
+python train/dpo_smoke.py
+```
+
+Expected duration: **~30 min** (500 pairs, 1 epoch, ~31 optimizer steps at effective batch 16). Logs every 2 steps.
+
+Success signals (all visible in the TRL step logs / wandb):
+- `rewards/accuracies` climbing above **0.5** (chance) and trending toward 0.6+ by the end.
+- `rewards/margins` growing (chosen reward pulling above rejected reward).
+- `loss` dropping below the **0.693** baseline (–log 0.5 = the loss if the policy were indifferent between chosen and rejected).
+
+If those three don't move in the right direction on 500 pairs, do NOT proceed to the Week 6 full run — debug the data or the ref-model wiring first.
+
 ## Not in v1
 
 - Full-parameter fine-tuning (LoRA only; full-param defers to a stretch goal)
