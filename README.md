@@ -4,44 +4,90 @@ Post-trained Llama-3.1-8B for structured tool-calling in AI agents.
 
 ## What this is
 
-An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for reliable function-calling behavior: correct tool selection, correct argument formatting, correct types, no hallucinated tools. Full SFT + DPO training pipeline, evaluated on the Berkeley Function Calling Leaderboard (BFCL v3), with quantized variants for production serving.
+An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for reliable function-calling behavior: correct tool selection, correct argument formatting, correct types, no hallucinated tools. Full SFT + DPO training pipeline, evaluated on the Berkeley Function Calling Leaderboard (BFCL), with quantized variants for production serving.
 
-**Status:** In development. Not yet released. See [`PLAN.md`](./PLAN.md) for the week-by-week timeline.
+## Status — 2026-07-19
 
-## Quick links (placeholders — not yet live)
+**SFT stage: shipped.** `centuriandip/llama-3.1-8b-tools-sft` is live on HuggingFace (private; public flip planned after Week 7 eval). LoRA-SFT of Llama-3.1-8B-Instruct on 12,160 curated tool-calling examples, 3 epochs, 9h 09m on 1x RTX A6000, approximately $4.55 compute. Eval loss improved at all 11 checkpoints (0.4625 → 0.2117), zero overfitting signal through 3 full epochs. Released same-day via a signed, eval-gated checklist using the companion [release-kit](https://github.com/dipak-bhujbal/release-kit) framework.
 
-- Model: `huggingface.co/centuriandip/llama-3.1-8b-tools` *(release target)*
-- Preference dataset: `huggingface.co/datasets/centuriandip/tool-calling-preferences` *(release target)*
-- Technical report: [`docs/technical-report.md`](./docs/technical-report.md) *(pending)*
+**DPO stage: in progress.** 10,242-pair preference dataset assembled (rule-based adversarial perturbations, human-adjudicated 200-pair quality audit). DPO smoke test passed tonight; full run launched.
+
+**Upcoming:** BFCL evaluation (upstream moved to v4; we will evaluate on the current leaderboard version), quantized variants, public model release.
+
+See [`docs/progress/week-4-run-log.md`](./docs/progress/week-4-run-log.md) for today's timestamped lab notebook.
+
+## Quick links
+
+| Artifact | Location | State |
+|---|---|---|
+| SFT model | `centuriandip/llama-3.1-8b-tools-sft` | Private; public after eval |
+| Preference dataset | `centuriandip/tool-calling-preferences` | Private until release |
+| Final model (SFT+DPO) | `centuriandip/llama-3.1-8b-tools` | Pending Week 6 |
+| Technical report | [`docs/report/`](./docs/report/) | In progress |
+| ADRs | [`docs/decisions/`](./docs/decisions/) | 5 accepted |
+| Lab notebook | [`docs/progress/week-4-run-log.md`](./docs/progress/week-4-run-log.md) | Live |
+
+## Training results (SFT)
+
+| Metric | Value |
+|---|---|
+| Base model | `meta-llama/Llama-3.1-8B-Instruct` |
+| Training method | LoRA-SFT (r=64, alpha=128, merged) |
+| Training examples | 12,160 (deduped from Hermes + xLAM) |
+| Epochs | 3 |
+| Hardware | 1x RTX A6000 48GB (Runpod) |
+| Wall-clock / cost | 9h 09m / ~$4.55 |
+| Eval loss (start → end) | 0.4625 → 0.2117 |
+| Eval token accuracy (final) | 0.9445 |
+| Overfit signal | None — improved at all 11 eval checkpoints |
+
+Qualitative gate (5 held-out prompts, reviewed before release): 4/5 exact match to gold including three multi-call cases; 1/5 subtle argument miss (`"lr": "en-US"` vs expected `"pt-BR"` — right tool, right schema, wrong locale grounding). This argument-grounding failure class is the explicit target of the DPO stage.
+
+BFCL benchmark numbers are not yet available. Formal evaluation against the current leaderboard version is scheduled for Week 7, with scores for base Llama-3.1-8B-Instruct, SFT-only, and SFT+DPO to be published at `eval/results/week-7.md`.
+
+## Data quality
+
+Data quality is a first-class concern in this project, not an afterthought.
+
+**Leakage prevention.** Zero overlap between the SFT/DPO training data and the BFCL eval set, verified via MinHash + exact match deduplication.
+
+**Mid-run audit and bug catch.** A 200-pair spot-check during the Week 4 SFT run (model-assisted triage, human adjudication of all flags) surfaced an upstream xLAM annotation bug: argument values written as Python expressions (`"[0.02] * 5"`) rather than literal JSON arrays. Full datasets were searched: 16 SFT training targets and 15 DPO pairs affected (0.14% of the SFT set). Impact was quantified, an evidence-based decision was made not to restart the already-running job (0.14% cannot shift an 8B model meaningfully over 3 epochs), both datasets were cleaned, and the decision is recorded in the lab notebook with full rationale. The DPO set regenerated to 10,242 final pairs; SFT v2 cleaned to 12,143 (queued for future re-runs).
+
+**Preference-set quality audit.** Human adjudication of the 200-pair sample: 194/200 OK, 2 bad-chosen (the xLAM bug), 3 trivial (already caught by the automated filter — the audit validated the filter, not just the pairs), 1 excluded for content. All decisions on record.
+
+Both incidents are documented in [`docs/progress/week-4-run-log.md`](./docs/progress/week-4-run-log.md) and the relevant ADRs.
 
 ## What's in this repo
 
 ```
 llama-tools/
-├── PLAN.md                        # Week-by-week execution plan
+├── PLAN.md                        # 12-week execution plan
 ├── ARCHITECTURE.md                # Technical design
 ├── data/                          # Data curation scripts (assembly, dedup, filtering)
 ├── train/                         # SFT and DPO training scripts (TRL-based)
-├── eval/                          # BFCL v3 harness + MMLU regression check
+├── eval/                          # BFCL eval harness + MMLU regression check
 ├── quantize/                      # AWQ int4 quantization pipeline
-├── model_card/                    # Model card source materials
+├── model_card/                    # Model card source (sft_model_card.md)
 └── docs/
-    ├── decisions/                 # Architecture Decision Records (ADRs)
-    ├── learning/                  # Week-by-week learning ramp
-    └── technical-report.md        # Publishable writeup (v1)
+    ├── decisions/                 # 5 Architecture Decision Records (ADRs)
+    ├── learning/                  # Mode A learning ramps (Weeks 1-4+)
+    ├── progress/                  # Lab notebooks (weeks-1-3.md, week-4-run-log.md)
+    └── report/                    # Technical report (in progress)
 ```
 
 ## Reproducing
 
-Full reproduction instructions land with v1 release. The repo is under active development; the training scripts, data pipeline, and eval harness will stabilize week-by-week per [`PLAN.md`](./PLAN.md).
+The SFT training script is `train/sft_full.py`. Config as run: LoRA r=64 / alpha=128 / dropout 0.05 targeting q/k/v/o projections, 3 epochs, lr 2e-4 cosine with 3% warmup, effective batch 32, max sequence length 2048, bf16, gradient checkpointing. Full provenance (base model revision, dataset commit, random seed, hardware spec) is in [`docs/progress/week-4-run-log.md`](./docs/progress/week-4-run-log.md).
+
+Complete end-to-end reproduction instructions will be published with the v1 release.
 
 ## Related projects
 
-- **[release-kit](https://github.com/dipak-bhujbal/release-kit)** — open framework for eval-gated LLM releases. `llama-tools` is its reference implementation.
+- **[release-kit](https://github.com/dipak-bhujbal/release-kit)** — open framework for eval-gated LLM releases. `llama-tools` is its reference implementation; the SFT release was the same-day first use of the signed checklist.
 
 ## License
 
-Apache-2.0
+Apache-2.0 (repo and scripts). Model weights: Meta Llama 3.1 Community License. Training data: Hermes (Apache-2.0), xLAM (CC-BY-4.0).
 
 ## Author
 
