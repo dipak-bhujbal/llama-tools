@@ -125,22 +125,33 @@ an adapter-only repo.
 
 ### Training curves
 
-<!-- TODO: add final train loss and eval loss values once the run completes tonight -->
-<!-- TODO: link wandb run — project: llama-tools, run: sft-full-week4 -->
-
 | Metric | Value |
 |---|---|
-| Final train loss | TODO |
-| Best eval loss | TODO |
-| wandb report | TODO |
+| Final train loss (last logged window, step 1090) | 0.166 |
+| Whole-run average train loss | 0.285 |
+| Best eval loss (final, step 1095 / epoch 3.0) | 0.2117 |
+| Final eval token accuracy | 0.944 |
+| Eval loss trajectory (every 100 steps) | 0.4625 → 0.4016 → 0.3436 → 0.2967 → 0.2640 → 0.2400 → 0.2248 → 0.2191 → 0.2141 → 0.2120 → 0.2117 |
+| Total runtime / cost | 9h 09m on 1× RTX A6000 / ≈ $4.55 |
+
+Eval loss improved at every one of the 11 checkpoints — no overfitting was observed
+through 3 epochs. Full step-level logs are in `trainer_state.json` in the training
+outputs (see the repo's `docs/progress/week-4-run-log.md` for the annotated timeline).
 
 ## Evaluation
 
 ### Held-out eval loss
 
 500 examples were held out from the training set and used for in-training eval loss
-monitoring every 100 optimizer steps. Loss curves are available in the linked wandb
-report (TODO above).
+monitoring every 100 optimizer steps (trajectory in the table above).
+
+### Qualitative sample review (post-training gate)
+
+5 held-out prompts were greedily decoded and reviewed against gold before release:
+4/5 exact matches (including three multi-call cases), 1/5 subtle argument miss
+(`"lr": "en-US"` where a Brazilian-news query expected `"pt-BR"` — correct tool and
+schema, wrong locale grounding). 5/5 produced valid, schema-correct JSON. This
+argument-grounding failure class is the explicit target of the upcoming DPO stage.
 
 ### BFCL v3 (planned)
 
