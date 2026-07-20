@@ -7,7 +7,9 @@ Training scripts. Populated across **Weeks 2, 4, 6, 8**.
 - **`sft_smoke.py`** — Week 2. LoRA-SFT on 500 examples. Verifies the training loop wires up. ~30-60 min on a rented GPU.
 - **`sft_full.py`** — Week 4. Full LoRA-SFT of Llama-3.1-8B-Instruct on the 12,160-example curated set. 3 epochs, ~6-8 hours on 1x A6000 48GB.
 - **`merge_and_push.py`** — Week 4. Merges the LoRA adapter into base weights and uploads the merged model to `centuriandip/llama-3.1-8b-tools-sft`.
-- **`dpo_smoke.py`** / **`dpo.py`** / **`ablate_dpo_beta.py`** — Weeks 5, 6, 8 (not yet written).
+- **`dpo_smoke.py`** / **`dpo_full.py`** — Weeks 5-6. DPO v1 (rule-perturbed pairs); closed as a negative result, see ADR-006.
+- **`dpo_v2_full.py`** — Week 7+. DPO v2 on on-policy hard pairs (ADR-007), with mechanical pre-registered aborts.
+- **`merge_dpo_winner.py`** — merges a sweep-selected DPO checkpoint (unused for v1; serves a v2 winner if one exists).
 
 ## Week 4 runbook: full SFT on a Runpod pod
 
@@ -130,6 +132,75 @@ hf upload centuriandip/llama-tools-sft-data outputs/dpo-full dpo-full --repo-typ
 ```
 
 Week 8 will handle the merge + public push (analog of `merge_and_push.py`).
+
+## Week 7+ runbook: DPO v2 — on-policy hard pairs (ADR-007)
+
+DPO v1 was closed as a negative result (ADR-006): the SFT baseline beat every v1 checkpoint on the sweep. v2 replaces rule-perturbed rejecteds with the SFT model's own sampled failures. **All four stages are paste-and-go; every abort condition is pre-registered and mechanical.**
+
+### Pod
+
+Same 1x RTX A6000 48GB. Fresh-pod setup:
+
+```bash
+cd /workspace && git clone https://github.com/dipak-bhujbal/llama-tools.git && cd llama-tools
+pip install -e ".[train]"
+hf auth login --token $HF_TOKEN
+
+# SFT adapter + v1 preference file from HF (no scp needed)
+hf download centuriandip/llama-3.1-8b-tools-sft --include "adapter/*" --local-dir /tmp/sft \
+  && mkdir -p outputs && cp -r /tmp/sft/adapter outputs/sft-full
+hf download centuriandip/llama-tools-sft-data preferences_dpo.jsonl --repo-type dataset --local-dir data/processed
+ls -la data/processed/preferences_dpo.jsonl   # expect 24498095 bytes
+```
+
+### Stage 1 — sample failures (~1-1.5 h, run under tmux)
+
+```bash
+python data/sample_failures.py
+```
+
+Samples K=4 completions (T=0.8) per unique training-split prompt; the 300-prompt trainer holdout is never touched. Logs failure counts per batch. Resume after a drop with `--resume`. If the failure rate is very low (<5%), stop and revisit ADR-007 (higher temperature) before burning more compute.
+
+### Stage 2 — build pairs + GATE (~5 min, CPU)
+
+```bash
+python data/build_dpo_v2_pairs.py
+```
+
+Prints the stats table (pairs per failure type, failure rate). **Exits non-zero with ABORT if pairs < 1,500** — in that case do NOT train; upload the stats, stop the pod, ship SFT. On PASS, upload the dataset to staging before proceeding:
+
+```bash
+hf upload centuriandip/llama-tools-sft-data data/processed/preferences_dpo_v2.jsonl preferences_dpo_v2.jsonl --repo-type dataset
+hf upload centuriandip/llama-tools-sft-data data/processed/dpo_v2_stats.md dpo_v2_stats.md --repo-type dataset
+```
+
+### Stage 3 — train (~1-2 h at 2-4K pairs)
+
+```bash
+python train/dpo_v2_full.py        # --resume after a drop
+```
+
+Mechanical aborts built in (no human watching required):
+- First eval `rewards/accuracies` ≥ 0.99 → auto-stop (pairs still too easy; hypothesis falsified).
+- `eval_rewards/chosen` < **−0.25** → auto-stop (kill line; v1's −0.6 was too permissive).
+- `load_best_model_at_end` is set — the best-eval-loss checkpoint is restored automatically.
+
+Vault checkpoints BEFORE stopping the pod:
+
+```bash
+hf upload centuriandip/llama-tools-sft-data outputs/dpo-v2-full dpo-v2-full --repo-type dataset
+```
+
+### Stage 4 — judge (~40 min)
+
+```bash
+ls outputs/dpo-v2-full/            # note checkpoint step numbers, e.g. 50 100 150 200
+python eval/dpo_sweep.py --checkpoint-root outputs/dpo-v2-full \
+  --out-dir eval/out/dpo_v2_sweep --checkpoints <steps from ls>
+hf upload centuriandip/llama-tools-sft-data eval/out/dpo_v2_sweep dpo-v2-sweep --repo-type dataset
+```
+
+Same 300-prompt holdout as v1's sweep. Pre-registered decision rule (ADR-007): **v2 ships only if it beats SFT after human diff-read** — strictly more semantic matches, zero JSON regressions. Tie or loss → ship SFT, close the DPO chapter with two documented negative results. Winner (if any) merges via `train/merge_dpo_winner.py`.
 
 ## Not in v1
 

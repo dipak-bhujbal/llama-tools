@@ -100,10 +100,18 @@ def main() -> None:
     parser.add_argument("--num-prompts", type=int, default=20)
     parser.add_argument("--checkpoints", type=int, nargs="+", default=[100, 200, 300, 400])
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--checkpoint-root", type=Path, default=CHECKPOINT_ROOT,
+        help="e.g. outputs/dpo-v2-full for the v2 sweep (ADR-007 Stage 4)",
+    )
+    parser.add_argument(
+        "--out-dir", type=Path, default=OUT_DIR,
+        help="e.g. eval/out/dpo_v2_sweep for the v2 sweep",
+    )
     args = parser.parse_args()
 
     load_dotenv()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading tokenizer: {BASE_MODEL}")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
@@ -123,7 +131,7 @@ def main() -> None:
 
     candidates = ["sft"]
     for step in args.checkpoints:
-        ckpt_dir = CHECKPOINT_ROOT / f"checkpoint-{step}"
+        ckpt_dir = args.checkpoint_root / f"checkpoint-{step}"
         if not ckpt_dir.exists():
             raise FileNotFoundError(f"Missing checkpoint: {ckpt_dir}")
         name = f"dpo-{step}"
@@ -151,7 +159,7 @@ def main() -> None:
             )
             print(f"  [{i + 1}/{len(prompts)}] match={rows[-1]['exact_match']} json={rows[-1]['json_valid']}")
 
-    gen_path = OUT_DIR / "generations.jsonl"
+    gen_path = args.out_dir / "generations.jsonl"
     with gen_path.open("w") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
@@ -179,7 +187,7 @@ def main() -> None:
             lines.append("```\n" + row["generation"] + "\n```")
         lines.append("")
 
-    report_path = OUT_DIR / "sweep_report.md"
+    report_path = args.out_dir / "sweep_report.md"
     report_path.write_text("\n".join(lines))
     print(f"Wrote {report_path}")
 
