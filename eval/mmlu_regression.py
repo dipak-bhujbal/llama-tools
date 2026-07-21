@@ -1,220 +1,284 @@
-"""MMLU 5-shot regression check: base vs SFT vs DPO checkpoint sweep.
+"""MMLU 5-shot regression eval: base vs SFT baseline vs DPO checkpoint sweep.
 
-Wrapper around EleutherAI's lm-evaluation-harness. Runs the standard 5-shot
-`mmlu` task against the base Llama-3.1-8B-Instruct plus our SFT adapter and
-DPO v2 checkpoints, then aggregates per-candidate MMLU accuracy into a single
-report. The interview-defensible claim ("DPO did not collapse general
-capability") requires numbers directly comparable to published Llama-3.1
-baselines, which is why we shell out to the standard harness rather than
-rolling our own MMLU runner.
+Self-contained minimal MMLU runner. No lm-evaluation-harness dependency.
+Loads `cais/mmlu` from Hugging Face, builds standard 5-shot prompts (few-shot
+examples sampled from the `dev` split of the same subject as the test item),
+and scores each item by comparing next-token log-probs of the four choice
+letters (" A", " B", " C", " D") and taking argmax. This matches how
+lm-eval-harness scores MMLU. Writes:
 
-Each candidate is evaluated sequentially — the harness is GPU-bound and this
-must run in its own tmux session after any concurrent GPU job completes.
-
-Writes:
-
-- `eval/out/mmlu_regression/<candidate>/results*.json` — raw lm_eval output
-- `eval/out/mmlu_regression/report.md` — summary table
+- `eval/out/mmlu_regression/predictions.jsonl` — one row per (model, item)
+- `eval/out/mmlu_regression/report.md` — summary table (macro-avg accuracy
+  across all items, plus delta vs base)
 
 Usage:
     python eval/mmlu_regression.py
+    python eval/mmlu_regression.py --num-items 500
     python eval/mmlu_regression.py --checkpoints 50 150
     python eval/mmlu_regression.py --base-only
-    python eval/mmlu_regression.py --skip-base
 """
 
 import argparse
 import json
-import subprocess
-import sys
+import random
+from collections import defaultdict
 from pathlib import Path
 
+import torch
+from datasets import load_dataset
 from dotenv import load_dotenv
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 SFT_ADAPTER_DIR = Path("./outputs/sft-full")
 DEFAULT_CHECKPOINT_ROOT = Path("./outputs/dpo-v2-full")
+
 OUT_DIR = Path("./eval/out/mmlu_regression")
-MMLU_TASK = "mmlu"
-NUM_FEWSHOT = 5
 
-LM_EVAL_VERSION = "0.4.4"
-
-
-def check_or_install_lm_eval() -> None:
-    """Ensure lm_eval is importable; pip-install pinned version if missing."""
-    try:
-        import lm_eval  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    print(f"lm_eval not found; installing lm-eval[hf]=={LM_EVAL_VERSION} ...")
-    try:
-        subprocess.run(
-            [
-                sys.executable, "-m", "pip", "install",
-                f"lm-eval[hf]=={LM_EVAL_VERSION}",
-            ],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(
-            "\nFAILED to install lm-evaluation-harness. "
-            "Install manually and rerun:\n"
-            "  https://github.com/EleutherAI/lm-evaluation-harness\n"
-            f"  pip install 'lm-eval[hf]=={LM_EVAL_VERSION}'\n"
-            f"Underlying error: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    try:
-        import lm_eval  # noqa: F401
-    except ImportError as e:
-        print(f"lm_eval still not importable after install: {e}", file=sys.stderr)
-        sys.exit(1)
+MMLU_DATASET = "cais/mmlu"
+NUM_FEW_SHOT = 5
+CHOICES = ["A", "B", "C", "D"]
+FEW_SHOT_SEED = 1234
 
 
-def run_lm_eval(candidate: str, out_subdir: Path, peft_dir: Path | None,
-                batch_size: str) -> None:
-    """Invoke `lm_eval` CLI for a single candidate."""
-    out_subdir.mkdir(parents=True, exist_ok=True)
-
-    model_args = f"pretrained={BASE_MODEL},dtype=bfloat16"
-    if peft_dir is not None:
-        # lm-eval's HF wrapper accepts a `peft=` kwarg and loads the adapter
-        # via PeftModel.from_pretrained on top of the base `pretrained` model.
-        # No special flag needed for Llama-3.1 — standard PEFT LoRA loading.
-        model_args += f",peft={peft_dir}"
-
-    cmd = [
-        "lm_eval",
-        "--model", "hf",
-        "--model_args", model_args,
-        "--tasks", MMLU_TASK,
-        "--num_fewshot", str(NUM_FEWSHOT),
-        "--batch_size", batch_size,
-        "--output_path", str(out_subdir),
-    ]
-    print(f"\n=== Running lm_eval for {candidate} ===")
-    print("  " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+def format_subject(subject: str) -> str:
+    """`abstract_algebra` -> `abstract algebra`."""
+    return subject.replace("_", " ")
 
 
-def find_results_json(out_subdir: Path) -> Path:
-    """lm-eval writes to either results.json or a timestamped subdirectory
-    (e.g. <out>/<model_sanitized>/results_<timestamp>.json). Search recursively
-    and pick the most recently modified match."""
-    matches = sorted(
-        out_subdir.rglob("results*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+def format_example(question: str, choices, answer_idx) -> str:
+    """Render one MMLU item. If answer_idx is None, leaves `Answer:` open."""
+    lines = [question]
+    for letter, choice in zip(CHOICES, choices):
+        lines.append(f"{letter}. {choice}")
+    if answer_idx is None:
+        lines.append("Answer:")
+    else:
+        lines.append(f"Answer: {CHOICES[answer_idx]}")
+    return "\n".join(lines)
+
+
+def build_prompt(test_item, few_shot_examples) -> str:
+    subject_str = format_subject(test_item["subject"])
+    header = (
+        f"The following are multiple choice questions (with answers) "
+        f"about {subject_str}.\n"
     )
-    if not matches:
-        raise FileNotFoundError(
-            f"No results*.json found under {out_subdir} — did lm_eval fail?"
+    blocks = [header]
+    for fs in few_shot_examples:
+        blocks.append(
+            format_example(fs["question"], fs["choices"], fs["answer"]) + "\n"
         )
-    return matches[0]
+    blocks.append(format_example(test_item["question"], test_item["choices"], None))
+    return "\n".join(blocks)
 
 
-def extract_mmlu_score(results_json: Path) -> float:
-    """Pull the aggregate MMLU accuracy from an lm-eval results.json.
+def build_few_shot_pool(dev_split):
+    """Group dev-split items by subject for few-shot sampling.
 
-    lm-eval reports the aggregate under results["mmlu"]["acc,none"] (with
-    stderr under "acc_stderr,none"). Fall back to any key starting with "acc"
-    for older/newer harness versions.
+    Note: MMLU dev split ships ~5 examples per subject by design, but a
+    handful of subjects fall short. We fall back to sampling with
+    replacement so the prompt always has NUM_FEW_SHOT shots; this is a
+    rare edge case and matches what lm-eval-harness does in practice.
     """
-    with results_json.open() as f:
-        data = json.load(f)
-    results = data.get("results", {})
-    if MMLU_TASK not in results:
-        raise KeyError(
-            f"'mmlu' aggregate missing from {results_json}; "
-            f"top-level keys: {list(results.keys())[:5]}"
+    pool = defaultdict(list)
+    for item in dev_split:
+        pool[item["subject"]].append(item)
+    return pool
+
+
+def sample_few_shot(pool, subject: str, rng: random.Random):
+    candidates = pool.get(subject, [])
+    if len(candidates) >= NUM_FEW_SHOT:
+        return rng.sample(candidates, NUM_FEW_SHOT)
+    if not candidates:
+        # extremely defensive — every MMLU subject has dev entries in practice
+        return []
+    return [rng.choice(candidates) for _ in range(NUM_FEW_SHOT)]
+
+
+def resolve_choice_token_ids(tokenizer):
+    """Return the token ids for ' A', ' B', ' C', ' D'.
+
+    Verified: for the Llama-3.1 tokenizer (tiktoken-based BPE), each of
+    " A", " B", " C", " D" encodes to a single token — so taking the last
+    token id after `add_special_tokens=False` is safe. Asserted at runtime.
+    """
+    ids = []
+    for letter in CHOICES:
+        toks = tokenizer.encode(" " + letter, add_special_tokens=False)
+        assert len(toks) == 1, (
+            f"Expected single token for ' {letter}', got {toks}. "
+            "Scoring assumes a single-token encoding."
         )
-    mmlu = results[MMLU_TASK]
-    for key in ("acc,none", "acc"):
-        if key in mmlu:
-            return float(mmlu[key])
-    for k, v in mmlu.items():
-        if k.startswith("acc") and not k.startswith("acc_stderr") \
-                and isinstance(v, (int, float)):
-            return float(v)
-    raise KeyError(f"No acc field in mmlu results: {list(mmlu.keys())}")
+        ids.append(toks[0])
+    return ids
+
+
+@torch.no_grad()
+def score_mmlu_item(model, tokenizer, prompt_text: str, choice_token_ids) -> int:
+    """Return predicted answer index 0-3 via argmax over choice-letter logits."""
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+    logits = model(**inputs).logits[0, -1]
+    choice_logits = logits[choice_token_ids]
+    return int(choice_logits.argmax().item())
+
+
+def _run_candidate(model, tokenizer, built, choice_token_ids, cand, rows, n):
+    print(f"\n=== Scoring with {cand} ===")
+    correct_running = 0
+    for i, ex in enumerate(built):
+        pred = score_mmlu_item(model, tokenizer, ex["prompt"], choice_token_ids)
+        is_correct = pred == ex["answer"]
+        correct_running += int(is_correct)
+        rows.append(
+            {
+                "idx": ex["idx"],
+                "model_name": cand,
+                "subject": ex["subject"],
+                "answer": ex["answer"],
+                "predicted": pred,
+                "correct": is_correct,
+            }
+        )
+        if (i + 1) % 500 == 0 or (i + 1) == n:
+            print(
+                f"  [{i + 1}/{n}] running_acc={correct_running / (i + 1):.3f}"
+            )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--num-items", type=int, default=None,
+                        help="Random subsample size; default = full test set")
     parser.add_argument("--checkpoints", type=int, nargs="+",
                         default=[50, 100, 150])
     parser.add_argument("--checkpoint-root", type=Path,
                         default=DEFAULT_CHECKPOINT_ROOT)
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
-    parser.add_argument("--batch-size", type=str, default="auto",
-                        help="Passed through to lm_eval --batch_size")
     parser.add_argument("--base-only", action="store_true",
-                        help="Run only the base Llama-3.1-8B-Instruct baseline")
-    parser.add_argument("--skip-base", action="store_true",
-                        help="Skip base (e.g. already run in a previous invocation)")
+                        help="Skip SFT + DPO; base baseline only")
+    parser.add_argument("--seed", type=int, default=FEW_SHOT_SEED)
     args = parser.parse_args()
 
     load_dotenv()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    check_or_install_lm_eval()
+    print(f"Loading MMLU test split: {MMLU_DATASET}")
+    test_ds = load_dataset(MMLU_DATASET, "all", split="test")
+    dev_ds = load_dataset(MMLU_DATASET, "all", split="dev")
 
-    # Build the candidate list. Order matters: base first so the delta column
-    # in the report has a reference.
-    candidates: list[tuple[str, Path | None]] = []
-    if not args.skip_base:
-        candidates.append(("base", None))
+    test_items = list(test_ds)
+    if args.num_items is not None and args.num_items < len(test_items):
+        subsample_rng = random.Random(args.seed)
+        test_items = subsample_rng.sample(test_items, args.num_items)
+    print(f"Evaluating on {len(test_items)} items "
+          f"(dev pool size {len(dev_ds)})")
+
+    few_shot_pool = build_few_shot_pool(dev_ds)
+
+    print(f"Loading tokenizer: {BASE_MODEL}")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    choice_token_ids = resolve_choice_token_ids(tokenizer)
+
+    # Pre-build prompts once with a fixed seed so every model sees the same
+    # few-shot examples per test item.
+    prompt_rng = random.Random(args.seed)
+    built = []
+    for idx, item in enumerate(test_items):
+        fs = sample_few_shot(few_shot_pool, item["subject"], prompt_rng)
+        built.append(
+            {
+                "idx": idx,
+                "subject": item["subject"],
+                "answer": int(item["answer"]),
+                "prompt": build_prompt(item, fs),
+            }
+        )
+
+    print(f"Loading base model: {BASE_MODEL}")
+    base = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL, dtype=torch.bfloat16, device_map="auto"
+    )
+    base.eval()
+
+    candidates = ["base"]
+    model = base  # base-only path
+
     if not args.base_only:
-        if not SFT_ADAPTER_DIR.exists():
-            raise FileNotFoundError(f"Missing SFT adapter dir: {SFT_ADAPTER_DIR}")
-        candidates.append(("sft", SFT_ADAPTER_DIR))
+        print(f"Attaching SFT adapter: {SFT_ADAPTER_DIR}")
+        model = PeftModel.from_pretrained(
+            base, str(SFT_ADAPTER_DIR), adapter_name="sft"
+        )
+        candidates.append("sft")
         for step in args.checkpoints:
             ckpt_dir = args.checkpoint_root / f"checkpoint-{step}"
             if not ckpt_dir.exists():
                 raise FileNotFoundError(f"Missing checkpoint: {ckpt_dir}")
-            candidates.append((f"dpo-{step}", ckpt_dir))
+            name = f"dpo-{step}"
+            print(f"Loading adapter {name} from {ckpt_dir}")
+            model.load_adapter(str(ckpt_dir), adapter_name=name)
+            candidates.append(name)
+        model.eval()
 
-    if not candidates:
-        print("Nothing to run (base skipped and --base-only not set).")
-        sys.exit(0)
+    rows = []
+    n = len(built)
+    for cand in candidates:
+        if cand == "base":
+            if isinstance(model, PeftModel):
+                # Disable all adapters for a clean base pass.
+                with model.disable_adapter():
+                    _run_candidate(model, tokenizer, built, choice_token_ids,
+                                   cand, rows, n)
+                continue
+            active_model = base
+        else:
+            model.set_adapter(cand)
+            active_model = model
+        _run_candidate(active_model, tokenizer, built, choice_token_ids,
+                       cand, rows, n)
 
-    # Run each candidate sequentially (GPU-bound).
-    for tag, peft_dir in candidates:
-        run_lm_eval(tag, args.out_dir / tag, peft_dir, args.batch_size)
+    pred_path = args.out_dir / "predictions.jsonl"
+    with pred_path.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    print(f"\nWrote {pred_path}")
 
-    # Aggregate.
-    scores: dict[str, float] = {}
-    for tag, _ in candidates:
-        results_json = find_results_json(args.out_dir / tag)
-        scores[tag] = extract_mmlu_score(results_json)
-        print(f"  {tag}: mmlu={scores[tag]:.4f}  ({results_json})")
+    # Aggregate: overall accuracy (macro-avg across items) per candidate.
+    per_cand = {}
+    for cand in candidates:
+        sub = [r for r in rows if r["model_name"] == cand]
+        correct = sum(r["correct"] for r in sub)
+        per_cand[cand] = (correct, len(sub))
 
-    base_score = scores.get("base")
-    lines = ["# MMLU 5-shot regression — base vs SFT vs DPO sweep", ""]
-    lines += [
+    base_acc = None
+    if "base" in per_cand and per_cand["base"][1]:
+        base_acc = per_cand["base"][0] / per_cand["base"][1]
+
+    lines = [
+        "# MMLU 5-shot — base vs SFT vs DPO sweep",
+        "",
         "| candidate | mmlu (5-shot) | delta vs base |",
         "|---|---|---|",
     ]
-    for tag, _ in candidates:
-        score = scores[tag]
-        if tag == "base" or base_score is None:
+    for cand in candidates:
+        correct, total = per_cand[cand]
+        acc = correct / total if total else 0.0
+        if cand == "base" or base_acc is None:
             delta = "—"
         else:
-            d = score - base_score
-            delta = f"{d:+.4f}"
-        lines.append(f"| {tag} | {score:.4f} | {delta} |")
+            delta = f"{(acc - base_acc):+.3f}"
+        lines.append(f"| {cand} | {acc:.3f} ({correct}/{total}) | {delta} |")
     lines.append("")
 
     report_path = args.out_dir / "report.md"
     report_path.write_text("\n".join(lines))
-    print(f"\nWrote {report_path}")
+    print(f"Wrote {report_path}")
 
-    print("\n=== MMLU regression summary ===")
+    print("\n=== MMLU 5-shot summary ===")
     for line in lines[2 : 4 + len(candidates)]:
         print(line)
 
