@@ -38,7 +38,7 @@ OUT_DIR = Path("./eval/out/mmlu_regression")
 MMLU_TASK = "mmlu"
 NUM_FEWSHOT = 5
 
-LM_EVAL_VERSION = "0.4.9"
+LM_EVAL_VERSION = "0.4.3"
 
 
 def check_or_install_lm_eval() -> None:
