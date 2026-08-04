@@ -24,7 +24,13 @@ Usage:
 
 import argparse
 import contextlib
+import hashlib
 import json
+import os
+import platform
+import subprocess
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
@@ -49,6 +55,74 @@ def load_jsonl(path: Path):
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def _git_head() -> str:
+    """Exact code revision this run executed, or a loud marker if unknown."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=REPO_ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return f"{sha}{'-dirty' if dirty else ''}"
+    except Exception:
+        return "UNKNOWN"
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_run_manifest(out_dir: Path, args, candidates: list, gen_path: Path,
+                       category_paths, n_prompts: int) -> Path:
+    """Record what produced this evidence, so a number can be traced to a run.
+
+    Written next to the generations rather than derived later: a reviewer
+    asking "which code, which weights, which inputs produced 369/400?" must be
+    able to answer it from the artifact alone.
+    """
+    manifest = {
+        "created_utc": datetime.now(UTC).isoformat(),
+        "code_revision": _git_head(),
+        "cli": " ".join(sys.argv),
+        "category": args.category,
+        "candidates": candidates,
+        "n_prompts": n_prompts,
+        "expected_rows": n_prompts * len(candidates),
+        "base_model": args.base_model,
+        "base_revision": args.base_revision,
+        "sft_adapter": args.sft_adapter,
+        "sft_adapter_subfolder": args.sft_adapter_subfolder,
+        "sft_adapter_revision": args.sft_adapter_revision,
+        "decoding": {"do_sample": False, "max_new_tokens": args.max_new_tokens},
+        "inputs": {
+            "questions": {
+                "path": str(category_paths.questions),
+                "sha256": _sha256_file(category_paths.questions),
+            },
+            "answer_key": {
+                "path": str(category_paths.answer_key),
+                "sha256": _sha256_file(category_paths.answer_key),
+            },
+        },
+        "outputs": {
+            "generations": {"path": str(gen_path), "sha256": _sha256_file(gen_path)},
+        },
+        "environment": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "torch": getattr(torch, "__version__", "unknown"),
+            "cuda": torch.version.cuda if torch.cuda.is_available() else None,
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        },
+    }
+    path = out_dir / "run_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 def build_candidate_names(include_base: bool, sft_only: bool, checkpoints) -> list:
@@ -194,12 +268,24 @@ def main() -> None:
                              "Required for base-vs-SFT lift numbers.")
     parser.add_argument("--sft-only", action="store_true",
                         help="Skip DPO checkpoints; baseline only")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Discard existing evidence in --out-dir. Refuses by default.")
     args = parser.parse_args()
 
     load_dotenv()
     category_paths = resolve_category_paths(REPO_ROOT, args.category)
     if args.out_dir is None:
         args.out_dir = category_paths.default_output
+
+    # Refuse to write into a directory that already holds results. A paid run
+    # silently overwriting a previous paid run's evidence is unrecoverable:
+    # the generations are the only record of what the model actually emitted.
+    gen_path = args.out_dir / "generations.jsonl"
+    if gen_path.exists() and gen_path.stat().st_size > 0 and not args.overwrite:
+        raise SystemExit(
+            f"refusing to overwrite existing evidence at {gen_path}\n"
+            f"use a fresh --out-dir, or pass --overwrite if you truly mean to discard it"
+        )
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading BFCL prompts: {category_paths.questions}")
@@ -276,7 +362,18 @@ def main() -> None:
 
     model.eval()
 
+    # Evidence is written incrementally, not buffered until the end. A paid
+    # run that dies at 90% must leave 90% of its generations on disk; the old
+    # behaviour buffered everything in memory and wrote once per category, so
+    # a preempted pod lost the entire spend.
     rows = []
+    gen_file = gen_path.open("w", encoding="utf-8")
+
+    def checkpoint(row: dict) -> None:
+        gen_file.write(json.dumps(row) + "\n")
+        gen_file.flush()
+        os.fsync(gen_file.fileno())
+
     for cand in candidates:
         if cand == "base":
             adapter_ctx = model.disable_adapter()
@@ -306,17 +403,37 @@ def main() -> None:
                         "json_valid": parsed is not None,
                     }
                 )
+                checkpoint(rows[-1])
                 if (i + 1) % 25 == 0 or (i + 1) == len(built_prompts):
                     print(
                         f"  [{i + 1}/{len(built_prompts)}] "
                         f"overall={rows[-1]['overall_ok']} reason={reason or 'ok'}"
                     )
 
-    gen_path = args.out_dir / "generations.jsonl"
-    with gen_path.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
-    print(f"\nWrote {gen_path}")
+    gen_file.close()
+
+    # Completeness assertion: every prompt must have been scored by every
+    # candidate. A short file means the run was cut off, and a silently short
+    # evidence file would produce a wrong accuracy denominator downstream.
+    expected = len(built_prompts) * len(candidates)
+    if len(rows) != expected:
+        raise SystemExit(
+            f"incomplete run: {len(rows)} rows written, expected {expected} "
+            f"({len(built_prompts)} prompts x {len(candidates)} candidates). "
+            f"Partial evidence is preserved at {gen_path}."
+        )
+    seen_pairs = {(r["id"], r["model_name"]) for r in rows}
+    if len(seen_pairs) != expected:
+        raise SystemExit(
+            f"duplicate or missing (id, candidate) pairs: {len(seen_pairs)} distinct "
+            f"of {expected} expected. Evidence preserved at {gen_path}."
+        )
+    print(f"\nWrote {gen_path} ({len(rows)} rows, verified complete)")
+
+    manifest_path = write_run_manifest(
+        args.out_dir, args, candidates, gen_path, category_paths, len(built_prompts)
+    )
+    print(f"Wrote {manifest_path}")
 
     n = len(built_prompts)
     lines = [f"# BFCL v4 {args.category} — SFT vs DPO sweep", ""]
