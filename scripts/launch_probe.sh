@@ -210,11 +210,25 @@ fi
 # cap actually covers, then split evenly across the two paid commands so
 # --usd-cap bounds *total* probe spend, not spend-per-category.
 # ---------------------------------------------------------------------------
+derived_max_seconds=$(awk -v cap="${usd_cap}" -v rate="${usd_per_hour}" \
+  'BEGIN { printf "%d", (cap / rate) * 3600 }')
+
+# --max-seconds may only REDUCE the rate-derived ceiling, never enlarge it.
+# An override that raises the ceiling would silently authorise spending above
+# the approved cap, which makes the cap advisory rather than mechanical --
+# exactly the property it exists to have.
 if [[ -n "${max_seconds_override}" ]]; then
+  if [[ "${max_seconds_override}" -gt "${derived_max_seconds}" ]]; then
+    echo "ERROR: --max-seconds ${max_seconds_override} exceeds the affordable ceiling" >&2
+    echo "       of ${derived_max_seconds}s derived from --usd-cap ${usd_cap}" >&2
+    echo "       at --usd-per-hour ${usd_per_hour}." >&2
+    echo "       The override may only reduce the budget, never enlarge it." >&2
+    exit "${EXIT_USAGE}"
+  fi
   total_max_seconds="${max_seconds_override}"
+  echo "BUDGET: override reduces ceiling ${derived_max_seconds}s -> ${total_max_seconds}s"
 else
-  total_max_seconds=$(awk -v cap="${usd_cap}" -v rate="${usd_per_hour}" \
-    'BEGIN { printf "%d", (cap / rate) * 3600 }')
+  total_max_seconds="${derived_max_seconds}"
 fi
 per_command_max_seconds=$(( total_max_seconds / NUM_PAID_COMMANDS ))
 
@@ -387,6 +401,61 @@ run_generation() {
 #   6. paid generation: category=simple_python                (Blocker 3)
 # Any failure at any step aborts every step after it (Blocker 4).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# EXIT trap. The stop-the-pod reminder and the artifact inventory must appear on
+# EVERY exit path, not just the happy one. The previous version printed them
+# only after both generations succeeded — so a failed or timed-out run, which is
+# exactly when a human is most likely to walk away from a still-billing pod,
+# printed nothing. A pod left running is the one cost the in-pod wall-clock
+# ceiling cannot bound.
+# ---------------------------------------------------------------------------
+completed_all_steps=0
+started_epoch="$(date -u +%s)"
+
+on_exit() {
+  local status=$?
+  local elapsed=$(( $(date -u +%s) - started_epoch ))
+
+  echo
+  echo "====================================================================="
+  if [[ "${dry_run}" -eq 1 ]]; then
+    # Still print the stop procedure in a dry run: it is part of the plan a
+    # reviewer is being asked to approve, and hiding it would mean the most
+    # cost-critical step never appears in the reviewable output.
+    echo "DRY RUN — the steps below are what a real run would print on exit."
+  elif [[ "${completed_all_steps}" -eq 1 && "${status}" -eq 0 ]]; then
+    echo "RUN COMPLETE — elapsed ${elapsed}s"
+  else
+    echo "RUN DID NOT COMPLETE — exit ${status}, elapsed ${elapsed}s"
+    echo "Partial evidence is preserved; it is not discarded."
+  fi
+  echo
+  echo "STOP THE POD NOW, then CONFIRM IN THE CONSOLE THAT BILLING STOPPED."
+  echo "Approved cap is \$${usd_cap}. A process that has been killed cannot"
+  echo "stop its own billing — only the provider-side control can."
+  echo
+  echo "Record into the run evidence: actual elapsed ${elapsed}s, the actual"
+  echo "hourly rate, the actual charge, and billing-stopped confirmation."
+  echo
+  echo "Persist these before terminating (partial files count as evidence):"
+  for d in "${out_root}/study2_probe_multiple" "${out_root}/study2_probe_simple_python"; do
+    for f in generations.jsonl report.md run_manifest.json; do
+      if [[ "${dry_run}" -eq 1 ]]; then
+        echo "  ${d}/${f}"
+      elif [[ -s "${d}/${f}" ]]; then
+        echo "  [present] ${d}/${f}"
+      else
+        echo "  [MISSING] ${d}/${f}"
+      fi
+    done
+  done
+  echo "  plus: eval/out/pip_freeze.txt eval/out/gpu.txt eval/out/image_tag.txt"
+  echo "  plus: this tmux session's stdout/stderr log"
+  echo "====================================================================="
+  return "${status}"
+}
+trap on_exit EXIT
+
 # Blocker 3, preflight half. The wall-clock cap is enforced by `timeout`, so a
 # missing `timeout` binary means the approved $2.50 ceiling is unenforceable.
 # This is checked HERE, before the detached checkout and before anything is
@@ -447,18 +516,5 @@ if [[ "${dry_run}" -eq 1 ]]; then
   echo "DRY RUN: no git state changed, nothing fetched, nothing generated."
 fi
 
-cat <<EOF
-
-=====================================================================
-STOP THE POD NOW — every minute past this point burns budget beyond
-the approved \$${usd_cap} cap for no additional evidence.
-
-Persist these artifacts before terminating the pod:
-  ${out_root}/study2_probe_multiple/generations.jsonl
-  ${out_root}/study2_probe_multiple/report.md
-  ${out_root}/study2_probe_simple_python/generations.jsonl
-  ${out_root}/study2_probe_simple_python/report.md
-=====================================================================
-EOF
-
+completed_all_steps=1
 exit "${EXIT_OK}"
