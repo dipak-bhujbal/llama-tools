@@ -21,7 +21,9 @@ By every training-time signal, DPO v2 fixed the ADR-006 failure mode. The v2 hyp
 
 ## Stage 4 results (held-out evaluation)
 
-### BFCL v4 simple_python (399 held-out prompts, greedy generation, exact-match arg-in-accepted-list scoring)
+### BFCL v4 simple_python (400 held-out prompts, greedy generation, exact-match arg-in-accepted-list scoring)
+
+> **Factual correction (2026-08-04):** This heading previously said 399. Both frozen JSONL files contain 400 objects and 400 unique ids, and the archived report/generations score all 400. The reported `369/400 = 92.25%` result is unchanged.
 
 | candidate | overall | name_ok | args_ok | json_valid | delta vs SFT |
 |---|---|---|---|---|---|

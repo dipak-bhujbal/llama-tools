@@ -1,13 +1,14 @@
-"""BFCL v4 simple_python eval: SFT baseline vs DPO checkpoint sweep.
+"""BFCL v4 single-call eval: SFT baseline vs DPO checkpoint sweep.
 
-Simplified BFCL v4 simple_python scorer: exact function-name match + strict
+Supports `simple_python` and `multiple`, whose answer keys both contain one
+expected call per item. The simplified scorer uses exact function-name + strict
 per-arg value-in-accepted-list match + no-extra-args. Not identical to BFCL's
 official AST-based scorer; sufficient for tracking relative SFT-vs-DPO deltas
-on this category. Full BFCL leaderboard submission out of scope for
+on these categories. Full BFCL leaderboard submission is out of scope for
 llama-tools v1.
 
 For the SFT baseline plus each DPO checkpoint, this script runs greedy
-generation on 399 BFCL simple_python prompts, extracts the tool call as JSON,
+generation, extracts the tool call as JSON,
 and scores name + arguments against the accepted-values ground truth. Writes:
 
 - `eval/out/bfcl_simple/generations.jsonl` — one row per (id, candidate)
@@ -15,6 +16,7 @@ and scores name + arguments against the accepted-values ground truth. Writes:
 
 Usage:
     python eval/bfcl_simple.py
+    python eval/bfcl_simple.py --category multiple --sft-only
     python eval/bfcl_simple.py --num-prompts 10
     python eval/bfcl_simple.py --checkpoints 50 100 150 --checkpoint-root outputs/dpo-v2-full
     python eval/bfcl_simple.py --sft-only
@@ -29,14 +31,13 @@ from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from bfcl_category_config import SUPPORTED_CATEGORIES, resolve_category_paths
+
 BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+BASE_MODEL_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
 SFT_ADAPTER_DIR = Path("./outputs/sft-full")
 CHECKPOINT_ROOT = Path("./outputs/dpo-v2-full")
-
-PROMPTS_PATH = Path("./eval/bfcl_data/BFCL_v4_simple_python.json")
-GT_PATH = Path("./eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json")
-
-OUT_DIR = Path("./eval/out/bfcl_simple")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_jsonl(path: Path):
@@ -157,31 +158,52 @@ def generate(model, tokenizer, prompt: str, max_new_tokens: int) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--category", choices=SUPPORTED_CATEGORIES, default="simple_python"
+    )
     parser.add_argument("--num-prompts", type=int, default=None,
-                        help="Limit for smoke tests; default = all 399")
+                        help="Limit for smoke tests; default = all category items")
     parser.add_argument("--checkpoints", type=int, nargs="+",
                         default=[50, 100, 150])
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--checkpoint-root", type=Path, default=CHECKPOINT_ROOT)
-    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument("--base-model", default=BASE_MODEL)
+    parser.add_argument("--base-revision", default=BASE_MODEL_REVISION)
+    parser.add_argument("--sft-adapter", default=str(SFT_ADAPTER_DIR))
+    parser.add_argument("--sft-adapter-subfolder", default=None)
+    parser.add_argument("--sft-adapter-revision", default=None)
     parser.add_argument("--sft-only", action="store_true",
                         help="Skip DPO checkpoints; baseline only")
     args = parser.parse_args()
 
     load_dotenv()
+    category_paths = resolve_category_paths(REPO_ROOT, args.category)
+    if args.out_dir is None:
+        args.out_dir = category_paths.default_output
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading BFCL prompts: {PROMPTS_PATH}")
-    prompts_raw = load_jsonl(PROMPTS_PATH)
-    gt_raw = load_jsonl(GT_PATH)
+    print(f"Loading BFCL prompts: {category_paths.questions}")
+    prompts_raw = load_jsonl(category_paths.questions)
+    gt_raw = load_jsonl(category_paths.answer_key)
     gt_by_id = {r["id"]: r["ground_truth"][0] for r in gt_raw}
+    prompt_ids = {row["id"] for row in prompts_raw}
+    if prompt_ids != set(gt_by_id):
+        missing_keys = sorted(prompt_ids - set(gt_by_id))
+        extra_keys = sorted(set(gt_by_id) - prompt_ids)
+        raise ValueError(
+            f"question/answer id mismatch: missing={missing_keys[:5]} "
+            f"extra={extra_keys[:5]}"
+        )
 
     if args.num_prompts is not None:
         prompts_raw = prompts_raw[: args.num_prompts]
     print(f"Evaluating on {len(prompts_raw)} prompts")
 
-    print(f"Loading tokenizer: {BASE_MODEL}")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    print(f"Loading tokenizer: {args.base_model} revision={args.base_revision}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model, revision=args.base_revision
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -195,13 +217,27 @@ def main() -> None:
             }
         )
 
-    print(f"Loading base model: {BASE_MODEL}")
+    print(f"Loading base model: {args.base_model} revision={args.base_revision}")
     base = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL, dtype=torch.bfloat16, device_map="auto"
+        args.base_model,
+        revision=args.base_revision,
+        dtype=torch.bfloat16,
+        device_map="auto",
     )
 
-    print(f"Attaching SFT adapter: {SFT_ADAPTER_DIR}")
-    model = PeftModel.from_pretrained(base, str(SFT_ADAPTER_DIR), adapter_name="sft")
+    print(
+        f"Attaching SFT adapter: {args.sft_adapter} "
+        f"subfolder={args.sft_adapter_subfolder} "
+        f"revision={args.sft_adapter_revision}"
+    )
+    adapter_kwargs = {}
+    if args.sft_adapter_subfolder:
+        adapter_kwargs["subfolder"] = args.sft_adapter_subfolder
+    if args.sft_adapter_revision:
+        adapter_kwargs["revision"] = args.sft_adapter_revision
+    model = PeftModel.from_pretrained(
+        base, args.sft_adapter, adapter_name="sft", **adapter_kwargs
+    )
 
     candidates = ["sft"]
     if not args.sft_only:
@@ -228,6 +264,7 @@ def main() -> None:
             rows.append(
                 {
                     "id": ex["id"],
+                    "category": args.category,
                     "model_name": cand,
                     "output": gen,
                     "parsed_name": parsed.get("name") if isinstance(parsed, dict) else None,
@@ -252,7 +289,7 @@ def main() -> None:
     print(f"\nWrote {gen_path}")
 
     n = len(built_prompts)
-    lines = ["# BFCL v4 simple_python — SFT vs DPO sweep", ""]
+    lines = [f"# BFCL v4 {args.category} — SFT vs DPO sweep", ""]
     lines += [
         "| candidate | overall | name_ok | args_ok | json_valid |",
         "|---|---|---|---|---|",

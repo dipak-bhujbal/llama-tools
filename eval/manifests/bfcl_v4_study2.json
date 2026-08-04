@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "benchmark": "Berkeley Function Calling Leaderboard v4",
+  "upstream_repository": "ShishirPatil/gorilla",
+  "upstream_release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
+  "default_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+  "data_revision_reason": "This later upstream data-fix revision exactly matches the answer key used by the 2026-07-20 study-1 run. The original BFCL v4 release commit differs at simple_python_363.",
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://github.com/ShishirPatil/gorilla/blob/9d8416a96d1d69975493f1b6d60ff07d12a1726a/LICENSE"
+  },
+  "files": [
+    {
+      "category": "simple_python",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "356a0db61e54eb1d92d8e10d014463cf2eb513cc",
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
+    },
+    {
+      "category": "simple_python",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+      "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
+    },
+    {
+      "category": "multiple",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_multiple.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_multiple.json",
+      "git_blob_sha1": "83643fa853e7a29a50e7303b0279284c37dd63c8",
+      "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+      "row_count": 200,
+      "unique_id_count": 200,
+      "sorted_id_sha256": "ce186ec8ff77e1e97325d7243bbc66b175185bcf473f05b752f969fe8d3c5241"
+    },
+    {
+      "category": "multiple",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_multiple.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_multiple.json",
+      "git_blob_sha1": "1f2f1fbfd9b7c8859ef5a92d6c18b0a6b2bc2663",
+      "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047",
+      "row_count": 200,
+      "unique_id_count": 200,
+      "sorted_id_sha256": "ce186ec8ff77e1e97325d7243bbc66b175185bcf473f05b752f969fe8d3c5241"
+    },
+    {
+      "category": "irrelevance",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_irrelevance.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_irrelevance.json",
+      "git_blob_sha1": "0077629949f2d52734cef2f110b0d040d8c47554",
+      "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6",
+      "row_count": 240,
+      "unique_id_count": 240,
+      "sorted_id_sha256": "6ba30826a466875e1ae6502537e1425886c8777f9269f1d8e04410b1506fe1e3"
+    },
+    {
+      "category": "live_simple",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_simple.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_live_simple.json",
+      "git_blob_sha1": "e8f4b8d33c07753affc77bfc4a646f94109de5af",
+      "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4",
+      "row_count": 258,
+      "unique_id_count": 258,
+      "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    },
+    {
+      "category": "live_simple",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_simple.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_live_simple.json",
+      "git_blob_sha1": "2c4778cee08e5ce7b236861de9a927d3ea7cde1f",
+      "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce",
+      "row_count": 258,
+      "unique_id_count": 258,
+      "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    }
+  ]
+}
