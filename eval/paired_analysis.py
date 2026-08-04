@@ -49,6 +49,25 @@ def load_outcomes(path: Path, field: str = "overall_ok") -> dict:
     return by_candidate
 
 
+def holm_adjust(p_values: list) -> list:
+    """Holm step-down adjusted p-values, in the input order.
+
+    Testing several candidates against one reference is a family. Reporting the
+    smallest raw p-value as significant without correcting for how many
+    contrasts were run inflates the familywise error rate — which is exactly
+    how a marginal result gets over-claimed.
+    """
+    indexed = sorted(range(len(p_values)), key=lambda i: p_values[i])
+    m = len(p_values)
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, idx in enumerate(indexed):
+        value = min(1.0, (m - rank) * p_values[idx])
+        running = max(running, value)  # enforce monotonicity
+        adjusted[idx] = running
+    return adjusted
+
+
 def compare(by_candidate: dict, reference: str) -> list:
     """Paired comparison of every candidate against `reference`."""
     if reference not in by_candidate:
@@ -84,6 +103,11 @@ def compare(by_candidate: dict, reference: str) -> list:
                 "p_exact_mcnemar": exact_mcnemar_p(b, c),
             }
         )
+    for row, adjusted in zip(
+        results, holm_adjust([r["p_exact_mcnemar"] for r in results]), strict=True
+    ):
+        row["p_holm_adjusted"] = adjusted
+        row["family_size"] = len(results)
     return results
 
 
@@ -102,20 +126,27 @@ def main() -> None:
 
     header = (
         f"{'candidate':16s} {'marg':>6s} {'ref-only':>9s} "
-        f"{'cand-only':>10s} {'p':>9s}  verdict"
+        f"{'cand-only':>10s} {'p_raw':>8s} {'p_holm':>8s}  verdict"
     )
     print(header)
     print("-" * len(header))
     for r in results:
+        # The verdict keys off the ADJUSTED p-value. Several candidates are
+        # being compared against one reference, so the raw p-value of the
+        # best-looking contrast is not the familywise error rate.
         verdict = (
-            "differs" if r["p_exact_mcnemar"] < args.alpha
+            "differs" if r["p_holm_adjusted"] < args.alpha
             else "not distinguishable"
         )
         print(
             f"{r['candidate']:16s} {r['marginal_delta']:+6d} "
             f"{r['reference_only_correct']:9d} {r['candidate_only_correct']:10d} "
-            f"{r['p_exact_mcnemar']:9.4f}  {verdict}"
+            f"{r['p_exact_mcnemar']:8.4f} {r['p_holm_adjusted']:8.4f}  {verdict}"
         )
+    print(
+        f"\nfamily size = {len(results)} contrasts against '{args.reference}'; "
+        f"verdicts use Holm-adjusted p at alpha={args.alpha}."
+    )
 
     if args.out:
         args.out.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-20
-**Decision:** Do not merge any DPO v2 checkpoint. The Week 4 SFT model (`centuriandip/llama-3.1-8b-tools-sft`) remains the shipped model. DPO v2 is closed as a documented negative result: on-policy hard-pair DPO trained cleanly on preference metrics but monotonically degraded held-out tool-use *and* general capability (MMLU). The `centuriandip/llama-3.1-8b-tools` repo (planned SFT+DPO) stays unpublished. The project ships SFT.
+**Decision:** Do not merge any DPO v2 checkpoint. The Week 4 SFT model (`centuriandip/llama-3.1-8b-tools-sft`) remains the shipped model. DPO v2 is closed as a documented negative result: on-policy hard-pair DPO trained cleanly on preference metrics but produced **no improvement** on held-out tool-use or general capability (MMLU), with point estimates trending against it. (See the statistical correction in Stage 4 below: under a paired test with multiplicity correction, no individual checkpoint contrast is significant, so this ADR does not claim measured degradation — it claims a failure to improve.) The `centuriandip/llama-3.1-8b-tools` repo (planned SFT+DPO) stays unpublished. The project ships SFT.
 
 ## Context
 
@@ -33,6 +33,20 @@ By every training-time signal, DPO v2 fixed the ADR-006 failure mode. The v2 hyp
 | dpo-150 | 359/400 (89.75%) | 400/400 | 359/400 | 400/400 | **−10** |
 
 All candidates: perfect `name_ok` (function selection) and `json_valid` (structural output). Every failure is an `args_ok` failure. **DPO v2 monotonically degrades argument correctness with training steps.** Absolute single-checkpoint deltas are near the 95% CI noise band (±~2.7% on n=400), but the monotonic trend across three checkpoints is inconsistent with random noise and consistent with a small real effect.
+
+> **Statistical correction (2026-08-04).** The paragraph above compares *marginal* accuracies. Every candidate was scored on the same 400 items, so the correct test is paired. Re-analysed with exact two-sided McNemar on the recovered per-item rows (`eval/results/study1_bfcl_simple_generations.jsonl`, SHA-256-verified against the published evidence dataset; reproduce with `eval/paired_analysis.py`):
+>
+> | contrast | marginal | sft-only correct | ckpt-only correct | p (raw) | p (Holm, family=3) |
+> |---|---|---|---|---|---|
+> | sft vs dpo-50 | −5 | 8 | 3 | 0.2266 | 0.2920 |
+> | sft vs dpo-100 | −6 | 9 | 3 | 0.1460 | 0.2920 |
+> | sft vs dpo-150 | −10 | 13 | 3 | 0.0213 | **0.0638** |
+>
+> **No contrast is statistically significant** once corrected for the three comparisons actually made. The marginal counts are genuinely monotonic (369 > 364 > 363 > 359) and that description stands, but the sentence "monotonically degrades" must not be read as three measured regressions — it is a consistent *direction* across three individually indistinguishable contrasts.
+>
+> **The decision is unchanged.** Not shipping DPO v2 never required proving degradation; it required failing to demonstrate improvement, and no checkpoint improved on any endpoint. The honest headline is *"on-policy hard negatives did not improve held-out tool-use, and the point estimates trend against it"* — not *"DPO v2 degraded the model."*
+>
+> An earlier version of this correction claimed dpo-150 differed significantly on its raw p-value of 0.0213. That was the same overclaim one level down: three contrasts were tested, so the raw p-value of the most extreme one is not the familywise error rate.
 
 ### MMLU (14,042 items, 5-shot, next-token log-prob argmax over ' A'/' B'/' C'/' D')
 

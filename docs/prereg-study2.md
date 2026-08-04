@@ -136,8 +136,115 @@ mischaracterised as underpowered by accident.
 ## Amendments
 
 Any change to a `[FROZEN]` section must be recorded here with date, reason, and the commit
-that made it — before the affected run starts.
+that made it — before the affected run starts. **Frozen text is never edited in place.** The
+freeze derives its entire value from the original being recoverable, so an amendment quotes
+the superseded language verbatim and supersedes it by reference.
 
-| Date | Section | Change | Reason | Commit |
+| # | Date | Section | Change | Authorized by |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
+
+---
+
+### Amendment 1 — endpoint locked a priori (2026-08-04)
+
+**Status of data at time of adoption: no study-2 model output, evaluation result, or
+probe score had been observed. No model has been run. The `multiple` baseline is
+unmeasured as of this amendment.**
+
+**Superseded text (§0.3, quoted verbatim, retained above unaltered):**
+
+> **`multiple` qualifies as study-2 co-primary endpoint if and only if shipped-SFT accuracy
+> on `multiple` is ≤ 170/200 (85.0%).**
+>
+> - If it qualifies: `multiple` becomes co-primary; `simple_python` becomes the
+>   capability-retention guardrail.
+> - **If it does not qualify: STOP.** Return to the owner for a new design decision. There is
+>   **no fallback category and no second probe** — searching further categories after seeing a
+>   score is outcome-driven selection and is prohibited.
+
+**Replaced by A1.1 – A1.6 below.**
+
+#### A1.1 `multiple` is the co-primary endpoint, unconditionally
+
+Locked before any inference. The score does not select it; the **mechanism** does.
+
+`simple_python` presents **exactly one** candidate function per item (`len(function) == 1`
+for all 400 pinned items). DPO optimises *preference ranking between alternatives*; where
+only one alternative is offered there is nothing to rank, so its signal is redundant by
+construction. `multiple` presents **2–4** candidates with one correct choice
+(`len(function)`: 79 items with 2, 85 with 3, 36 with 4) while expecting exactly one call —
+identical output shape, one added demand.
+
+This is the same claim ADR-008 reached from the other direction. `multiple` is therefore
+not "the category with headroom"; it is the only pinned category where the causal mechanism
+under test can operate at all.
+
+**Why this is not a forking path.** `len(function)` is a **structural property of the
+evaluation inputs**, fixed in files pinned by SHA-256 and git blob hash in
+`eval/manifests/bfcl_v4_study2.json` before any model was run, and **independent of every
+model output**. Conditioning on design facts is not conditioning on outcomes. A reader can
+verify the choice could not have been outcome-dependent by counting `function` entries in
+the pinned file — no model, no scores, no access to our results required.
+
+#### A1.2 The headroom score is descriptive, never a selector
+
+The shipped-SFT `multiple` score is still measured before Phase 2 freezes, and reported
+whatever it shows. It **feeds the MDE calculation in A1.3**; it decides nothing.
+
+`SFT > 170/200` is retained **only** as a *stop-and-consult* gate: it pauses for owner
+review before further spend. It may **never** trigger a switch to a different endpoint.
+There is no fallback category.
+
+#### A1.3 Minimum detectable effect — pre-specified with discordance sensitivity
+
+Paired power depends on the **discordant** count, not on marginal headroom alone, so a
+single headroom-derived scalar would be misleading. Pre-computed grid (exact two-sided
+McNemar, n = 200, α = 0.05, power ≥ 0.80):
+
+| discordance ψ | discordant pairs | min detectable OR | implied split |
+|---|---|---|---|
+| 0.05 | 10 | 11.05 | 9.2 vs 0.8 |
+| 0.10 | 20 | 4.00 | 16.0 vs 4.0 |
+| 0.15 | 30 | 3.00 | 22.5 vs 7.5 |
+| 0.20 | 40 | 2.60 | 28.9 vs 11.1 |
+| 0.30 | 60 | 2.25 | 41.5 vs 18.5 |
+
+The observed discordance is reported alongside the result, and the row it lands in states
+what the study could and could not have detected — determined in advance, so a null cannot
+be retrospectively excused as underpowered.
+
+#### A1.4 Inference method, fixed in advance
+
+- **Test:** exact two-sided McNemar on discordant pairs (exact, not chi-square — discordant
+  counts here are small enough that the approximation is unreliable).
+- **Interval:** **Tango's score confidence interval** for the paired difference of
+  proportions, 95%, reported **regardless of direction or significance**.
+- **Multiplicity:** any family of more than one confirmatory contrast is Holm-corrected, and
+  both raw and adjusted p-values are reported. A contrast not pre-registered as the single
+  primary comparison does not get to be reported as significant on its raw p-value.
+
+#### A1.5 Secondary stratified analysis — pre-specified
+
+Structural subset `len(function) in {3, 4}` of the pinned `multiple` items, where ranking
+pressure is highest.
+
+- **n = 121** (85 + 36)
+- stratum id-set SHA-256: `146835ba7ff77a50e155d99f17e033a1c27e0deacc03bb00b207106fe04fcdd4`
+- parent id-set SHA-256: `ce186ec8ff77e1e97325d7243bbc66b175185bcf473f05b752f969fe8d3c5241`, which
+  matches the `sorted_id_sha256` already recorded for `multiple` in
+  `eval/manifests/bfcl_v4_study2.json` — that existing pin is cited, not duplicated.
+
+Both counts and both digests are re-verified from the pinned file at analysis time; a
+mismatch is a stop condition.
+
+#### A1.6 `simple_python` is the pre-registered retention secondary endpoint
+
+Question: does DPO tuned on `multiple` degrade the already-ceilinged category? Reported with
+the same paired method. A retention loss is a reportable result, not a reason to reweight
+the primary.
+
+**Net effect:** the design is strengthened, not loosened. The endpoint becomes
+theory-driven rather than headroom-driven, and the possible "no detectable difference"
+outcome becomes a graded result — an MDE, an interval, and a stratified contrast — rather
+than a dead end.
