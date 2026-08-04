@@ -188,7 +188,13 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "STEP 5 — virtualenv + exact probe dependency spec"
-run python3 -m venv llama-tools/.venv
+# --system-site-packages is load-bearing, not incidental. requirements-probe.txt
+# deliberately omits torch so the template's CUDA build is used rather than
+# overwritten -- but a plain `python3 -m venv` is ISOLATED, so that torch would
+# not be importable and Step 6 would fail on every normal template. This flag is
+# what makes "inherit the image's torch" actually true instead of merely
+# intended.
+run python3 -m venv --system-site-packages llama-tools/.venv
 run llama-tools/.venv/bin/pip install -q --upgrade pip
 # torch is intentionally NOT installed: it comes from the template's CUDA build.
 run llama-tools/.venv/bin/pip install -q -r llama-tools/requirements-probe.txt
