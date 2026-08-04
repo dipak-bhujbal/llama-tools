@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -48,6 +49,21 @@ def load_jsonl(path: Path):
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def build_candidate_names(include_base: bool, sft_only: bool, checkpoints) -> list:
+    """Ordered candidate names for a sweep.
+
+    "base" is not an adapter: it denotes the unmodified base model, generated
+    with adapters disabled. It must therefore never be passed to set_adapter().
+    "sft" is always scored — it is the study-1 shipped baseline every other
+    candidate is compared against.
+    """
+    names = ["base"] if include_base else []
+    names.append("sft")
+    if not sft_only:
+        names.extend(f"dpo-{step}" for step in (checkpoints or []))
+    return names
 
 
 def build_prompt(tokenizer, question, functions) -> str:
@@ -173,6 +189,9 @@ def main() -> None:
     parser.add_argument("--sft-adapter", default=str(SFT_ADAPTER_DIR))
     parser.add_argument("--sft-adapter-subfolder", default=None)
     parser.add_argument("--sft-adapter-revision", default=None)
+    parser.add_argument("--include-base", action="store_true",
+                        help="Also score the unmodified base model (adapters disabled). "
+                             "Required for base-vs-SFT lift numbers.")
     parser.add_argument("--sft-only", action="store_true",
                         help="Skip DPO checkpoints; baseline only")
     args = parser.parse_args()
@@ -239,7 +258,13 @@ def main() -> None:
         base, args.sft_adapter, adapter_name="sft", **adapter_kwargs
     )
 
-    candidates = ["sft"]
+    # "base" is the unmodified base model: same weights, adapters disabled at
+    # generation time. It is not an adapter, so it is never passed to set_adapter().
+    candidates = build_candidate_names(
+        include_base=args.include_base,
+        sft_only=args.sft_only,
+        checkpoints=args.checkpoints,
+    )
     if not args.sft_only:
         for step in args.checkpoints:
             ckpt_dir = args.checkpoint_root / f"checkpoint-{step}"
@@ -248,39 +273,44 @@ def main() -> None:
             name = f"dpo-{step}"
             print(f"Loading adapter {name} from {ckpt_dir}")
             model.load_adapter(str(ckpt_dir), adapter_name=name)
-            candidates.append(name)
 
     model.eval()
 
     rows = []
     for cand in candidates:
-        model.set_adapter(cand)
+        if cand == "base":
+            adapter_ctx = model.disable_adapter()
+        else:
+            model.set_adapter(cand)
+            adapter_ctx = contextlib.nullcontext()
         print(f"\n=== Generating with {cand} ===")
-        for i, ex in enumerate(built_prompts):
-            gen = generate(model, tokenizer, ex["prompt"], args.max_new_tokens)
-            parsed = extract_json(gen)
-            gt_entry = gt_by_id[ex["id"]]
-            name_ok, args_ok, overall_ok, reason = score(parsed, gt_entry)
-            rows.append(
-                {
-                    "id": ex["id"],
-                    "category": args.category,
-                    "model_name": cand,
-                    "output": gen,
-                    "parsed_name": parsed.get("name") if isinstance(parsed, dict) else None,
-                    "parsed_args": parsed.get("arguments") if isinstance(parsed, dict) else None,
-                    "name_ok": name_ok,
-                    "args_ok": args_ok,
-                    "overall_ok": overall_ok,
-                    "failure_reason": reason,
-                    "json_valid": parsed is not None,
-                }
-            )
-            if (i + 1) % 25 == 0 or (i + 1) == len(built_prompts):
-                print(
-                    f"  [{i + 1}/{len(built_prompts)}] "
-                    f"overall={rows[-1]['overall_ok']} reason={reason or 'ok'}"
+        with adapter_ctx:
+            for i, ex in enumerate(built_prompts):
+                gen = generate(model, tokenizer, ex["prompt"], args.max_new_tokens)
+                parsed = extract_json(gen)
+                is_obj = isinstance(parsed, dict)
+                gt_entry = gt_by_id[ex["id"]]
+                name_ok, args_ok, overall_ok, reason = score(parsed, gt_entry)
+                rows.append(
+                    {
+                        "id": ex["id"],
+                        "category": args.category,
+                        "model_name": cand,
+                        "output": gen,
+                        "parsed_name": parsed.get("name") if is_obj else None,
+                        "parsed_args": parsed.get("arguments") if is_obj else None,
+                        "name_ok": name_ok,
+                        "args_ok": args_ok,
+                        "overall_ok": overall_ok,
+                        "failure_reason": reason,
+                        "json_valid": parsed is not None,
+                    }
                 )
+                if (i + 1) % 25 == 0 or (i + 1) == len(built_prompts):
+                    print(
+                        f"  [{i + 1}/{len(built_prompts)}] "
+                        f"overall={rows[-1]['overall_ok']} reason={reason or 'ok'}"
+                    )
 
     gen_path = args.out_dir / "generations.jsonl"
     with gen_path.open("w") as f:
@@ -309,7 +339,7 @@ def main() -> None:
     report_path.write_text("\n".join(lines))
     print(f"Wrote {report_path}")
 
-    print("\n=== BFCL simple_python summary ===")
+    print(f"\n=== BFCL {args.category} summary ===")
     for line in lines[2 : 4 + len(candidates)]:
         print(line)
 
