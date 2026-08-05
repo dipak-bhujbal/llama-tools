@@ -51,9 +51,16 @@ Three properties make that chain trustworthy rather than merely tidy:
 
 Read-time verification then checks the chain end to end: sealed segments must
 hash to what their successor recorded, headers must sit first in their segment
-and name the right predecessor, and `seq` must be strictly increasing and
-unique across the whole chain. Any violation raises `LedgerIntegrityError`
-rather than returning a resumable-looking state the ledger cannot vouch for.
+and name the right predecessor, `seq` must be a positive integer that strictly
+increases across the whole chain, and every tombstone must name a real,
+earlier, still-active record for the same prompt. Any violation raises
+`LedgerIntegrityError` rather than returning a resumable-looking state the
+ledger cannot vouch for.
+
+The control records that carry those guarantees are the ledger's own: callers
+append work, and only the ledger writes `redo` and `segment_open`. `append()`
+refuses a caller-supplied control type, so no mining code can retire a record
+from active work or forge a seal over history through the ordinary API.
 
 `seq`, prompt dedup, and tombstones all span the whole chain, so rotation is
 invisible to callers apart from `segment_paths()` and `summary()["segments"]`.
@@ -235,23 +242,93 @@ class Ledger:
             )
 
     @staticmethod
-    def _verify_seqs(records: list[dict[str, Any]]) -> None:
-        """`seq` must be strictly increasing and unique across the whole chain.
+    def _positive_int(value: Any) -> bool:
+        """True for a genuine positive integer (JSON `true` is not one)."""
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    @classmethod
+    def _verify_seqs(cls, records: list[dict[str, Any]]) -> None:
+        """`seq` must be a positive integer, strictly increasing across the chain.
 
         Gaps are fine — a record lost to a crash consumed no durable seq, and a
         sealed fragment may have. Repeats and reversals are not: tombstones
         identify their target by `seq`, so a duplicate makes rollback ambiguous.
+
+        The type check comes before the comparison on purpose. Disk data is
+        untrusted input, and `"3" <= 2` raises `TypeError` — an incidental
+        crash that says nothing about the ledger. Malformed data must fail as
+        `LedgerIntegrityError` like every other chain violation.
         """
         previous: int | None = None
         for rec in records:
             if "seq" not in rec:
                 raise LedgerIntegrityError(f"ledger record is missing 'seq': {rec!r}")
             seq = rec["seq"]
+            if not cls._positive_int(seq):
+                raise LedgerIntegrityError(
+                    f"ledger record has a non-positive-integer 'seq' {seq!r}: {rec!r}"
+                )
             if previous is not None and seq <= previous:
                 raise LedgerIntegrityError(
                     f"ledger seq is not strictly increasing: {seq} follows {previous}"
                 )
             previous = seq
+
+    @classmethod
+    def _verify_controls(cls, records: list[dict[str, Any]]) -> None:
+        """Check every tombstone against the record it claims to supersede.
+
+        A `redo` is the only way a durable record leaves active work, so an
+        unchecked one is a delete in disguise. Read verification therefore
+        proves each tombstone refers to a real, earlier, still-active unit of
+        work belonging to the same prompt. Anything else — a forged target, a
+        target that is itself a control record, a second tombstone for an
+        already-superseded record — means the chain no longer describes what
+        was actually mined, and the ledger fails closed.
+        """
+        work_by_seq: dict[int, dict[str, Any]] = {}
+        superseded: dict[int, dict[str, Any]] = {}
+
+        for rec in records:
+            rec_type = rec.get("type")
+            if rec_type not in CONTROL_TYPES:
+                work_by_seq[rec["seq"]] = rec
+                continue
+            if rec_type != "redo":
+                continue
+
+            target_seq = rec.get("supersedes_seq")
+            if not cls._positive_int(target_seq):
+                raise LedgerIntegrityError(
+                    f"redo record has a non-positive-integer 'supersedes_seq' "
+                    f"{target_seq!r}: {rec!r}"
+                )
+            if target_seq >= rec["seq"]:
+                raise LedgerIntegrityError(
+                    f"redo at seq {rec['seq']} supersedes seq {target_seq}, which is "
+                    f"not an earlier record"
+                )
+            target = work_by_seq.get(target_seq)
+            if target is None:
+                raise LedgerIntegrityError(
+                    f"redo at seq {rec['seq']} supersedes seq {target_seq}, which is "
+                    f"not an earlier work record in this chain"
+                )
+            if "prompt_id" not in rec:
+                raise LedgerIntegrityError(
+                    f"redo record is missing required field 'prompt_id': {rec!r}"
+                )
+            if rec["prompt_id"] != target["prompt_id"]:
+                raise LedgerIntegrityError(
+                    f"redo at seq {rec['seq']} names prompt_id {rec['prompt_id']!r} but "
+                    f"seq {target_seq} recorded {target['prompt_id']!r}"
+                )
+            if target_seq in superseded:
+                raise LedgerIntegrityError(
+                    f"seq {target_seq} is superseded twice: by the redo at seq "
+                    f"{superseded[target_seq]['seq']} and again at seq {rec['seq']}"
+                )
+            superseded[target_seq] = rec
 
     # ---------------------------------------------------------------- read --
 
@@ -268,6 +345,18 @@ class Ledger:
         segments = self.segment_paths()
         parsed = [self._parse_segment(segment) for segment in segments]
 
+        # The base segment opens the chain, so it seals nothing and must carry
+        # no header. A `segment_open` here would claim a predecessor that
+        # cannot exist, and the per-segment check below never looks at it.
+        base_headers = [
+            i for i, rec in enumerate(parsed[0][0]) if rec.get("type") == "segment_open"
+        ]
+        if base_headers:
+            raise LedgerIntegrityError(
+                f"base segment {segments[0].name} has a segment_open header at "
+                f"position(s) {base_headers}; only rotated segments have headers"
+            )
+
         for index in range(1, len(segments)):
             self._verify_segment(
                 index, segments[index], parsed[index][0], segments[index - 1]
@@ -280,6 +369,7 @@ class Ledger:
             truncated_tail = truncated_tail or segment_truncated
 
         self._verify_seqs(records)
+        self._verify_controls(records)
         return records, truncated_tail
 
     def records(self) -> list[dict[str, Any]]:
@@ -407,13 +497,26 @@ class Ledger:
         return out
 
     def append(self, record: dict[str, Any]) -> None:
-        """Append one record, assigning it the next monotonic `seq`.
+        """Append one record of completed work, assigning the next monotonic `seq`.
 
-        Raises `ValueError` if `prompt_id` is missing, or if `prompt_id` is
-        already active (appended and not since rolled back via
-        `redo_last`) — this is the dedup guard that keeps a prompt from
-        being double-counted across resumed runs.
+        Raises `ValueError` if `prompt_id` is missing, if `prompt_id` is
+        already active (appended and not since rolled back via `redo_last`) —
+        this is the dedup guard that keeps a prompt from being double-counted
+        across resumed runs — or if the caller tries to write a control record.
+
+        Control records are the ledger's own bookkeeping, not units of work.
+        Letting a caller write one through the public API would let ordinary
+        mining code retire a record from active work (`redo`) or fabricate a
+        seal over history it did not write (`segment_open`) — an edit to the
+        evidence, dressed as an append. Only `redo_last` and `_seal_and_rotate`
+        may create them, and both go through `_commit` directly.
         """
+        record_type = record.get("type")
+        if record_type in CONTROL_TYPES:
+            raise ValueError(
+                f"type {record_type!r} is reserved for ledger control records and "
+                f"cannot be appended by a caller"
+            )
         if "prompt_id" not in record:
             raise ValueError("record is missing required field 'prompt_id'")
 

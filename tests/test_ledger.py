@@ -522,3 +522,191 @@ def test_repeated_rotations_stay_consistent(tmp_path: Path) -> None:
     assert ledger.summary()["segments"] == 4
     assert ledger.redo_last(4) == 4
     assert ledger.processed_ids() == set()
+
+
+# --------------------------------------------------------------------------
+# Control-record integrity (review cycle 2). The ledger's evidentiary claim is
+# that nothing leaves the active record except through a tombstone the ledger
+# itself wrote. These cover both halves of that: the public API refuses to
+# write control records, and read verification refuses to believe forged ones
+# that reached the file some other way.
+# --------------------------------------------------------------------------
+
+
+def _append_raw(path: Path, record: dict) -> None:
+    """Write a record straight to disk, bypassing every ledger guard."""
+    path.write_bytes(path.read_bytes() + json.dumps(record, sort_keys=True).encode() + b"\n")
+
+
+def test_append_refuses_a_caller_supplied_redo(tmp_path: Path) -> None:
+    """A work record cannot retire another one by calling itself a tombstone."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append({"prompt_id": "p1"})
+
+    with pytest.raises(ValueError, match="reserved for ledger control records"):
+        ledger.append({"prompt_id": "p1", "type": "redo", "supersedes_seq": 1})
+
+    assert ledger.processed_ids() == {"p1"}
+    assert ledger.summary()["tombstones"] == 0
+
+
+def test_append_refuses_a_caller_supplied_segment_open(tmp_path: Path) -> None:
+    """Nor can it fabricate a seal over history it did not write."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append({"prompt_id": "p1"})
+
+    with pytest.raises(ValueError, match="reserved for ledger control records"):
+        ledger.append({"prompt_id": "p2", "type": "segment_open", "segment": 1})
+
+    assert ledger.processed_ids() == {"p1"}
+    assert ledger.summary()["segments"] == 1
+
+
+def test_forged_redo_targeting_a_nonexistent_seq_fails_closed(tmp_path: Path) -> None:
+    """Seq gaps are legal, so an earlier-but-absent target must still be caught."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _append_raw(path, {"prompt_id": "p2", "seq": 5})
+    _append_raw(path, {"type": "redo", "prompt_id": "p1", "supersedes_seq": 3, "seq": 6})
+
+    with pytest.raises(LedgerIntegrityError, match="not an earlier work record"):
+        ledger.processed_ids()
+
+
+def test_forged_redo_naming_the_wrong_prompt_fails_closed(tmp_path: Path) -> None:
+    """A tombstone must match the record it claims to be correcting."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    ledger.append({"prompt_id": "p2"})
+    _append_raw(path, {"type": "redo", "prompt_id": "p2", "supersedes_seq": 1, "seq": 3})
+
+    with pytest.raises(LedgerIntegrityError, match="but seq 1 recorded 'p1'"):
+        ledger.processed_ids()
+
+
+def test_redo_targeting_a_control_record_fails_closed(tmp_path: Path) -> None:
+    """Superseding a segment header would retire a seal, not a unit of work."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+
+    seg1 = ledger.segment_paths()[1]
+    header_seq = json.loads(seg1.read_text().splitlines()[0])["seq"]
+    _append_raw(
+        seg1,
+        {"type": "redo", "prompt_id": "p1", "supersedes_seq": header_seq, "seq": 99},
+    )
+
+    with pytest.raises(LedgerIntegrityError, match="not an earlier work record"):
+        ledger.processed_ids()
+
+
+def test_duplicate_redo_for_one_record_fails_closed(tmp_path: Path) -> None:
+    """Two tombstones for one record make the rollback count ambiguous."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    assert ledger.redo_last(1) == 1
+    _append_raw(path, {"type": "redo", "prompt_id": "p1", "supersedes_seq": 1, "seq": 3})
+
+    with pytest.raises(LedgerIntegrityError, match="superseded twice"):
+        ledger.processed_ids()
+
+
+def test_redo_pointing_forward_fails_closed(tmp_path: Path) -> None:
+    """A tombstone corrects the past; it cannot pre-retire a later record."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _append_raw(path, {"type": "redo", "prompt_id": "p1", "supersedes_seq": 5, "seq": 2})
+
+    with pytest.raises(LedgerIntegrityError, match="not an earlier record"):
+        ledger.processed_ids()
+
+
+def test_forged_segment_open_in_the_base_segment_fails_closed(tmp_path: Path) -> None:
+    """The base segment seals nothing, so a header there names no real predecessor."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _append_raw(
+        path,
+        {
+            "type": "segment_open",
+            "segment": 0,
+            "prev_segment": "nothing.jsonl",
+            "prev_sha256": "0" * 64,
+            "prev_bytes": 0,
+            "seq": 2,
+        },
+    )
+
+    with pytest.raises(LedgerIntegrityError, match="only rotated segments have headers"):
+        ledger.processed_ids()
+
+
+def test_non_integer_seq_raises_integrity_error_not_type_error(tmp_path: Path) -> None:
+    """Malformed disk data is a chain violation, not an incidental TypeError."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _append_raw(path, {"prompt_id": "p2", "seq": "2"})
+
+    with pytest.raises(LedgerIntegrityError, match="non-positive-integer 'seq'"):
+        ledger.processed_ids()
+
+
+def test_non_integer_supersedes_seq_fails_closed(tmp_path: Path) -> None:
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _append_raw(path, {"type": "redo", "prompt_id": "p1", "supersedes_seq": None, "seq": 2})
+
+    with pytest.raises(LedgerIntegrityError, match="non-positive-integer 'supersedes_seq'"):
+        ledger.processed_ids()
+
+
+def test_boolean_seq_is_not_accepted_as_an_integer(tmp_path: Path) -> None:
+    """JSON `true` is an int in Python; it is not a sequence number."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    _append_raw(path, {"prompt_id": "p1", "seq": True})
+
+    with pytest.raises(LedgerIntegrityError, match="non-positive-integer 'seq'"):
+        ledger.processed_ids()
+
+
+def test_legitimate_rollback_still_verifies_after_the_control_checks(tmp_path: Path) -> None:
+    """The guards must not reject the ledger's own tombstones across a rotation."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+    ledger.append({"prompt_id": "p3"})
+
+    assert ledger.redo_last(2) == 2
+    assert ledger.processed_ids() == {"p1"}
+    ledger.append({"prompt_id": "p3"})
+    assert ledger.processed_ids() == {"p1", "p3"}
+    assert ledger.summary()["tombstones"] == 2
