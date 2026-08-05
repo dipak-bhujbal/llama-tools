@@ -9,7 +9,7 @@
 ## 0. Mission in one paragraph
 
 Study 1 shipped an SFT-tuned Llama-3.1-8B tool-calling model (92.25% BFCL
-simple_python on 399 held-out examples; MMLU 0.659 vs 0.683 base) and killed
+simple_python on 400 held-out examples; MMLU 0.659 vs 0.683 base) and killed
 two DPO variants against pre-registered abort criteria: training-time
 preference margins improved while held-out tool-use came in below SFT at every
 evaluated checkpoint.
@@ -42,7 +42,7 @@ and "DPO still doesn't help" are acceptable, publishable endpoints.
    reported. The measured public record today is: SFT 92.25% / MMLU -2.4 pts
    / DPO killed.
 4. **Eval sets are read-only.** Nothing may edit, regenerate, or filter the
-   held-out BFCL set (399 examples) or any eval split after it is frozen.
+   held-out BFCL set (400 examples) or any eval split after it is frozen.
    Decontamination removes items from TRAINING pools only.
 5. **Ledgers are the source of truth.** `mining_out/ledger.jsonl` and
    `trainer_state.json` files are append-only evidence. Never hand-edit.
@@ -65,7 +65,7 @@ and "DPO still doesn't help" are acceptable, publishable endpoints.
 |---|---|---|
 | SFT recipe | Llama-3.1-8B-Instruct + LoRA r64/alpha128 on q/k/v/o_proj, dropout 0.05, bf16, cosine LR + 3% warmup, TRL SFTTrainer | repo configs, wandb |
 | SFT smoke | ~450 train / 50 eval, ran 3 epochs (config said 1; caught via trainer_state), no overfit: eval_loss ~0.212 vs train ~0.166 | trainer_state.json |
-| Shipped SFT | **92.25% BFCL simple_python** (399 held-out); MMLU 0.659 vs base 0.683 (-2.4 pts, inside pre-set band) | eval artifacts |
+| Shipped SFT | **92.25% BFCL simple_python** (369/400 held-out); MMLU 0.659 vs base 0.683 (-2.4 pts, inside pre-set band) | eval artifacts |
 | DPO v1 smoke | 32 steps, batch 2, no eval set; rewards/accuracies hit 1.0 almost immediately (easy-negatives flag) | outputs/dpo-smoke |
 | DPO v2 | 622 steps, batch 2, peak LR 5e-06, ~1.2-1.3k pairs, eval every ~50 steps; margins grew past 9, logps/rejected drifted -28 to -135 unbounded | /workspace/keep/checkpoint-100..400+, logs |
 | Kill decision | Both DPO variants closed as documented negative results: held-out tool-use came in below SFT at every evaluated checkpoint while margins improved | ADR |
@@ -200,7 +200,7 @@ Pre-registration first, runs second.
     (+grad accum as VRAM allows), peak LR 5e-06 unless re-justified in the
     doc, fixed seed.
   - Callback eval: a BFCL subset (~100 items) drawn ONLY from a frozen dev
-    slice or categories NOT in the held-out 399 (document which), every
+    slice or categories NOT in the held-out 400 (document which), every
     ~50 steps.
   - KILL LINES per arm: (1) callback BFCL below SFT baseline -1.0 pt on two
     consecutive evals -> stop arm, mark killed; (2) eval logps/chosen falls
@@ -250,7 +250,7 @@ a parallel ablation arm later)
 
 ### PHASE 5 - Final evaluation protocol (~1-2 h, ~$1-3)
 
-- [A] 5.1 Frozen eval: the SAME 399 held-out BFCL simple_python examples as
+- [A] 5.1 Frozen eval: the SAME 400 held-out BFCL simple_python examples as
   study 1 (read-only). Evaluate: base model, shipped SFT, best-selected
   checkpoint per surviving arm (3A arms, 3B, KTO).
 - [A] 5.2 MMLU on the same protocol as study 1 for every checkpoint.
@@ -258,9 +258,9 @@ a parallel ablation arm later)
   never stated a numeric band, pre-register one BEFORE Phase 5 runs (the
   accepted study-1 result was -2.4 pts; do not retroactively invent a
   tighter band).
-- [A] 5.3 Every BFCL number reported WITH a 95% binomial CI. At n=399 and
+- [A] 5.3 Every BFCL number reported WITH a 95% binomial CI. At n=400 and
   p~0.9 the CI is roughly +/-3 pts; differences inside the CI must be
-  described as "not distinguishable at n=399", never ranked as wins.
+  described as "not distinguishable at n=400", never ranked as wins.
 - [A] 5.4 Also evaluate at least one harder BFCL category (parallel calls
   or irrelevance detection) where SFT is NOT at ceiling, labeled clearly as
   a secondary, exploratory endpoint.
@@ -386,7 +386,7 @@ Verified against committed configs and recovered artifacts:
 
 | §2.1 claim | verified |
 |---|---|
-| "92.25% ... (399 held-out)" | **n = 400**, not 399. `369/400 = 92.25%` exactly. Both pinned files hold 400 rows / 400 unique ids. "399" came from `wc -l` on a file with no trailing newline. |
+| "92.25% ... (399 held-out)" | **n = 400**, not 399. `369/400 = 92.25%` exactly. Both pinned files hold 400 rows / 400 unique ids. "399" came from `wc -l` on a file with no trailing newline. **Applied 2026-08-05:** every operative reference (§0, §1 rule 4, §2.1, §3 callback eval, §5.1, §5.3) now reads 400; the two remaining `399` strings are this row and the §D quotation, both of which cite the superseded wording deliberately. |
 | row labelled "DPO v2": 622 steps, eval every ~50, margins past 9, logps −28→−135 | These are **DPO v1** (`dpo_full.py`, `EVAL_STEPS=50`, stopped at 400/622). Real v2 was ~150 steps, `EVAL_STEPS=25`, 2,523 pairs. |
 | "~1.2–1.3k pairs" | Matches neither arm: v1 = 10,242, v2 = 2,523. |
 | "batch 2" | Per-device. Effective batch is **16** (`GRAD_ACCUM_STEPS = 8`) in all three scripts. |
@@ -395,7 +395,8 @@ Verified against committed configs and recovered artifacts:
 
 ## D. §4 eval sets were never frozen
 
-Phase 5.1 says "the SAME 399 held-out BFCL simple_python examples ... (read-only)".
+Phase 5.1 said "the SAME 399 held-out BFCL simple_python examples ... (read-only)"
+— quoted here as written at the time; the operative text now reads 400, per §C.
 Those files were `curl`ed from an unpinned upstream branch and **gitignored** —
 no commit, no hash, no pin. They were recoverable only because a copy happened to
 survive on the owner's laptop.

@@ -433,6 +433,56 @@ def key_internal_consistency(questions_rows: list[dict], key_rows: list[dict]) -
     return {"consistent": True, "items_checked": checked, "defect": None}
 
 
+# The criterion is owned here, not in the manifest, and versioned. The manifest
+# names an id and must reproduce this exact wording; a report cannot otherwise
+# advertise one rule while `apply_canonical_criterion` applies another -- which
+# is the whole failure this binding exists to prevent, since the artifact's
+# defence is that the stated rule is the applied rule. Changing either string
+# below requires a new id, and a test pins the pair together.
+CRITERION_ID = "pinned-and-preflight-valid/v1"
+CANONICAL_CRITERION = {
+    "criterion_id": CRITERION_ID,
+    "rule": (
+        "canonical = pinned AND valid; when two pinned keys disagree, the executable "
+        "answer-name preflight decides"
+    ),
+    "validity_check": (
+        "eval/bfcl_scoring.py:preflight_key_names — every name an answer key expects must "
+        "be among the tools that item actually presented to the model"
+    ),
+}
+
+
+def bind_criterion(declared: dict) -> dict:
+    """Hold the manifest's stated criterion to the one this module implements.
+
+    The manifest is where a human reads what the rule was, so the text lives
+    there too -- but text that is only read is text that can drift from the code
+    that acts on it. Every field the code owns must match byte-for-byte, and the
+    versioned id must be the current one, so "the rule was applied by machine"
+    stays a fact about this artifact rather than a claim inside it.
+    """
+    if not declared:
+        raise ComparisonIntegrityError(
+            "the manifest declares no `canonical_key_criterion`; this report is the "
+            "permanent record of the canonical-key adjudication and must not be written "
+            "without the rule that produced it"
+        )
+    declared_id = declared.get("criterion_id")
+    if declared_id != CRITERION_ID:
+        raise ComparisonIntegrityError(
+            f"the manifest declares criterion {declared_id!r}, but this code implements "
+            f"{CRITERION_ID!r}; the artifact must not record a rule that nothing here applies"
+        )
+    for field, owned in CANONICAL_CRITERION.items():
+        if declared.get(field) != owned:
+            raise ComparisonIntegrityError(
+                f"criterion {CRITERION_ID}: the manifest's {field!r} is not the text this "
+                f"code applies.\n  manifest: {declared.get(field)!r}\n  code:     {owned!r}"
+            )
+    return {**declared, **CANONICAL_CRITERION}
+
+
 def apply_canonical_criterion(consistency: dict) -> dict:
     """Which key does the rule select, given only the measured preflight results?
 
@@ -453,6 +503,7 @@ def apply_canonical_criterion(consistency: dict) -> dict:
     survivors = sorted(name for name, ok in valid.items() if ok)
     if len(survivors) == 1:
         return {
+            "criterion_id": CRITERION_ID,
             "selected": survivors[0],
             "decided": True,
             "validity": valid,
@@ -462,6 +513,7 @@ def apply_canonical_criterion(consistency: dict) -> dict:
             ),
         }
     return {
+        "criterion_id": CRITERION_ID,
         "selected": None,
         "decided": False,
         "validity": valid,
@@ -644,13 +696,7 @@ def build_report(
         ),
     }
 
-    criterion = inputs.get("_criterion")
-    if not criterion:
-        raise ComparisonIntegrityError(
-            "the manifest declares no `canonical_key_criterion`; this report is the "
-            "permanent record of the canonical-key adjudication and must not be written "
-            "without the rule that produced it"
-        )
+    criterion = bind_criterion(inputs.get("_criterion"))
     derived = apply_canonical_criterion(consistency)
 
     report = {
@@ -740,6 +786,22 @@ def check_report_invariants(report: dict) -> None:
 
     adjudication = report["adjudication"]
     derived = adjudication["derived_from_measurement"]
+    if adjudication.get("criterion_id") != CRITERION_ID:
+        raise ComparisonIntegrityError(
+            f"the report records criterion {adjudication.get('criterion_id')!r}, but this "
+            f"code implements {CRITERION_ID!r}"
+        )
+    if derived.get("criterion_id") != adjudication["criterion_id"]:
+        raise ComparisonIntegrityError(
+            f"the recorded criterion {adjudication['criterion_id']!r} is not the one that "
+            f"produced the selection ({derived.get('criterion_id')!r})"
+        )
+    for field, owned in CANONICAL_CRITERION.items():
+        if adjudication.get(field) != owned:
+            raise ComparisonIntegrityError(
+                f"the report's {field!r} is not the text this code applies; the artifact "
+                f"would advertise a rule the selection did not follow"
+            )
     if not derived["decided"]:
         raise ComparisonIntegrityError(
             f"the canonical-key criterion does not decide between the candidates "
@@ -812,6 +874,7 @@ def main() -> None:
     adjudication = report["adjudication"]
     derived = adjudication["derived_from_measurement"]
     print("canonical-key adjudication:")
+    print(f"  criterion  {adjudication['criterion_id']} (owned by this module, not the manifest)")
     print(f"  rule       {adjudication['rule']}")
     print(f"  applied    selects {derived['selected']} — {derived['reason']}")
     print(

@@ -167,7 +167,30 @@ def load_manifest(path: Path) -> dict[str, Any]:
         )
     if version != MANIFEST_SCHEMA_VERSION or not manifest.get("files"):
         raise VerificationError(f"unsupported or empty manifest: {path}")
+    _reject_duplicate_roles(manifest, path)
     return manifest
+
+
+def _reject_duplicate_roles(manifest: dict[str, Any], path: Path | str = "manifest") -> None:
+    """One (category, role) may name exactly one file.
+
+    Everything downstream — verification, the preflight, the comparison's input
+    resolution — keys files by (category, role) and would take the last one
+    written. Two answer keys for a category then means the first is pinned but
+    never checked: a defective key followed by a clean one verifies clean and
+    the standing preflight reports a pass it did not earn. Rejecting the
+    ambiguity here is the only place that covers every consumer at once.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    for spec in manifest["files"]:
+        key = (spec["category"], spec["role"])
+        if key in seen:
+            raise VerificationError(
+                f"{path}: {spec['category']}/{spec['role']} is pinned twice "
+                f"({seen[key]} and {spec['local_path']}); one (category, role) names one file, "
+                f"because every consumer resolves by that pair and would silently take one"
+            )
+        seen[key] = spec["local_path"]
 
 
 def _rows_by_id(payload: bytes, label: str) -> dict[str, dict]:
@@ -203,6 +226,10 @@ def preflight_manifest_keys(
             "manifest declares no `categories` block, so answer-key policy per category "
             "is unknown; refusing to guess which categories may legitimately lack a key"
         )
+    # Re-checked here rather than trusted from load_manifest: this is the
+    # function that makes the "every pinned answer key was checked" claim, so it
+    # must not be able to make it about a file list it never disambiguated.
+    _reject_duplicate_roles(manifest)
 
     keys_by_category: dict[str, dict[str, Any]] = {}
     comparison_only: list[dict[str, Any]] = []

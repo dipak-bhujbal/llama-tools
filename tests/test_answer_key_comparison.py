@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from eval.answer_key_comparison import (
+    CANONICAL_CRITERION,
     ComparisonIntegrityError,
     apply_canonical_criterion,
     build_report,
@@ -148,7 +149,9 @@ EXPOSURE = ("simple_python", "multiple")
 # The adjudication the manifest carries. Tests that care about it override a
 # field; every other test just needs the report to have one to record.
 CRITERION = {
-    "rule": "canonical = pinned AND valid; the preflight decides",
+    # The rule text is code-owned; a fixture that invented its own wording would
+    # be testing against a criterion the report refuses to accept.
+    **CANONICAL_CRITERION,
     "adjudicated_by": "owner",
     "adjudicated_on": "2026-08-05",
     "adjudication_ref": "test",
@@ -616,4 +619,91 @@ def test_the_criterion_cannot_decide_when_both_keys_are_valid(world) -> None:
     assert report["key_difference"]["differing_row_count"] == 1
     assert all(k["consistent"] for k in report["key_internal_consistency"].values())
     with pytest.raises(ComparisonIntegrityError, match="does not decide"):
+        check_report_invariants(report)
+
+
+# ------------------------------------ the criterion the code actually applies ----
+#
+# The artifact's whole defence is that the stated rule is the applied rule. Text
+# in the manifest that nothing enforces would let the report advertise
+# "canonical = whichever key scores higher" while the selector went on applying
+# the preflight -- and it would still read as principled.
+
+
+def test_the_criterion_id_and_its_text_are_versioned_together() -> None:
+    """Change the rule wording without minting a new id and this fails. The id
+    is the thing the manifest pins, so it has to mean one fixed text."""
+    assert CANONICAL_CRITERION["criterion_id"] == "pinned-and-preflight-valid/v1"
+    assert CANONICAL_CRITERION["rule"] == (
+        "canonical = pinned AND valid; when two pinned keys disagree, the executable "
+        "answer-name preflight decides"
+    )
+    assert "preflight_key_names" in CANONICAL_CRITERION["validity_check"]
+
+
+def test_the_applied_criterion_is_stamped_on_the_selection() -> None:
+    selection = apply_canonical_criterion(
+        {
+            "pinned_key": {"consistent": True, "items_checked": 400, "defect": None},
+            "release_key": {"consistent": False, "items_checked": 400, "defect": "..."},
+        }
+    )
+    assert selection["criterion_id"] == CANONICAL_CRITERION["criterion_id"]
+
+
+def test_a_manifest_stating_a_different_rule_cannot_build_the_report(world) -> None:
+    """Codex's reproduction: swap the rule text for a scoring rule and the old
+    code still built a clean artifact claiming the choice followed it."""
+    manifest_path, generations_path = world(
+        criterion={"rule": "canonical = whichever key has the higher score"}
+    )
+    with pytest.raises(ComparisonIntegrityError, match="is not the text this code applies"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_a_manifest_stating_a_different_validity_check_fails_closed(world) -> None:
+    manifest_path, generations_path = world(
+        criterion={"validity_check": "eyeballed it"}
+    )
+    with pytest.raises(ComparisonIntegrityError, match="is not the text this code applies"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_an_unknown_criterion_id_fails_closed(world) -> None:
+    manifest_path, generations_path = world(criterion={"criterion_id": "vibes/v9"})
+    with pytest.raises(ComparisonIntegrityError, match="this code implements"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_a_missing_criterion_id_fails_closed(world) -> None:
+    manifest_path, generations_path = world()
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["canonical_key_criterion"]["criterion_id"]
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    with pytest.raises(ComparisonIntegrityError, match="this code implements"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_the_report_records_the_criterion_id(world) -> None:
+    report = _report(world)
+    check_report_invariants(report)
+    assert report["adjudication"]["criterion_id"] == CANONICAL_CRITERION["criterion_id"]
+    assert report["adjudication"]["derived_from_measurement"]["criterion_id"] == (
+        CANONICAL_CRITERION["criterion_id"]
+    )
+
+
+def test_a_report_whose_rule_was_edited_after_the_fact_fails_invariants(world) -> None:
+    """The artifact is committed JSON. Editing the rule in the file must not
+    leave a report that still passes its own checks."""
+    report = _report(world)
+    report["adjudication"]["rule"] = "canonical = whichever key has the higher score"
+    with pytest.raises(ComparisonIntegrityError, match="would advertise a rule"):
+        check_report_invariants(report)
+
+
+def test_a_report_whose_criterion_id_was_edited_fails_invariants(world) -> None:
+    report = _report(world)
+    report["adjudication"]["criterion_id"] = "vibes/v9"
+    with pytest.raises(ComparisonIntegrityError, match="this code implements"):
         check_report_invariants(report)

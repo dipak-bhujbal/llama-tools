@@ -15,7 +15,10 @@
         "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae"
       }
     },
+    "criterion_id": "pinned-and-preflight-valid/v1",
+    "criterion_id_note": "Owned by eval/answer_key_comparison.py:CANONICAL_CRITERION. The `rule` and `validity_check` text below must match that constant byte-for-byte or the report refuses to build, so this manifest cannot state one rule while the code applies another.",
     "derived_from_measurement": {
+      "criterion_id": "pinned-and-preflight-valid/v1",
       "decided": true,
       "reason": "pinned_key is the only candidate whose every expected name appears among the tools its item presented",
       "selected": "pinned_key",
@@ -200,10 +203,10 @@
       "verified_against": "eval/results/evidence.json"
     },
     "manifest": {
-      "bytes": 8962,
-      "git_blob_sha1": "bec2d9409d077bf406e93fb04e736decb68c3364",
+      "bytes": 9288,
+      "git_blob_sha1": "864c4939f2cec7a2f36008f186e758bf9b91a00c",
       "path": "eval/manifests/bfcl_v4_study2.json",
-      "sha256": "e13c35305658b7e481e61292a2677cd63e5790d76ae337c5339adae36be9837a"
+      "sha256": "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
     },
     "pinned_key": {
       "bytes": 63627,

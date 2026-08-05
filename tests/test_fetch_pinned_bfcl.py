@@ -264,3 +264,68 @@ def test_a_schema_version_1_manifest_is_refused(tmp_path: Path) -> None:
     path.write_text(json.dumps({"schema_version": 1, "files": [_file("alpha", "questions")]}))
     with pytest.raises(VerificationError, match="predates the standing answer-name preflight"):
         load_manifest(path)
+
+
+# ------------------------------------------------- duplicate (category, role) ----
+#
+# Every consumer resolves files by (category, role) into a dict. Two specs
+# sharing a pair means the first is pinned and the second silently wins, so a
+# defective key can be pinned, verified, and never preflighted.
+
+
+def test_duplicate_answer_keys_are_rejected_not_collapsed() -> None:
+    manifest = _manifest(
+        {"alpha": {"answer_key_policy": "required"}},
+        [_file("alpha", "questions"), _file("alpha", "answer_key"), _file("alpha", "answer_key")],
+    )
+    payloads = _payloads(alpha=([_q("a1", "pkg.fn")], [_a("a1", "pkg.fn")]))
+    with pytest.raises(VerificationError, match="pinned twice"):
+        preflight_manifest_keys(manifest, payloads)
+
+
+def test_a_defective_key_cannot_hide_behind_a_clean_duplicate() -> None:
+    """The reason the duplicate check exists. Pin a defective key first and a
+    clean one second: last-write-wins would preflight only the clean one and
+    report a pass the defective key never earned."""
+    defective = dict(_file("alpha", "answer_key"), local_path="defective.json")
+    clean = dict(_file("alpha", "answer_key"), local_path="clean.json")
+    manifest = _manifest(
+        {"alpha": {"answer_key_policy": "required"}},
+        [_file("alpha", "questions"), defective, clean],
+    )
+    payloads = _payloads(alpha=([_q("a1", "pkg.fn")], [_a("a1", "pkg.fn")]))
+    with pytest.raises(VerificationError, match=r"defective\.json and clean\.json"):
+        preflight_manifest_keys(manifest, payloads)
+
+
+def test_duplicate_question_files_are_rejected() -> None:
+    manifest = _manifest(
+        {"alpha": {"answer_key_policy": "required"}},
+        [_file("alpha", "questions"), _file("alpha", "questions"), _file("alpha", "answer_key")],
+    )
+    payloads = _payloads(alpha=([_q("a1", "pkg.fn")], [_a("a1", "pkg.fn")]))
+    with pytest.raises(VerificationError, match="alpha/questions is pinned twice"):
+        preflight_manifest_keys(manifest, payloads)
+
+
+def test_load_manifest_rejects_duplicates_before_any_download(tmp_path: Path) -> None:
+    path = tmp_path / "m.json"
+    path.write_text(
+        json.dumps(
+            _manifest(
+                {"alpha": {"answer_key_policy": "required"}},
+                [_file("alpha", "questions"), _file("alpha", "questions")],
+            )
+        )
+    )
+    with pytest.raises(VerificationError, match="pinned twice"):
+        load_manifest(path)
+
+
+def test_the_committed_manifest_has_no_duplicate_roles() -> None:
+    manifest = json.loads(
+        (Path(__file__).resolve().parents[1] / "eval" / "manifests" / "bfcl_v4_study2.json")
+        .read_text()
+    )
+    pairs = [(spec["category"], spec["role"]) for spec in manifest["files"]]
+    assert len(pairs) == len(set(pairs))

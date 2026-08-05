@@ -10,6 +10,8 @@
     "url": "https://github.com/ShishirPatil/gorilla/blob/9d8416a96d1d69975493f1b6d60ff07d12a1726a/LICENSE"
   },
   "canonical_key_criterion": {
+    "criterion_id": "pinned-and-preflight-valid/v1",
+    "criterion_id_note": "Owned by eval/answer_key_comparison.py:CANONICAL_CRITERION. The `rule` and `validity_check` text below must match that constant byte-for-byte or the report refuses to build, so this manifest cannot state one rule while the code applies another.",
     "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
     "validity_check": "eval/bfcl_scoring.py:preflight_key_names — every name an answer key expects must be among the tools that item actually presented to the model",
     "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
