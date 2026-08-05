@@ -9,6 +9,7 @@ final line.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -325,3 +326,199 @@ def test_summary_reports_segments_and_the_surviving_torn_tail(tmp_path: Path) ->
     assert summary["truncated_tail"] is True, "the fragment is still on disk"
     assert summary["active"] == 2
     assert summary["total_lines"] - summary["parsed_records"] == 1
+
+
+# --------------------------------------------------------------------------
+# Review cycle 1 (msg 2020): three integrity holes left by the first segment
+# implementation. Each of these failed before the fix.
+# --------------------------------------------------------------------------
+
+
+def test_redo_last_does_not_duplicate_seq_across_a_rotation(tmp_path: Path) -> None:
+    """seq must be allocated after rotation, for tombstones too, not just appends.
+
+    The first implementation fixed the ordering in append() but left redo_last()
+    computing seq before _append_raw() rotated, so the segment header and the
+    tombstone both took the same number — recreating the exact ambiguity the
+    segment design exists to remove.
+    """
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+
+    ledger.redo_last(1)
+
+    seqs = [rec["seq"] for rec in ledger.records()]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs)), f"duplicate seq: {seqs}"
+    assert ledger.processed_ids() == set()
+
+
+def test_non_increasing_seq_fails_closed(tmp_path: Path) -> None:
+    """The read-time invariant, independent of how the duplicate got there."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    ledger.append({"prompt_id": "p2"})
+    path.write_bytes(path.read_bytes() + json.dumps({"prompt_id": "p3", "seq": 2}).encode() + b"\n")
+
+    with pytest.raises(LedgerIntegrityError, match="strictly increasing"):
+        ledger.processed_ids()
+
+
+def _rotate_once(ledger: Ledger, path: Path, prompt_id: str) -> None:
+    _torn_tail(path, b'{"partial": "wr')
+    ledger.append({"prompt_id": prompt_id})
+
+
+def test_missing_middle_segment_fails_closed(tmp_path: Path) -> None:
+    """A gap must raise, not silently truncate history to the clean prefix.
+
+    Counting upward from zero until a file is missing reports a short,
+    well-formed-looking ledger and loses every later segment without a word.
+    """
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+    _rotate_once(ledger, ledger.segment_paths()[1], "p3")
+    assert len(ledger.segment_paths()) == 3
+
+    ledger.segment_paths()[1].unlink()
+
+    with pytest.raises(LedgerIntegrityError, match="not contiguous"):
+        ledger.segment_paths()
+    with pytest.raises(LedgerIntegrityError):
+        ledger.processed_ids()
+
+
+def test_malformed_segment_name_fails_closed(tmp_path: Path) -> None:
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    (tmp_path / "ledger.segXX.jsonl").write_text("{}\n")
+
+    with pytest.raises(LedgerIntegrityError, match="malformed"):
+        ledger.segment_paths()
+
+
+def test_rotation_publication_is_atomic(tmp_path: Path, monkeypatch) -> None:
+    """A crash during rotation must leave no successor, not a partial one.
+
+    The first implementation touched the new path and then appended the header.
+    A crash in between published an empty segment, and every subsequent read
+    raised forever — unrecoverable, because the retry could not get past it.
+    """
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+
+    real_link = os.link
+
+    def crash_before_publish(src, dst):
+        raise RuntimeError("crash before publication")
+
+    monkeypatch.setattr(os, "link", crash_before_publish)
+    with pytest.raises(RuntimeError):
+        ledger.append({"prompt_id": "p2"})
+
+    # Nothing partial was left behind, and no temp file leaked.
+    assert not (tmp_path / "ledger.seg001.jsonl").exists()
+    assert list(tmp_path.glob(".*tmp")) == []
+
+    # The retry succeeds: the ledger was never wedged.
+    monkeypatch.setattr(os, "link", real_link)
+    ledger.append({"prompt_id": "p2"})
+    assert ledger.processed_ids() == {"p1", "p2"}
+
+
+def test_empty_successor_segment_fails_closed(tmp_path: Path) -> None:
+    """Defence in depth: a segment left empty by an older build must not be read past."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    (tmp_path / "ledger.seg001.jsonl").touch()
+
+    with pytest.raises(LedgerIntegrityError, match="missing its segment_open header"):
+        ledger.processed_ids()
+
+
+def test_segment_header_must_name_the_right_predecessor(tmp_path: Path) -> None:
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+
+    seg1 = ledger.segment_paths()[1]
+    lines = seg1.read_text().splitlines()
+    header = json.loads(lines[0])
+    header["prev_segment"] = "somebody_elses_ledger.jsonl"
+    seg1.write_text("\n".join([json.dumps(header, sort_keys=True), *lines[1:]]) + "\n")
+
+    with pytest.raises(LedgerIntegrityError, match="names predecessor"):
+        ledger.processed_ids()
+
+
+def test_segment_header_must_be_first_and_only(tmp_path: Path) -> None:
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+
+    seg1 = ledger.segment_paths()[1]
+    header = json.loads(seg1.read_text().splitlines()[0])
+    seg1.write_text(seg1.read_text() + json.dumps(header, sort_keys=True) + "\n")
+
+    with pytest.raises(LedgerIntegrityError, match="exactly once, first"):
+        ledger.processed_ids()
+
+
+def test_segment_header_index_must_match_its_filename(tmp_path: Path) -> None:
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+
+    seg1 = ledger.segment_paths()[1]
+    lines = seg1.read_text().splitlines()
+    header = json.loads(lines[0])
+    header["segment"] = 7
+    seg1.write_text("\n".join([json.dumps(header, sort_keys=True), *lines[1:]]) + "\n")
+
+    with pytest.raises(LedgerIntegrityError, match="claims segment 7"):
+        ledger.processed_ids()
+
+
+def test_repeated_rotations_stay_consistent(tmp_path: Path) -> None:
+    """Three crashes in a row still produce one verifiable chain."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _rotate_once(ledger, path, "p2")
+    _rotate_once(ledger, ledger.segment_paths()[1], "p3")
+    _rotate_once(ledger, ledger.segment_paths()[2], "p4")
+
+    assert len(ledger.segment_paths()) == 4
+    assert ledger.processed_ids() == {"p1", "p2", "p3", "p4"}
+    seqs = [rec["seq"] for rec in ledger.records()]
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+    assert ledger.summary()["segments"] == 4
+    assert ledger.redo_last(4) == 4
+    assert ledger.processed_ids() == set()

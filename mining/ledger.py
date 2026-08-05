@@ -13,9 +13,7 @@ is never hand-edited.**
 
 - Crash safety: because every record is a single flushed-and-fsynced JSONL
   line, a crash can only ever produce a clean prefix of complete lines plus,
-  at worst, one incomplete trailing line. Resuming just means re-reading the
-  file and skipping that trailing fragment — there is no in-place state to
-  corrupt.
+  at worst, one incomplete trailing line.
 - Evidentiary integrity: mistakes happen (a batch sampled with a bad prompt
   template, a run that needs to be redone). Instead of deleting or editing
   the offending lines, we append tombstone ("redo") records that supersede
@@ -34,9 +32,28 @@ file: `ledger.jsonl`, then `ledger.seg001.jsonl`, and so on.
 When a write is about to happen and the active segment ends in a fragment, the
 damaged segment is **sealed, never repaired** — its bytes, fragment included,
 stay exactly as the crash left them — and writing continues in a fresh segment
-whose first line records the sealed segment's sha256 and length. That makes the
-chain verifiable end to end: a sealed segment that changes by even one byte is
-detected on the next read and fails closed rather than being read past.
+whose first line records the sealed segment's sha256 and length.
+
+Three properties make that chain trustworthy rather than merely tidy:
+
+- **One write path.** Every record — work, tombstone, or segment header —
+  goes through `_commit()`, which rotates first, *then* allocates `seq`, then
+  writes. A `seq` can therefore never be allocated against a pre-rotation view
+  of the ledger and collide with the header that rotation just wrote.
+- **Whole-chain enumeration.** Segments are discovered by globbing, not by
+  counting upward from zero until a file is missing. A gap, a duplicate, or a
+  malformed segment name fails closed; it never silently truncates history to
+  the part that happens to be contiguous.
+- **Atomic publication.** A new segment is built complete in a temp file,
+  fsynced, and then linked into place only if nothing is there. A crash during
+  rotation leaves either no successor or a complete one — never an empty or
+  half-written file that wedges every future read.
+
+Read-time verification then checks the chain end to end: sealed segments must
+hash to what their successor recorded, headers must sit first in their segment
+and name the right predecessor, and `seq` must be strictly increasing and
+unique across the whole chain. Any violation raises `LedgerIntegrityError`
+rather than returning a resumable-looking state the ledger cannot vouch for.
 
 `seq`, prompt dedup, and tombstones all span the whole chain, so rotation is
 invisible to callers apart from `segment_paths()` and `summary()["segments"]`.
@@ -53,6 +70,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -60,11 +78,11 @@ from typing import Any
 # counted as units of work.
 CONTROL_TYPES = frozenset({"redo", "segment_open"})
 
-_SEGMENT_RE = re.compile(r"\.seg(\d{3,})$")
+_SEGMENT_RE = re.compile(r"^(?P<stem>.+)\.seg(?P<index>\d{3,})$")
 
 
 class LedgerIntegrityError(ValueError):
-    """A sealed segment's bytes on disk do not match the hash that follows it."""
+    """The ledger chain on disk does not match what it recorded about itself."""
 
 
 class Ledger:
@@ -83,24 +101,58 @@ class Ledger:
 
     # ------------------------------------------------------------ segments --
 
+    @property
+    def _stem(self) -> str:
+        name = self.path.name
+        return name[: -len(self.path.suffix)] if self.path.suffix else name
+
     def _segment_path(self, index: int) -> Path:
         """Path of segment `index`; segment 0 is the base path itself."""
         if index == 0:
             return self.path
-        stem = self.path.name[: -len(self.path.suffix)] if self.path.suffix else self.path.name
-        return self.path.with_name(f"{stem}.seg{index:03d}{self.path.suffix}")
+        return self.path.with_name(f"{self._stem}.seg{index:03d}{self.path.suffix}")
 
     def segment_paths(self) -> list[Path]:
-        """Existing segments in chain order, starting with the base path."""
-        segments = [self.path]
-        index = 1
-        while True:
-            candidate = self._segment_path(index)
-            if not candidate.exists():
-                break
-            segments.append(candidate)
-            index += 1
-        return segments
+        """Existing segments in chain order, starting with the base path.
+
+        Enumerates every file matching the segment naming scheme rather than
+        counting upward until one is missing. Counting upward silently drops
+        all history after a gap — a deleted middle segment would make the
+        ledger report a short, clean-looking prefix. Gaps, duplicate indices,
+        and malformed names all fail closed instead.
+        """
+        found: dict[int, Path] = {}
+        for candidate in self.path.parent.glob(f"{self._stem}.seg*{self.path.suffix}"):
+            stem = (
+                candidate.name[: -len(candidate.suffix)]
+                if candidate.suffix
+                else candidate.name
+            )
+            match = _SEGMENT_RE.match(stem)
+            if match is None or match.group("stem") != self._stem:
+                raise LedgerIntegrityError(
+                    f"malformed ledger segment name: {candidate.name}"
+                )
+            index = int(match.group("index"))
+            if index == 0:
+                raise LedgerIntegrityError(
+                    f"segment index 0 is reserved for {self.path.name}: {candidate.name}"
+                )
+            if index in found:
+                raise LedgerIntegrityError(
+                    f"duplicate ledger segment index {index}: "
+                    f"{found[index].name} and {candidate.name}"
+                )
+            found[index] = candidate
+
+        indices = sorted(found)
+        if indices != list(range(1, len(indices) + 1)):
+            missing = sorted(set(range(1, max(indices) + 1)) - set(indices))
+            raise LedgerIntegrityError(
+                f"ledger segment chain is not contiguous: missing segment(s) {missing}, "
+                f"found {indices}"
+            )
+        return [self.path] + [found[i] for i in indices]
 
     @staticmethod
     def _parse_segment(path: Path) -> tuple[list[dict[str, Any]], bool]:
@@ -137,56 +189,97 @@ class Ledger:
                     raise ValueError(f"corrupt ledger line {i} in {path}") from None
         return records, truncated_tail
 
-    def _verify_link(self, sealed: Path, successor_records: list[dict[str, Any]]) -> None:
-        """Check a sealed segment against the hash recorded by its successor."""
-        header = successor_records[0] if successor_records else None
-        if header is None or header.get("type") != "segment_open":
+    def _verify_segment(
+        self,
+        index: int,
+        path: Path,
+        records: list[dict[str, Any]],
+        predecessor: Path,
+    ) -> None:
+        """Check one rotated segment's header against the segment it sealed."""
+        headers = [i for i, rec in enumerate(records) if rec.get("type") == "segment_open"]
+        if not headers:
             raise LedgerIntegrityError(
-                f"segment {self._segment_index(sealed) + 1} is missing its segment_open header"
+                f"segment {path.name} is missing its segment_open header "
+                f"(rotation may have been interrupted before publication)"
+            )
+        if headers != [0]:
+            raise LedgerIntegrityError(
+                f"segment {path.name} has a segment_open header at position(s) "
+                f"{headers}; it must appear exactly once, first"
             )
 
-        raw = sealed.read_bytes()
+        header = records[0]
+        if header.get("segment") != index:
+            raise LedgerIntegrityError(
+                f"segment {path.name} header claims segment {header.get('segment')}, "
+                f"but its filename says {index}"
+            )
+        if header.get("prev_segment") != predecessor.name:
+            raise LedgerIntegrityError(
+                f"segment {path.name} header names predecessor "
+                f"{header.get('prev_segment')!r}, but the chain says {predecessor.name!r}"
+            )
+
+        raw = predecessor.read_bytes()
         actual = hashlib.sha256(raw).hexdigest()
         if header.get("prev_sha256") != actual:
             raise LedgerIntegrityError(
-                f"sealed segment {sealed.name} was modified after it was sealed: "
+                f"sealed segment {predecessor.name} was modified after it was sealed: "
                 f"expected sha256 {header.get('prev_sha256')}, found {actual}"
             )
         if header.get("prev_bytes") != len(raw):
             raise LedgerIntegrityError(
-                f"sealed segment {sealed.name} changed length after it was sealed: "
+                f"sealed segment {predecessor.name} changed length after it was sealed: "
                 f"expected {header.get('prev_bytes')} bytes, found {len(raw)}"
             )
 
     @staticmethod
-    def _segment_index(path: Path) -> int:
-        match = _SEGMENT_RE.search(path.name[: -len(path.suffix)] if path.suffix else path.name)
-        return int(match.group(1)) if match else 0
+    def _verify_seqs(records: list[dict[str, Any]]) -> None:
+        """`seq` must be strictly increasing and unique across the whole chain.
+
+        Gaps are fine — a record lost to a crash consumed no durable seq, and a
+        sealed fragment may have. Repeats and reversals are not: tombstones
+        identify their target by `seq`, so a duplicate makes rollback ambiguous.
+        """
+        previous: int | None = None
+        for rec in records:
+            if "seq" not in rec:
+                raise LedgerIntegrityError(f"ledger record is missing 'seq': {rec!r}")
+            seq = rec["seq"]
+            if previous is not None and seq <= previous:
+                raise LedgerIntegrityError(
+                    f"ledger seq is not strictly increasing: {seq} follows {previous}"
+                )
+            previous = seq
 
     # ---------------------------------------------------------------- read --
 
     def _read_records(self) -> tuple[list[dict[str, Any]], bool]:
-        """Parse every complete line across the whole segment chain.
+        """Parse and verify every complete line across the whole segment chain.
 
         Returns the parsed records in chain order and whether any segment ends
         in a truncated fragment. Fragments reflect work that was never durably
         recorded and are simply redone by the caller.
 
-        Raises `LedgerIntegrityError` if a sealed segment's bytes no longer
-        match the hash its successor recorded — the ledger fails closed rather
-        than reporting a resumable state it cannot vouch for.
+        Raises `LedgerIntegrityError` if the chain does not verify — the ledger
+        fails closed rather than reporting a state it cannot vouch for.
         """
         segments = self.segment_paths()
         parsed = [self._parse_segment(segment) for segment in segments]
 
-        for i, sealed in enumerate(segments[:-1]):
-            self._verify_link(sealed, parsed[i + 1][0])
+        for index in range(1, len(segments)):
+            self._verify_segment(
+                index, segments[index], parsed[index][0], segments[index - 1]
+            )
 
         records: list[dict[str, Any]] = []
         truncated_tail = False
         for segment_records, segment_truncated in parsed:
             records.extend(segment_records)
             truncated_tail = truncated_tail or segment_truncated
+
+        self._verify_seqs(records)
         return records, truncated_tail
 
     def records(self) -> list[dict[str, Any]]:
@@ -212,6 +305,15 @@ class Ledger:
 
     # --------------------------------------------------------------- write --
 
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        """Force the directory entry itself to durable storage."""
+        fd = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def _write_line(self, path: Path, record: dict[str, Any]) -> None:
         """Serialize one record as a single JSONL line and durably write it.
 
@@ -227,6 +329,35 @@ class Ledger:
             f.flush()
             os.fsync(f.fileno())
 
+    def _publish_segment(self, path: Path, header: dict[str, Any]) -> None:
+        """Create a new segment containing exactly `header`, atomically.
+
+        The segment is built complete in a same-directory temp file and fsynced
+        before it is linked into place, so the published path never exists in a
+        partial state. `os.link` fails rather than clobbering if something is
+        already there, which turns a double-rotation into an error instead of
+        silent data loss.
+        """
+        directory = path.parent
+        line = json.dumps(header, sort_keys=True) + "\n"
+
+        fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{path.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError as exc:
+                raise LedgerIntegrityError(
+                    f"cannot publish ledger segment {path.name}: it already exists"
+                ) from exc
+            self._fsync_dir(directory)
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def _seal_and_rotate(self) -> Path:
         """Seal the damaged active segment and open its hash-linked successor.
 
@@ -238,8 +369,7 @@ class Ledger:
         segments = self.segment_paths()
         sealed = segments[-1]
         raw = sealed.read_bytes()
-        new_index = self._segment_index(sealed) + 1
-        new_path = self._segment_path(new_index)
+        new_index = len(segments)
 
         header = {
             "type": "segment_open",
@@ -250,16 +380,11 @@ class Ledger:
             "reason": "truncated tail in previous segment (crash during write)",
             "seq": self._next_seq(),
         }
-        new_path.touch(exist_ok=True)
-        self._write_line(new_path, header)
-        return new_path
+        self._publish_segment(self._segment_path(new_index), header)
+        return self._segment_path(new_index)
 
     def _active_segment(self) -> Path:
-        """The segment to append to, rotating first if the current one is torn.
-
-        Every write path goes through here, so a fragment can never be
-        appended after.
-        """
+        """The segment to append to, rotating first if the current one is torn."""
         segments = self.segment_paths()
         active = segments[-1]
         _, truncated_tail = self._parse_segment(active)
@@ -267,8 +392,19 @@ class Ledger:
             return self._seal_and_rotate()
         return active
 
-    def _append_raw(self, record: dict[str, Any]) -> None:
-        self._write_line(self._active_segment(), record)
+    def _commit(self, record: dict[str, Any]) -> dict[str, Any]:
+        """The sole write path for every record type.
+
+        Order matters and is the point of this method: rotate first, so any
+        segment header is already durable; *then* allocate `seq` against the
+        post-rotation chain; then write. Allocating before rotating hands the
+        header and the record the same number.
+        """
+        target = self._active_segment()
+        out = dict(record)
+        out["seq"] = self._next_seq()
+        self._write_line(target, out)
+        return out
 
     def append(self, record: dict[str, Any]) -> None:
         """Append one record, assigning it the next monotonic `seq`.
@@ -285,12 +421,7 @@ class Ledger:
         if prompt_id in self.processed_ids():
             raise ValueError(f"prompt_id {prompt_id!r} was already appended and not rolled back")
 
-        # Rotate before computing `seq`, so the header cannot claim the same
-        # sequence number as the record that follows it.
-        target = self._active_segment()
-        out = dict(record)
-        out["seq"] = self._next_seq()
-        self._write_line(target, out)
+        self._commit(record)
 
     def processed_ids(self) -> set[str]:
         """Return prompt_ids currently in effect (i.e. not superseded)."""
@@ -327,13 +458,16 @@ class Ledger:
         to_supersede = active[-n:] if n <= len(active) else active
 
         for rec in to_supersede:
-            tombstone = {
-                "type": "redo",
-                "supersedes_seq": rec["seq"],
-                "prompt_id": rec["prompt_id"],
-                "seq": self._next_seq(),
-            }
-            self._append_raw(tombstone)
+            # `seq` is deliberately not set here: _commit allocates it after
+            # any rotation, so a tombstone can never share a number with the
+            # segment header that rotation wrote.
+            self._commit(
+                {
+                    "type": "redo",
+                    "supersedes_seq": rec["seq"],
+                    "prompt_id": rec["prompt_id"],
+                }
+            )
 
         return len(to_supersede)
 
