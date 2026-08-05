@@ -41,6 +41,7 @@ from pathlib import Path
 
 import torch
 from bfcl_category_config import SUPPORTED_CATEGORIES, resolve_category_paths
+from bfcl_scoring import preflight_key_names, score
 from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -358,63 +359,6 @@ def extract_json(text: str):
     return None
 
 
-def values_equal(parsed_val, accepted_val) -> bool:
-    """Light coercion equality: numeric compare if both numbers, else deep =="""
-    if isinstance(parsed_val, bool) or isinstance(accepted_val, bool):
-        return parsed_val == accepted_val
-    if isinstance(parsed_val, (int, float)) and isinstance(accepted_val, (int, float)):
-        return float(parsed_val) == float(accepted_val)
-    return parsed_val == accepted_val
-
-
-def score(parsed, gt_entry):
-    """Return (name_ok, args_ok, overall_ok, failure_reason).
-
-    gt_entry: {"function_name": {"arg1": [accepted, ...], "arg2": [...]}}
-    """
-    if parsed is None:
-        return False, False, False, "json_unparseable"
-    if "name" not in parsed or "arguments" not in parsed:
-        return False, False, False, "missing_name_or_arguments"
-    parsed_name = parsed["name"]
-    parsed_args = parsed["arguments"]
-    if not isinstance(parsed_args, dict):
-        return False, False, False, "arguments_not_dict"
-
-    gt_name = next(iter(gt_entry.keys()))
-    gt_args = gt_entry[gt_name]
-    name_ok = parsed_name == gt_name
-
-    # no-extra-args: every parsed key must be in gt
-    for k in parsed_args:
-        if k not in gt_args:
-            return name_ok, False, False, f"extra_arg:{k}"
-
-    # each required gt arg must match; optional means "" in accepted list
-    args_ok = True
-    fail_reason = ""
-    for arg_name, accepted in gt_args.items():
-        optional = "" in accepted
-        if arg_name not in parsed_args:
-            if optional:
-                continue
-            args_ok = False
-            fail_reason = f"missing_arg:{arg_name}"
-            break
-        parsed_val = parsed_args[arg_name]
-        if not any(values_equal(parsed_val, av) for av in accepted):
-            args_ok = False
-            fail_reason = f"bad_value:{arg_name}"
-            break
-
-    overall_ok = name_ok and args_ok
-    if overall_ok:
-        return True, True, True, ""
-    if not name_ok and not fail_reason:
-        fail_reason = "bad_name"
-    return name_ok, args_ok, overall_ok, fail_reason
-
-
 @torch.no_grad()
 def generate(model, tokenizer, prompt: str, max_new_tokens: int) -> str:
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
@@ -499,6 +443,15 @@ def main() -> None:
             f"question/answer id mismatch: missing={missing_keys[:5]} "
             f"extra={extra_keys[:5]}"
         )
+
+    # Exact name matching is only fair while the key's name is among the tools
+    # the item presented; where it is not, the item is unpassable and the model
+    # is blamed for a benchmark defect. Checked here, before any model loads,
+    # so a defective key costs no GPU time.
+    checked = preflight_key_names(
+        {row["id"]: row for row in prompts_raw}, {r["id"]: r for r in gt_raw}
+    )
+    print(f"Answer-key preflight passed: {checked} items expect only presented tool names")
 
     if args.num_prompts is not None:
         prompts_raw = prompts_raw[: args.num_prompts]

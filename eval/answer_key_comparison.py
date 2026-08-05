@@ -6,17 +6,28 @@ carry different answer keys for `simple_python`:
 - `58f57e91…` — the BFCL v4 *release* commit.
 - `9d8416a9…` — a later upstream *data-fix* revision, and the key the
   2026-07-20 study-1 run actually scored against. This is what the manifest
-  currently pins.
+  currently pins as canonical.
 
-They differ at exactly one row, `simple_python_363`. This script re-scores the
-committed per-item generations under both, and checks the property that makes
-the choice safe for the DPO kill decision: whether the disputed item is
-concordant across candidates (all right or all wrong), since concordant items
-contribute nothing to a paired comparison.
+Both keys are manifest-pinned inputs, fetched and hash-verified by
+`eval/fetch_pinned_bfcl.py`. This script re-scores the committed per-item
+generations under each of them and checks the property that makes the choice
+safe for the DPO kill decision: whether the disputed item is concordant across
+candidates (all right or all wrong), since concordant items contribute nothing
+to a paired comparison.
 
-It also measures the scorer-normalization question that item 363 is a symptom
-of: how often answer keys use module-qualified function names, and how often a
-`multiple` row's tools are distinguishable *only* by that module prefix.
+**Everything here is recomputed, not restated.** The number of rows where the
+two keys differ is measured by comparing the two full files; the release-key
+score is produced by running the study's own scorer (`eval/bfcl_scoring.py`)
+against the release key's bytes, not by patching a stored flag; and the claim
+that the paired tests are unaffected is demonstrated by rebuilding every
+contrast's discordant set under both keys and hashing them. Any input whose
+bytes do not match the manifest, any missing candidate or id, a second
+differing row, or a discordant set that moves — each fails the run rather than
+being narrated in a caveat.
+
+The report also measures the scorer-normalization question that item 363 is a
+symptom of: how often answer keys use module-qualified function names, and how
+often a row's tools are distinguishable *only* by that module prefix.
 
 Run:
     python eval/answer_key_comparison.py
@@ -29,80 +40,371 @@ model is called.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-from collections import Counter
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DATA = REPO_ROOT / "eval" / "bfcl_data"
-GENERATIONS = REPO_ROOT / "eval" / "results" / "study1_bfcl_simple_generations.jsonl"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from bfcl_scoring import (  # noqa: E402 - sibling modules; see sys.path above
+    KeyDefectError,
+    preflight_key_names,
+    score,
+)
+from fetch_pinned_bfcl import VerificationError, load_manifest, verify_payload  # noqa: E402
+
+DEFAULT_MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
+DEFAULT_GENERATIONS = REPO_ROOT / "eval" / "results" / "study1_bfcl_simple_generations.jsonl"
 
 DISPUTED_ID = "simple_python_363"
-RELEASE_COMMIT = "58f57e9124ea981403792dd51e00a6577e621fae"
-DATAFIX_COMMIT = "9d8416a96d1d69975493f1b6d60ff07d12a1726a"
-# The release key's value at the disputed row. The release-commit file is not
-# committed to this repo, so this is a stated input, not a hash-verified one --
-# see the "provenance" note in the emitted report.
-RELEASE_NAME_AT_DISPUTED = "find_closest"
+REFERENCE_CANDIDATE = "sft"
+
+# The manifest roles this comparison consumes. Both keys are pinned; neither is
+# a stated value.
+PINNED_KEY_ROLE = "answer_key"
+RELEASE_KEY_ROLE = "answer_key_release_commit"
+QUESTIONS_ROLE = "questions"
+CATEGORY = "simple_python"
+
+# Categories measured for qualified-name exposure. `multiple` is study 2's
+# co-primary, so its exposure is the number that matters going forward.
+EXPOSURE_CATEGORIES = ("simple_python", "multiple", "live_simple")
 
 
-def _load_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+class ComparisonIntegrityError(ValueError):
+    """An input or an invariant this comparison depends on did not hold."""
 
 
-def _by_id(path: Path) -> dict[str, dict]:
-    return {row["id"]: row for row in _load_jsonl(path)}
+# ------------------------------------------------------------------ hashing --
 
 
-def key_names(answer_row: dict) -> set[str]:
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _git_blob_sha1(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode()
+    return hashlib.sha1(header + payload).hexdigest()  # Git object id, not a security digest
+
+
+def _id_set_sha256(ids: list[str]) -> str:
+    """Digest of a sorted id set, so two id sets can be compared by one value."""
+    return _sha256(("\n".join(sorted(ids)) + "\n").encode())
+
+
+def _fingerprint(payload: bytes) -> dict:
+    return {
+        "bytes": len(payload),
+        "sha256": _sha256(payload),
+        "git_blob_sha1": _git_blob_sha1(payload),
+    }
+
+
+# ------------------------------------------------------------------- inputs --
+
+
+def _relative(path: Path, repo_root: Path) -> str:
+    """Repo-relative path, so a committed report is not machine-specific."""
+    path = Path(path)
+    return str(path.relative_to(repo_root)) if path.is_relative_to(repo_root) else str(path)
+
+
+def _load_jsonl(payload: bytes) -> list[dict]:
+    return [json.loads(line) for line in payload.decode("utf-8").splitlines() if line.strip()]
+
+
+def load_verified_inputs(manifest_path: Path, repo_root: Path) -> dict:
+    """Read every pinned input, verifying its bytes against the manifest first.
+
+    `verify_payload` is the same check `fetch_pinned_bfcl.py` runs at download
+    time: sha256, Git blob id, row count, unique-id count, and the sorted-id
+    digest. Re-running it here means the comparison cannot quietly score
+    against a file that was edited after it was pinned.
+    """
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = load_manifest(manifest_path)
+
+    wanted = {
+        "questions": (CATEGORY, QUESTIONS_ROLE),
+        "pinned_key": (CATEGORY, PINNED_KEY_ROLE),
+        "release_key": (CATEGORY, RELEASE_KEY_ROLE),
+    }
+    inputs: dict = {
+        "manifest": {
+            "path": _relative(manifest_path, repo_root),
+            **_fingerprint(manifest_bytes),
+        }
+    }
+
+    for name, (category, role) in wanted.items():
+        specs = [
+            spec
+            for spec in manifest["files"]
+            if spec.get("category") == category and spec.get("role") == role
+        ]
+        if len(specs) != 1:
+            raise ComparisonIntegrityError(
+                f"manifest {manifest_path} has {len(specs)} entries for "
+                f"{category}/{role}; this comparison needs exactly one"
+            )
+        spec = specs[0]
+        path = repo_root / spec["local_path"]
+        if not path.is_file():
+            raise ComparisonIntegrityError(
+                f"missing pinned input {spec['local_path']} for {category}/{role}; "
+                f"run `python eval/fetch_pinned_bfcl.py` first"
+            )
+        payload = path.read_bytes()
+        try:
+            verify_payload(payload, spec)
+        except VerificationError as exc:
+            raise ComparisonIntegrityError(f"{name}: {exc}") from exc
+        inputs[name] = {
+            "path": spec["local_path"],
+            "source_revision": spec["source_revision"],
+            "upstream_path": spec["upstream_path"],
+            "rows": _load_jsonl(payload),
+            **_fingerprint(payload),
+        }
+
+    return inputs
+
+
+def _rows_by_id(rows: list[dict], label: str) -> dict[str, dict]:
+    by_id: dict[str, dict] = {}
+    for row in rows:
+        row_id = row["id"]
+        if row_id in by_id:
+            raise ComparisonIntegrityError(f"{label}: duplicate id {row_id!r}")
+        by_id[row_id] = row
+    return by_id
+
+
+def _ground_truth_entry(answer_row: dict, label: str) -> dict:
+    """The single expected call for a single-call category."""
+    entries = answer_row["ground_truth"]
+    if len(entries) != 1:
+        raise ComparisonIntegrityError(
+            f"{label}: id {answer_row['id']!r} has {len(entries)} ground-truth "
+            f"entries; the single-call scorer assumes exactly one"
+        )
+    return entries[0]
+
+
+# --------------------------------------------------------- key-difference ----
+
+
+def key_difference(pinned_rows: list[dict], release_rows: list[dict]) -> dict:
+    """Locate every row where the two keys disagree, by comparing all of both.
+
+    This is the fact the whole comparison rests on, so it is measured rather
+    than asserted: if a future revision moved a second row, encoding "they
+    differ at 363" as a constant would silently mis-scope the analysis.
+    """
+    pinned = _rows_by_id(pinned_rows, "pinned key")
+    release = _rows_by_id(release_rows, "release key")
+
+    if set(pinned) != set(release):
+        only_pinned = sorted(set(pinned) - set(release))
+        only_release = sorted(set(release) - set(pinned))
+        raise ComparisonIntegrityError(
+            f"the two answer keys cover different items: {len(only_pinned)} only in "
+            f"the pinned key ({only_pinned[:3]}), {len(only_release)} only in the "
+            f"release key ({only_release[:3]})"
+        )
+
+    differing = sorted(
+        row_id
+        for row_id in pinned
+        if json.dumps(pinned[row_id], sort_keys=True)
+        != json.dumps(release[row_id], sort_keys=True)
+    )
+    return {
+        "row_count": len(pinned),
+        "id_set_sha256": _id_set_sha256(list(pinned)),
+        "differing_ids": differing,
+        "differing_row_count": len(differing),
+        "detail": {
+            row_id: {
+                "pinned_key_expects": sorted(
+                    _ground_truth_entry(pinned[row_id], "pinned key").keys()
+                ),
+                "release_key_expects": sorted(
+                    _ground_truth_entry(release[row_id], "release key").keys()
+                ),
+            }
+            for row_id in differing
+        },
+    }
+
+
+# ------------------------------------------------------------- re-scoring ----
+
+
+def _parsed_call(generation_row: dict) -> dict | None:
+    """Rebuild the scorer's input from what the run recorded per item."""
+    if not generation_row.get("json_valid"):
+        return None
+    return {"name": generation_row["parsed_name"], "arguments": generation_row["parsed_args"]}
+
+
+def rescore(generations: list[dict], key_rows: list[dict], key_label: str) -> dict:
+    """Re-score every (candidate, item) under one key with the study's scorer.
+
+    Returns {candidate: {item_id: overall_ok}}. Every candidate must cover the
+    key's id set exactly — a candidate missing items would otherwise produce a
+    smaller denominator and a flattering rate.
+    """
+    key = _rows_by_id(key_rows, key_label)
+    outcomes: dict[str, dict[str, bool]] = {}
+    for row in generations:
+        item_id = row["id"]
+        if item_id not in key:
+            raise ComparisonIntegrityError(
+                f"generations contain id {item_id!r}, which {key_label} does not"
+            )
+        candidate = outcomes.setdefault(row["model_name"], {})
+        if item_id in candidate:
+            raise ComparisonIntegrityError(
+                f"generations contain a duplicate row for {row['model_name']}/{item_id}"
+            )
+        _, _, overall_ok, _ = score(_parsed_call(row), _ground_truth_entry(key[item_id], key_label))
+        candidate[item_id] = overall_ok
+
+    if not outcomes:
+        raise ComparisonIntegrityError("generations contain no rows")
+
+    expected_ids = set(key)
+    for candidate, per_item in sorted(outcomes.items()):
+        if set(per_item) != expected_ids:
+            missing = sorted(expected_ids - set(per_item))
+            raise ComparisonIntegrityError(
+                f"candidate {candidate!r} covers {len(per_item)} of {len(expected_ids)} "
+                f"items under {key_label}; missing {missing[:3]}"
+            )
+    return outcomes
+
+
+def check_recomputation_matches_the_run(generations: list[dict], key_rows: list[dict]) -> dict:
+    """Prove the re-scoring here reproduces the flags the study-1 run stored.
+
+    The release-key column is only trustworthy if the machinery producing it
+    reproduces the pinned-key column that was actually run. This re-derives
+    every stored field — name, args, overall, and failure reason — from the
+    pinned key's bytes and fails on the first disagreement.
+    """
+    key = _rows_by_id(key_rows, "pinned key")
+    for row in generations:
+        recomputed = score(_parsed_call(row), _ground_truth_entry(key[row["id"]], "pinned key"))
+        stored = (row["name_ok"], row["args_ok"], row["overall_ok"], row["failure_reason"])
+        if recomputed != stored:
+            raise ComparisonIntegrityError(
+                f"re-scoring {row['model_name']}/{row['id']} under the pinned key gives "
+                f"{recomputed}, but the run recorded {stored}; the committed generations "
+                f"and the committed scorer no longer agree"
+            )
+    return {"rows_rechecked": len(generations), "disagreements": 0}
+
+
+def key_internal_consistency(questions_rows: list[dict], key_rows: list[dict]) -> dict:
+    """Does this key only ever expect a name the item actually presented?
+
+    This is the property that decides which key is *defensible*, as opposed to
+    which produces the nicer number. A key expecting a name the prompt never
+    offers cannot be satisfied by any model, so an item scored against it
+    measures the benchmark, not the candidate. Reported as a measured result
+    for each key rather than argued in prose.
+    """
+    questions = _rows_by_id(questions_rows, "questions")
+    key = _rows_by_id(key_rows, "answer key")
+    try:
+        checked = preflight_key_names(questions, key)
+    except KeyDefectError as exc:
+        return {"consistent": False, "items_checked": len(key), "defect": str(exc)}
+    return {"consistent": True, "items_checked": checked, "defect": None}
+
+
+# -------------------------------------------------------------- contrasts ----
+
+
+def contrasts(outcomes: dict[str, dict[str, bool]], reference: str) -> dict:
+    """Every candidate-vs-reference discordant set, with its counts and digest.
+
+    McNemar's test reads only the discordant items, so this is the exact input
+    the paired analysis consumes. Recording the digest of each discordant id
+    set makes "the key choice does not move the paired tests" a checkable
+    claim rather than an argument.
+    """
+    if reference not in outcomes:
+        raise ComparisonIntegrityError(
+            f"reference candidate {reference!r} is not among {sorted(outcomes)}"
+        )
+    out: dict[str, dict] = {}
+    for candidate in sorted(outcomes):
+        if candidate == reference:
+            continue
+        b = sorted(
+            i for i in outcomes[reference] if outcomes[reference][i] and not outcomes[candidate][i]
+        )
+        c = sorted(
+            i for i in outcomes[reference] if not outcomes[reference][i] and outcomes[candidate][i]
+        )
+        out[f"{reference}_vs_{candidate}"] = {
+            "reference_only_correct": len(b),
+            "candidate_only_correct": len(c),
+            "discordant": len(b) + len(c),
+            "discordant_id_sha256": _id_set_sha256(b + c),
+        }
+    return out
+
+
+def _invariance(pinned: dict, release: dict) -> dict:
+    """Compare the two keys' contrast tables and fail if any of it moved."""
+    if set(pinned) != set(release):
+        raise ComparisonIntegrityError("the two keys produced different contrast sets")
+    differences = {
+        name: (pinned[name], release[name])
+        for name in pinned
+        if pinned[name] != release[name]
+    }
+    return {
+        "identical": not differences,
+        "contrasts_compared": sorted(pinned),
+        "differences": {name: {"pinned": p, "release": r} for name, (p, r) in differences.items()},
+    }
+
+
+# --------------------------------------------------------------- exposure ----
+
+
+def _key_names(answer_row: dict) -> set[str]:
     names: set[str] = set()
     for entry in answer_row["ground_truth"]:
         names |= set(entry.keys())
     return names
 
 
-def score_tables() -> dict:
-    """Per-candidate totals under the pinned key and under the release key."""
-    rows = _load_jsonl(GENERATIONS)
-    totals: Counter[str] = Counter()
-    pinned: Counter[str] = Counter()
-    for row in rows:
-        totals[row["model_name"]] += 1
-        pinned[row["model_name"]] += bool(row["overall_ok"])
-
-    disputed = {row["model_name"]: row for row in rows if row["id"] == DISPUTED_ID}
-    release: dict[str, int] = {}
-    emitted: dict[str, str] = {}
-    for model in totals:
-        row = disputed[model]
-        emitted[model] = row["parsed_name"]
-        # Under the release key the item is correct only if the model emitted
-        # the unqualified name AND its arguments were already accepted.
-        would_pass = row["parsed_name"] == RELEASE_NAME_AT_DISPUTED and row["args_ok"]
-        release[model] = pinned[model] - int(bool(row["overall_ok"])) + int(would_pass)
-
-    return {
-        "n": dict(totals),
-        "pinned_key": dict(pinned),
-        "release_key": release,
-        "disputed_item_emitted": emitted,
-        "disputed_item_concordant": len(set(emitted.values())) == 1,
-    }
-
-
-def qualified_name_stats() -> dict:
+def qualified_name_stats(repo_root: Path) -> dict:
     """How exposed each category is to the qualified-vs-unqualified question."""
+    data = repo_root / "eval" / "bfcl_data"
     out: dict[str, dict] = {}
-    for category in ("simple_python", "multiple", "live_simple"):
-        questions = _by_id(DATA / f"BFCL_v4_{category}.json")
-        answers = _by_id(DATA / "possible_answer" / f"BFCL_v4_{category}.json")
+    for category in EXPOSURE_CATEGORIES:
+        questions = _rows_by_id(
+            _load_jsonl((data / f"BFCL_v4_{category}.json").read_bytes()), f"{category} questions"
+        )
+        answers = _rows_by_id(
+            _load_jsonl((data / "possible_answer" / f"BFCL_v4_{category}.json").read_bytes()),
+            f"{category} answer key",
+        )
 
         qualified_rows = 0
         key_not_presented = 0
         tail_collisions = 0
         for row_id, question in questions.items():
             presented = {fn["name"] for fn in question["function"]}
-            keyed = key_names(answers[row_id])
+            keyed = _key_names(answers[row_id])
             if any("." in name for name in keyed):
                 qualified_rows += 1
             if not keyed <= presented:
@@ -120,82 +422,220 @@ def qualified_name_stats() -> dict:
     return out
 
 
-def disputed_item_detail() -> dict:
-    questions = _by_id(DATA / "BFCL_v4_simple_python.json")
-    answers = _by_id(DATA / "possible_answer" / "BFCL_v4_simple_python.json")
-    return {
-        "id": DISPUTED_ID,
-        "tools_presented_to_the_model": [
-            fn["name"] for fn in questions[DISPUTED_ID]["function"]
-        ],
-        "pinned_key_expects": sorted(key_names(answers[DISPUTED_ID])),
-        "release_key_expects": [RELEASE_NAME_AT_DISPUTED],
+# ----------------------------------------------------------------- report ----
+
+
+def build_report(
+    manifest_path: Path = DEFAULT_MANIFEST,
+    generations_path: Path = DEFAULT_GENERATIONS,
+    repo_root: Path = REPO_ROOT,
+    *,
+    include_exposure: bool = True,
+) -> dict:
+    inputs = load_verified_inputs(manifest_path, repo_root)
+    generations_bytes = generations_path.read_bytes()
+    generations = _load_jsonl(generations_bytes)
+
+    difference = key_difference(inputs["pinned_key"]["rows"], inputs["release_key"]["rows"])
+    questions = _rows_by_id(inputs["questions"]["rows"], "questions")
+    if set(questions) != set(_rows_by_id(inputs["pinned_key"]["rows"], "pinned key")):
+        raise ComparisonIntegrityError(
+            "the questions file and the answer key cover different item ids"
+        )
+
+    recomputation = check_recomputation_matches_the_run(generations, inputs["pinned_key"]["rows"])
+    pinned_outcomes = rescore(generations, inputs["pinned_key"]["rows"], "the pinned key")
+    release_outcomes = rescore(generations, inputs["release_key"]["rows"], "the release key")
+
+    candidates = sorted(pinned_outcomes)
+    n = {candidate: len(pinned_outcomes[candidate]) for candidate in candidates}
+    scores = {
+        "n": n,
+        "pinned_key": {c: sum(pinned_outcomes[c].values()) for c in candidates},
+        "release_key": {c: sum(release_outcomes[c].values()) for c in candidates},
     }
 
-
-def build_report() -> dict:
-    return {
-        "schema_version": 1,
-        "release_commit": RELEASE_COMMIT,
-        "datafix_commit": DATAFIX_COMMIT,
-        "disputed_item": disputed_item_detail(),
-        "scores": score_tables(),
-        "qualified_name_exposure": qualified_name_stats(),
-        "provenance": {
-            "generations": str(GENERATIONS.relative_to(REPO_ROOT)),
-            "note": (
-                "The release-commit answer-key file is NOT committed to this repo. "
-                "Its value at the disputed row is a stated input reproduced from an "
-                "independent check, not a hash-verified one. Pinning the release key "
-                "canonically would require committing that file and adding it to "
-                "eval/manifests/bfcl_v4_study2.json with its hashes."
+    emitted = {
+        row["model_name"]: row["parsed_name"] for row in generations if row["id"] == DISPUTED_ID
+    }
+    differing_ids = difference["differing_ids"]
+    concordance = {
+        row_id: {
+            "emitted_by_candidate": {
+                row["model_name"]: row["parsed_name"] for row in generations if row["id"] == row_id
+            },
+            "pinned_key_outcome": {c: pinned_outcomes[c][row_id] for c in candidates},
+            "release_key_outcome": {c: release_outcomes[c][row_id] for c in candidates},
+            "concordant_under_pinned_key": (
+                len({pinned_outcomes[c][row_id] for c in candidates}) == 1
             ),
-        },
+            "concordant_under_release_key": (
+                len({release_outcomes[c][row_id] for c in candidates}) == 1
+            ),
+        }
+        for row_id in differing_ids
     }
+
+    pinned_contrasts = contrasts(pinned_outcomes, REFERENCE_CANDIDATE)
+    release_contrasts = contrasts(release_outcomes, REFERENCE_CANDIDATE)
+
+    consistency = {
+        "pinned_key": key_internal_consistency(
+            inputs["questions"]["rows"], inputs["pinned_key"]["rows"]
+        ),
+        "release_key": key_internal_consistency(
+            inputs["questions"]["rows"], inputs["release_key"]["rows"]
+        ),
+    }
+
+    report = {
+        "schema_version": 2,
+        "release_commit": inputs["release_key"]["source_revision"],
+        "datafix_commit": inputs["pinned_key"]["source_revision"],
+        "inputs": {
+            "manifest": inputs["manifest"],
+            "questions": {k: v for k, v in inputs["questions"].items() if k != "rows"},
+            "pinned_key": {k: v for k, v in inputs["pinned_key"].items() if k != "rows"},
+            "release_key": {k: v for k, v in inputs["release_key"].items() if k != "rows"},
+            "generations": {
+                "path": _relative(generations_path, repo_root),
+                "rows": len(generations),
+                "candidates": candidates,
+                **_fingerprint(generations_bytes),
+            },
+        },
+        "key_difference": difference,
+        "key_internal_consistency": consistency,
+        "recomputation_check": recomputation,
+        "scores": scores,
+        "disputed_items": concordance,
+        "contrasts": {
+            "reference": REFERENCE_CANDIDATE,
+            "pinned_key": pinned_contrasts,
+            "release_key": release_contrasts,
+            "invariance": _invariance(pinned_contrasts, release_contrasts),
+        },
+        # Kept for continuity with schema_version 1 consumers.
+        "disputed_item_emitted": emitted,
+    }
+    if include_exposure:
+        report["qualified_name_exposure"] = qualified_name_stats(repo_root)
+    return report
+
+
+def check_report_invariants(report: dict) -> None:
+    """Fail the run if the report does not support the claims made from it.
+
+    These are the properties the ADR, the README number, and the kill decision
+    all lean on. A report that violates one of them must not be written to
+    disk looking like evidence.
+    """
+    if report["key_difference"]["differing_row_count"] != 1:
+        raise ComparisonIntegrityError(
+            f"the two keys differ at {report['key_difference']['differing_row_count']} rows "
+            f"({report['key_difference']['differing_ids']}); this comparison, the "
+            f"concordance argument, and the headline haircut are all scoped to exactly one"
+        )
+    for row_id, detail in report["disputed_items"].items():
+        if not (detail["concordant_under_pinned_key"] and detail["concordant_under_release_key"]):
+            raise ComparisonIntegrityError(
+                f"disputed item {row_id} is not concordant across candidates, so the key "
+                f"choice does move the paired contrasts; the invariance argument fails"
+            )
+    if not report["contrasts"]["invariance"]["identical"]:
+        raise ComparisonIntegrityError(
+            f"the discordant sets differ between the two keys: "
+            f"{report['contrasts']['invariance']['differences']}"
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--generations", type=Path, default=DEFAULT_GENERATIONS)
     parser.add_argument("--json", type=Path, help="also write the report as JSON")
     args = parser.parse_args()
 
-    report = build_report()
+    report = build_report(args.manifest, args.generations)
+    check_report_invariants(report)
+
+    difference = report["key_difference"]
     scores = report["scores"]
-    detail = report["disputed_item"]
 
-    print(f"disputed item: {detail['id']}")
-    print(f"  tools presented to the model : {detail['tools_presented_to_the_model']}")
-    print(f"  pinned key ({DATAFIX_COMMIT[:8]}) expects : {detail['pinned_key_expects']}")
-    print(f"  release key ({RELEASE_COMMIT[:8]}) expects: {detail['release_key_expects']}")
+    print("verified inputs (sha256):")
+    for name, spec in report["inputs"].items():
+        print(f"  {name:<12} {spec['sha256']}  {spec.get('path', '')}")
     print()
 
-    print(f"{'candidate':<10} {'pinned key':>12} {'release key':>13}   emitted at disputed item")
-    for model in sorted(scores["n"]):
-        n = scores["n"][model]
+    print(
+        f"answer keys compared over {difference['row_count']} rows; "
+        f"differing rows: {difference['differing_row_count']} "
+        f"({', '.join(difference['differing_ids'])})"
+    )
+    for row_id, detail in difference["detail"].items():
+        print(f"  {row_id}")
+        pinned_commit = report["datafix_commit"][:8]
+        release_commit = report["release_commit"][:8]
+        print(f"    pinned key ({pinned_commit}) expects : {detail['pinned_key_expects']}")
+        print(f"    release key ({release_commit}) expects: {detail['release_key_expects']}")
+        emitted = report["disputed_items"][row_id]["emitted_by_candidate"]
+        print(f"    emitted by candidates                  : {sorted(set(emitted.values()))}")
+    print()
+    print("internal consistency (does the key only expect names the item presented?):")
+    for name, result in report["key_internal_consistency"].items():
+        if result["consistent"]:
+            print(f"  {name:<12} consistent on all {result['items_checked']} rows")
+        else:
+            first = result["defect"].splitlines()[1].strip()
+            print(f"  {name:<12} INCONSISTENT — {first}")
+    print()
+
+    print(
+        f"re-scored {report['recomputation_check']['rows_rechecked']} rows under the pinned key "
+        f"with {report['recomputation_check']['disagreements']} disagreements against the "
+        f"flags study 1 recorded"
+    )
+    print()
+
+    print(f"{'candidate':<10} {'pinned key':>12} {'release key':>13}")
+    for candidate in sorted(scores["n"]):
+        total = scores["n"][candidate]
         print(
-            f"{model:<10} {scores['pinned_key'][model]:>8}/{n} "
-            f"{scores['release_key'][model]:>9}/{n}   "
-            f"{scores['disputed_item_emitted'][model]}"
+            f"{candidate:<10} {scores['pinned_key'][candidate]:>8}/{total} "
+            f"{scores['release_key'][candidate]:>9}/{total}"
         )
     print()
-    print(f"disputed item concordant across candidates: {scores['disputed_item_concordant']}")
-    print("  (concordant items contribute nothing to a paired test, so every")
-    print("   pairwise delta and McNemar discordant set is invariant to the key)")
+
+    print(f"paired contrasts against '{report['contrasts']['reference']}' (McNemar inputs):")
+    print(f"  {'contrast':<20} {'b':>4} {'c':>4} {'discordant':>11}  discordant-id sha256")
+    for name, stats in report["contrasts"]["pinned_key"].items():
+        print(
+            f"  {name:<20} {stats['reference_only_correct']:>4} "
+            f"{stats['candidate_only_correct']:>4} {stats['discordant']:>11}  "
+            f"{stats['discordant_id_sha256'][:16]}…"
+        )
+    print(
+        f"  identical under both keys: {report['contrasts']['invariance']['identical']} "
+        f"(so every paired delta and McNemar p-value is invariant to the key choice)"
+    )
     print()
 
-    print("qualified-name exposure by category:")
-    print(f"  {'category':<14} {'rows':>5} {'qualified key':>14} "
-          f"{'key not offered':>16} {'tail collisions':>16}")
-    for category, stats in report["qualified_name_exposure"].items():
-        rows = stats["rows"]
+    if "qualified_name_exposure" in report:
+        print("qualified-name exposure by category:")
         print(
-            f"  {category:<14} {rows:>5} "
-            f"{stats['rows_with_module_qualified_key']:>9} "
-            f"({stats['rows_with_module_qualified_key'] / rows:>4.0%}) "
-            f"{stats['rows_where_key_name_not_among_presented_tools']:>16} "
-            f"{stats['rows_where_tools_share_an_unqualified_tail']:>11} "
-            f"({stats['rows_where_tools_share_an_unqualified_tail'] / rows:>4.0%})"
+            f"  {'category':<14} {'rows':>5} {'qualified key':>14} "
+            f"{'key not offered':>16} {'tail collisions':>16}"
         )
+        for category, stats in report["qualified_name_exposure"].items():
+            rows = stats["rows"]
+            print(
+                f"  {category:<14} {rows:>5} "
+                f"{stats['rows_with_module_qualified_key']:>9} "
+                f"({stats['rows_with_module_qualified_key'] / rows:>4.0%}) "
+                f"{stats['rows_where_key_name_not_among_presented_tools']:>16} "
+                f"{stats['rows_where_tools_share_an_unqualified_tail']:>11} "
+                f"({stats['rows_where_tools_share_an_unqualified_tail'] / rows:>4.0%})"
+            )
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

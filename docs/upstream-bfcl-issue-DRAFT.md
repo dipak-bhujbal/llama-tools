@@ -21,6 +21,12 @@ At release commit `58f57e9124ea981403792dd51e00a6577e621fae`, the answer key
 for `BFCL_v4_simple_python.json` item `simple_python_363` expects the function
 name `find_closest`.
 
+For reference, the file this report is against:
+`berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json`
+at that commit — sha256
+`38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb`, Git blob
+`455e9c4df114782ca187ded9665819e7ef912846`, 400 rows.
+
 The question file for that same item presents exactly one tool, named
 `restaurant_search.find_closest`:
 
@@ -54,18 +60,26 @@ Stripping the module prefix before comparison would not be a safe general fix:
 module prefix (e.g. `triangle_properties.get` and `circle_properties.get`), so
 tail-matching would make those items unscoreable.
 
-Happy to send a PR against the release-commit key if that is useful.
+No patch is being proposed: the fix already exists at `9d8416a9…`, and the
+release commit is immutable in any case. The ask is narrower — confirm that
+`9d8416a9…` is the intended value, and if so consider noting it somewhere
+release-pinned consumers will see, since anyone who froze the benchmark at the
+release commit is still scoring this item against a name it does not offer.
 
 ---
 
 ## Notes for the owner before filing
 
-- Verify the release-commit values yourself before posting. This repo does not
-  commit the release-commit file, so the `find_closest` value is reproduced
-  from an independent check rather than hash-verified here — see the
-  `provenance` note in `eval/results/answer_key_comparison.json`.
-- The 858-row and 29-item figures are reproducible from committed data:
-  `python eval/answer_key_comparison.py`.
+- The release-commit values in this draft are hash-verified, not restated. That
+  file is pinned in `eval/manifests/bfcl_v4_study2.json` under role
+  `answer_key_release_commit` and re-verified on every run of the comparison;
+  its sha256 and Git blob id are quoted in the body above and recorded in
+  `eval/results/answer_key_comparison.json`.
+- The comparison also measures the internal-consistency claim directly: the
+  release key fails the answer-key preflight at `simple_python_363`, and the
+  data-fix key passes on all 400 rows.
+- The 858-row and 29-item figures are reproducible from pinned data:
+  `python eval/fetch_pinned_bfcl.py && python eval/answer_key_comparison.py`.
 - Filing this is what converts the disputed item from a private annoyance into
   a visible contribution, and gives the point somewhere to come back from if
   upstream amends the key.

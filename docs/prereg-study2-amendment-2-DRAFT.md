@@ -22,17 +22,35 @@ check on the draft").
 
 **Problem.** Fixing the mining bug where `n_prompts` was loaded *before*
 decontamination (review finding 7) changes what a projected yield means.
-Decontamination removes a measured fraction of the pool, so "pairs per prompt"
-is ambiguous between two denominators that differ by that fraction — and the
-ambiguity leans whichever way flatters the Phase 2 gate.
+Decontamination removes some fraction of the pool — the size of that fraction
+is **not yet measured**, because the run artifact that would measure it has not
+been produced or committed (see §A2.2). Whatever it turns out to be, "pairs per
+prompt" is ambiguous between two denominators that differ by exactly that
+fraction, and the ambiguity leans whichever way flatters the Phase 2 gate. The
+denominator therefore has to be pinned now, before the number that would settle
+it exists.
 
 **Pinned definition.**
 
-> **yield = (mined pairs admitted) / (post-screen prompts mined)**
+> **yield = (pairs retained by deterministic materialization from active ledger
+> candidates) / (post-screen prompts mined)**
+>
+> The numerator counts pairs produced by re-materializing the mining ledger's
+> **active** records — those not superseded by a tombstone — through the
+> deterministic pair-construction path. It is not "pairs admitted", which is
+> ambiguous between sampled, screened, filtered, and written; and it is not a
+> count accumulated by the miner as it runs, which cannot be recovered from the
+> artifact after the fact.
 >
 > The denominator is prompts drawn from the pool *after* the decontamination
 > screen has run, i.e. prompts the miner actually attempted. It is never the
 > requested `--n-prompts`, and never the pre-screen pool size.
+
+Two consequences follow from defining the numerator this way, and both are the
+reason for it. A rolled-back mining batch cannot inflate the numerator, because
+superseded records are not active. And the numerator is recomputable by anyone
+holding the ledger: the same ledger materializes to the same count, so a
+reported yield is checkable rather than merely reported.
 
 Any projection to a larger pool (e.g. "projected pairs at 10k prompts") is
 computed on post-screen prompts and **must state the survival rate used for the
@@ -74,15 +92,34 @@ files; full report at `eval/results/answer_key_comparison.json`):
 | `multiple` | 200 | **123 (62%)** | **29 (14%)** |
 | `live_simple` | 258 | 77 (30%) | 0 (0%) |
 
-**Pinned rule.**
+**Pinned rule.** Two parts, both executable.
 
-> A predicted function name is correct if and only if it is **byte-identical to
-> the name as presented to the model in that item's tool list**. No
-> normalization is applied: no case folding, no whitespace stripping, no
-> module-prefix stripping, and no matching on the unqualified tail.
+> **(a) Scoring.** A predicted function name is correct if and only if it is
+> **byte-identical to the answer key's name for that item**. No normalization
+> is applied: no case folding, no whitespace stripping, no module-prefix
+> stripping, and no matching on the unqualified tail.
+>
+> **(b) Preflight.** Before any item is scored, the scorer checks that every
+> name the answer key expects for that item **is among the names presented to
+> the model in that item's tool list**. An item that fails this check is
+> refused, not graded: the run stops and names the item.
 
-This is what `eval/bfcl_simple.py` already does (`name_ok = parsed_name ==
-gt_name`). The amendment states it so it cannot drift, and records the measured
+Part (a) alone is not the rule. `parsed_name == gt_name` is satisfiable by a
+key that expects a name the model was never offered — which is exactly the
+`simple_python_363` defect, and exactly the case where exact matching stops
+being a fair rule and becomes an unpassable one. The two parts together say
+what is intended: *the presented name is the correct name.* Part (b) is what
+makes that checkable rather than assumed, and it is why the rule must fail
+closed instead of silently scoring such an item wrong.
+
+Part (a) is what `eval/bfcl_scoring.py` already does (`name_ok = parsed_name ==
+gt_name`). Part (b) is implemented as `preflight_key_names()` in the same
+module, called by `eval/bfcl_simple.py` before generation begins, so a key
+defect halts the run *before* GPU time is spent rather than after. It currently
+passes on every pinned row (see below); it exists so that a future upstream
+revision cannot introduce a defect that scores as a model failure.
+
+The amendment states the rule so it cannot drift, and records the measured
 reason it must not:
 
 - On the `multiple` co-primary, **29 of 200 items (14%) offer two or more tools
@@ -97,11 +134,13 @@ reason it must not:
   benchmark did not offer.
 
 **Consequence for a disagreeing key.** If a pinned answer key expects a name
-that is *not* among the tools presented for that item, that item is
-internally inconsistent and cannot be scored under this rule. Such an item is
-reported as a **key defect**, with the discrepancy documented and filed
-upstream — it is not silently graded either way, and it is not dropped from the
-denominator without being named.
+that is *not* among the tools presented for that item, that item is internally
+inconsistent and cannot be scored under this rule. The preflight in part (b)
+raises on it, the run refuses to proceed, and the item is reported as a **key
+defect** with the discrepancy documented and filed upstream. It is not silently
+graded either way, and it is not dropped from the denominator without being
+named. Recording the defect and re-running with a documented exclusion is a
+preregistration amendment, not a scoring detail.
 
 ---
 
@@ -113,6 +152,19 @@ denominator without being named.
       of provisional numbers — §A2.2.
 - [x] Scorer normalization rule pinned before the prereg freezes, with the
       `multiple` set checked — §A2.3.
+
+## Corrections applied in review (msg 2045)
+
+- [x] §A2.1 no longer describes the decontamination fraction as *measured*. It
+      is unmeasured until the run artifact of §A2.2 exists; the denominator is
+      pinned now precisely because that number does not yet exist.
+- [x] §A2.1 defines the numerator as pairs retained by deterministic
+      materialization from **active** ledger candidates, replacing the
+      ambiguous "pairs admitted".
+- [x] §A2.3 makes the rule executable. Exact `parsed_name == gt_name` does not
+      enforce key/tool-list consistency, so the rule now has a preflight part
+      that fails closed, implemented as `preflight_key_names()` and called
+      before generation.
 
 ## Open dependency
 

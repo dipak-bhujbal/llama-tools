@@ -93,6 +93,19 @@
       "row_count": 258,
       "unique_id_count": 258,
       "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    },
+    {
+      "category": "simple_python",
+      "role": "answer_key_release_commit",
+      "role_note": "The BFCL v4 release commit's answer key for this category, pinned as a comparison input only. It is NOT the key study 1 scored against and is not used by eval/bfcl_simple.py. eval/answer_key_comparison.py verifies it against these hashes and re-scores the committed generations under both keys, so the release-key figures rest on bytes rather than on a stated value.",
+      "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/release_commit/possible_answer/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "455e9c4df114782ca187ded9665819e7ef912846",
+      "sha256": "38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
     }
   ]
 }
