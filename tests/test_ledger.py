@@ -187,3 +187,141 @@ def test_summary_distinguishes_physical_lines_from_parsed_records(tmp_path):
     assert torn["total_lines"] == 3
     assert torn["parsed_records"] == 2
     assert torn["active"] == 2
+
+
+# --------------------------------------------------------------------------
+# Append-after-truncated-tail: rotation to a hash-linked segment.
+#
+# `_read_records` tolerates a crash-truncated final line, but tolerating it on
+# read is not enough. The next append opens the same file in "a" mode and
+# writes after the fragment, splicing fragment and new record into one line.
+# That line is then a corrupt line that is NOT last, which is the one condition
+# the ledger treats as a hard integrity failure — so a single crash mid-write
+# would make the ledger permanently unreadable and silently destroy the first
+# record of the resumed run. Rotating to a new hash-linked segment fixes this
+# without editing a single byte of the damaged one.
+# --------------------------------------------------------------------------
+
+
+def _torn_tail(path: Path, fragment: bytes = b'{"prompt_id": "p3", "se') -> None:
+    """Simulate a crash partway through writing the next record."""
+    raw = path.read_bytes()
+    assert raw.endswith(b"\n"), "fixture expects a clean file to damage"
+    path.write_bytes(raw + fragment)
+
+
+def test_append_after_truncated_tail_does_not_corrupt_the_ledger(tmp_path: Path) -> None:
+    """The regression: appending after a torn tail must stay readable."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    ledger.append({"prompt_id": "p2"})
+    _torn_tail(path)
+
+    ledger.append({"prompt_id": "p3"})
+
+    # Before the fix this raised ValueError("corrupt ledger line ...").
+    assert ledger.processed_ids() == {"p1", "p2", "p3"}
+
+
+def test_append_after_truncated_tail_preserves_the_damaged_bytes(tmp_path: Path) -> None:
+    """Never silently truncate: the fragment is evidence and must survive."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    damaged = path.read_bytes()
+
+    ledger.append({"prompt_id": "p2"})
+
+    assert path.read_bytes() == damaged, "damaged segment was modified"
+
+
+def test_append_after_truncated_tail_rotates_to_a_new_segment(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p2"})
+
+    segments = ledger.segment_paths()
+    assert len(segments) == 2
+    assert segments[0] == path
+    assert segments[1].exists()
+
+
+def test_rotated_segment_is_hash_linked_to_its_predecessor(tmp_path: Path) -> None:
+    """The chain is verifiable: the header pins the previous segment's bytes."""
+    import hashlib
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p2"})
+
+    header = json.loads(ledger.segment_paths()[1].read_text().splitlines()[0])
+    assert header["type"] == "segment_open"
+    assert header["prev_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert header["prev_bytes"] == len(path.read_bytes())
+
+
+def test_broken_segment_chain_fails_closed(tmp_path: Path) -> None:
+    """A tampered predecessor must be detected, not read past."""
+    from mining.ledger import LedgerIntegrityError
+
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p2"})
+
+    # Rewrite history in the sealed segment: same line count, different bytes.
+    sealed = path.read_bytes().replace(b'"p1"', b'"pX"')
+    path.write_bytes(sealed)
+
+    with pytest.raises(LedgerIntegrityError):
+        ledger.processed_ids()
+
+
+def test_seq_stays_monotonic_across_a_rotation(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    ledger.append({"prompt_id": "p2"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p3"})
+    ledger.append({"prompt_id": "p4"})
+
+    seqs = [rec["seq"] for rec in ledger.records()]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))
+
+
+def test_dedup_and_rollback_still_span_segments(tmp_path: Path) -> None:
+    """Rotation must not create a second, independent namespace."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p2"})
+
+    with pytest.raises(ValueError):
+        ledger.append({"prompt_id": "p1"})
+
+    assert ledger.redo_last(2) == 2
+    assert ledger.processed_ids() == set()
+
+
+def test_summary_reports_segments_and_the_surviving_torn_tail(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append({"prompt_id": "p1"})
+    _torn_tail(path)
+    ledger.append({"prompt_id": "p2"})
+
+    summary = ledger.summary()
+    assert summary["segments"] == 2
+    assert summary["truncated_tail"] is True, "the fragment is still on disk"
+    assert summary["active"] == 2
+    assert summary["total_lines"] - summary["parsed_records"] == 1
