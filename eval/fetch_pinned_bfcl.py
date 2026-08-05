@@ -23,6 +23,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
 RAW_URL = "https://raw.githubusercontent.com/{repo}/{revision}/{path}"
 
+MANIFEST_SCHEMA_VERSION = 2
+QUESTIONS_ROLE = "questions"
+ANSWER_KEY_ROLE = "answer_key"
+
+# This module is imported both as a script-relative sibling (`fetch_pinned_bfcl`,
+# by eval/*.py) and as a namespace-package module (`eval.fetch_pinned_bfcl`, by
+# the tests). The scoring rule has to come in under either name.
+try:
+    from bfcl_scoring import KeyDefectError, preflight_key_names
+except ImportError:  # pragma: no cover - exercised by whichever import form is not used
+    from eval.bfcl_scoring import KeyDefectError, preflight_key_names
+
 
 class VerificationError(ValueError):
     """The bytes on disk or from upstream do not match the frozen manifest."""
@@ -34,7 +46,7 @@ def _digest(name: str, payload: bytes) -> str:
 
 def _git_blob_sha1(payload: bytes) -> str:
     header = f"blob {len(payload)}\0".encode()
-    return hashlib.sha1(header + payload).hexdigest()  # noqa: S324 - Git object id
+    return hashlib.sha1(header + payload).hexdigest()  # Git object id, not a security digest
 
 
 def _jsonl_ids(payload: bytes) -> list[str]:
@@ -101,7 +113,11 @@ def _download(url: str) -> bytes:
         "/etc/ssl/cert.pem",
     ]
     certificate_file = next(
-        (candidate for candidate in certificate_candidates if candidate and Path(candidate).is_file()),
+        (
+            candidate
+            for candidate in certificate_candidates
+            if candidate and Path(candidate).is_file()
+        ),
         None,
     )
     context = ssl.create_default_context(cafile=certificate_file)
@@ -142,9 +158,156 @@ def _content_addressed_backup(source: Path, backup_root: Path, sha256: str) -> P
 
 def load_manifest(path: Path) -> dict[str, Any]:
     manifest = json.loads(path.read_text())
-    if manifest.get("schema_version") != 1 or not manifest.get("files"):
+    version = manifest.get("schema_version")
+    if version == 1:
+        raise VerificationError(
+            f"{path}: schema_version 1 predates the standing answer-name preflight and "
+            f"declares no per-category answer-key policy, so a category with no key would "
+            f"be skipped rather than checked; re-pin at schema_version {MANIFEST_SCHEMA_VERSION}"
+        )
+    if version != MANIFEST_SCHEMA_VERSION or not manifest.get("files"):
         raise VerificationError(f"unsupported or empty manifest: {path}")
     return manifest
+
+
+def _rows_by_id(payload: bytes, label: str) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for line in payload.decode("utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            rows[str(row["id"])] = row
+    if not rows:
+        raise VerificationError(f"{label}: no rows")
+    return rows
+
+
+def preflight_manifest_keys(
+    manifest: dict[str, Any],
+    payloads: dict[tuple[str, str], bytes],
+) -> list[dict[str, Any]]:
+    """Check every pinned answer key against the tools its items actually present.
+
+    `simple_python_363` was found by hand, one category at a time. This runs the
+    same rule over every category the manifest pins, every time the manifest is
+    verified, so its cousins surface before a study freezes rather than after it
+    publishes.
+
+    Every category is either checked or explicitly declared keyless; a category
+    the manifest never classifies is an error, because "no answer key found" and
+    "no answer key exists by schema" are indistinguishable from the file list
+    alone and only one of them is safe to pass over.
+    """
+    declared = manifest.get("categories")
+    if not declared:
+        raise VerificationError(
+            "manifest declares no `categories` block, so answer-key policy per category "
+            "is unknown; refusing to guess which categories may legitimately lack a key"
+        )
+
+    keys_by_category: dict[str, dict[str, Any]] = {}
+    comparison_only: list[dict[str, Any]] = []
+    categories_seen: set[str] = set()
+    for spec in manifest["files"]:
+        categories_seen.add(spec["category"])
+        if spec["role"] == ANSWER_KEY_ROLE:
+            keys_by_category[spec["category"]] = spec
+        elif spec["role"] not in (QUESTIONS_ROLE, ANSWER_KEY_ROLE):
+            comparison_only.append(spec)
+
+    unclassified = sorted(categories_seen - set(declared))
+    if unclassified:
+        raise VerificationError(
+            f"manifest pins files for {unclassified} but declares no answer-key policy for "
+            f"them; add each to `categories` as `required` or `none_by_schema`"
+        )
+    unpinned = sorted(set(declared) - categories_seen)
+    if unpinned:
+        raise VerificationError(
+            f"manifest declares policy for {unpinned} but pins no files for them"
+        )
+
+    receipts: list[dict[str, Any]] = []
+    for category in sorted(declared):
+        policy = declared[category].get("answer_key_policy")
+        key_spec = keys_by_category.get(category)
+        if policy == "required":
+            if key_spec is None:
+                raise VerificationError(
+                    f"{category}: answer_key_policy is `required` but the manifest pins no "
+                    f"{ANSWER_KEY_ROLE} for it"
+                )
+            receipts.append(_preflight_one(category, key_spec, payloads, expect="clean"))
+        elif policy == "none_by_schema":
+            if key_spec is not None:
+                raise VerificationError(
+                    f"{category}: answer_key_policy is `none_by_schema` but the manifest "
+                    f"pins {key_spec['local_path']}; one of the two is wrong"
+                )
+            receipts.append(
+                {
+                    "category": category,
+                    "role": None,
+                    "status": "no-answer-key-by-schema",
+                    "items_checked": 0,
+                    "note": declared[category].get("note", ""),
+                }
+            )
+        else:
+            raise VerificationError(
+                f"{category}: unknown answer_key_policy {policy!r}; expected `required` or "
+                f"`none_by_schema`"
+            )
+
+    for spec in comparison_only:
+        expectation = spec.get("preflight_expectation")
+        if expectation not in ("clean", "defective"):
+            raise VerificationError(
+                f"{spec['category']}/{spec['role']}: comparison-only key declares "
+                f"preflight_expectation {expectation!r}; expected `clean` or `defective`"
+            )
+        receipts.append(_preflight_one(spec["category"], spec, payloads, expect=expectation))
+
+    return receipts
+
+
+def _preflight_one(
+    category: str,
+    key_spec: dict[str, Any],
+    payloads: dict[tuple[str, str], bytes],
+    *,
+    expect: str,
+) -> dict[str, Any]:
+    """Run the answer-name preflight for one key and hold it to `expect`."""
+    question_payload = payloads.get((category, QUESTIONS_ROLE))
+    if question_payload is None:
+        raise VerificationError(
+            f"{category}/{key_spec['role']}: cannot preflight an answer key without the "
+            f"category's pinned questions file"
+        )
+    questions = _rows_by_id(question_payload, f"{category}/{QUESTIONS_ROLE}")
+    answers = _rows_by_id(payloads[(category, key_spec["role"])], f"{category}/{key_spec['role']}")
+
+    defect: str | None = None
+    try:
+        checked = preflight_key_names(questions, answers)
+    except KeyDefectError as exc:
+        checked, defect = len(answers), str(exc)
+
+    if expect == "clean" and defect is not None:
+        raise VerificationError(f"{category}/{key_spec['role']}: {defect}")
+    if expect == "defective" and defect is None:
+        raise VerificationError(
+            f"{category}/{key_spec['role']}: manifest records this key as defective, but it "
+            f"now passes the answer-name preflight; the canonical-key adjudication rested on "
+            f"it failing and must be revisited rather than left standing"
+        )
+    return {
+        "category": category,
+        "role": key_spec["role"],
+        "status": "defective-as-recorded" if defect else "clean",
+        "items_checked": checked,
+        "defect": defect,
+    }
 
 
 def process_manifest(
@@ -158,6 +321,7 @@ def process_manifest(
     default_revision = manifest["default_source_revision"]
     repository = manifest["upstream_repository"]
     verified: list[Path] = []
+    payloads: dict[tuple[str, str], bytes] = {}
 
     for spec in manifest["files"]:
         revision = spec.get("source_revision", default_revision)
@@ -176,6 +340,7 @@ def process_manifest(
                 _atomic_write(destination, payload)
 
         verify_payload(payload, spec)
+        payloads[(spec["category"], spec["role"])] = payload
         verified.append(destination)
         if backup_dir is not None:
             _content_addressed_backup(destination, backup_dir, spec["sha256"])
@@ -183,6 +348,17 @@ def process_manifest(
             f"verified {spec['category']}/{spec['role']}: "
             f"{spec['row_count']} rows sha256={spec['sha256']} revision={revision}"
         )
+
+    # Bytes matching the pin only proves the file is the one we froze. The
+    # preflight is what says the thing we froze is scoreable at all.
+    for receipt in preflight_manifest_keys(manifest, payloads):
+        if receipt["status"] == "no-answer-key-by-schema":
+            print(f"preflight {receipt['category']}: no answer key by schema (declared)")
+        else:
+            print(
+                f"preflight {receipt['category']}/{receipt['role']}: {receipt['status']} "
+                f"({receipt['items_checked']} key items checked)"
+            )
     return verified
 
 

@@ -1,4 +1,41 @@
 {
+  "adjudication": {
+    "adjudicated_by": "Dipak (owner)",
+    "adjudicated_on": "2026-08-05",
+    "adjudication_ref": "#general msg 2063",
+    "candidate_keys": {
+      "pinned_key": {
+        "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+        "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+        "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a"
+      },
+      "release_key": {
+        "git_blob_sha1": "455e9c4df114782ca187ded9665819e7ef912846",
+        "sha256": "38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb",
+        "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae"
+      }
+    },
+    "derived_from_measurement": {
+      "decided": true,
+      "reason": "pinned_key is the only candidate whose every expected name appears among the tools its item presented",
+      "selected": "pinned_key",
+      "validity": {
+        "pinned_key": true,
+        "release_key": false
+      }
+    },
+    "measured_outcome": {
+      "pinned_key": "consistent \u2014 400/400 items checked",
+      "release_key": "inconsistent \u2014 simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
+    },
+    "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
+    "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
+    "scope_of_the_choice": "The two keys differ at exactly one row of 400. Every candidate emits the qualified name at that item, so it is concordant across candidates: all paired contrasts, every McNemar input, and the DPO kill decision are byte-identical under either key. The choice moves one headline number (369/400 vs 368/400) and nothing else.",
+    "selected": "pinned_key",
+    "selected_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+    "validity_check": "eval/bfcl_scoring.py:preflight_key_names \u2014 every name an answer key expects must be among the tools that item actually presented to the model",
+    "verified_by": "eval/answer_key_comparison.py re-derives this selection from the measured preflight outcomes and fails if the recorded selection is not what the rule produces"
+  },
   "contrasts": {
     "invariance": {
       "contrasts_compared": [
@@ -163,10 +200,10 @@
       "verified_against": "eval/results/evidence.json"
     },
     "manifest": {
-      "bytes": 6033,
-      "git_blob_sha1": "6ec1990bdcb5542c07d9406de823c9c8a4c0fa2c",
+      "bytes": 8962,
+      "git_blob_sha1": "bec2d9409d077bf406e93fb04e736decb68c3364",
       "path": "eval/manifests/bfcl_v4_study2.json",
-      "sha256": "0ed02d2f5be884a6e501e0e9f36e15ca1966587134cf1041cd3706be91a6cd7c"
+      "sha256": "e13c35305658b7e481e61292a2677cd63e5790d76ae337c5339adae36be9837a"
     },
     "pinned_key": {
       "bytes": 63627,
@@ -248,7 +285,7 @@
     "rows_rechecked": 1600
   },
   "release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
-  "schema_version": 2,
+  "schema_version": 3,
   "scores": {
     "n": {
       "dpo-100": 400,

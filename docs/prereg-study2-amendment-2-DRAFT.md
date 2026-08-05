@@ -103,6 +103,12 @@ files; full report at `eval/results/answer_key_comparison.json`):
 > name the answer key expects for that item **is among the names presented to
 > the model in that item's tool list**. An item that fails this check is
 > refused, not graded: the run stops and names the item.
+>
+> **(c) Both forms offered at once.** Where a single item presents *both* a
+> module-qualified name and its own bare tail as separate tools (`geometry.area`
+> alongside `area`), they are **two distinct tools**, and (a) applies unchanged:
+> only the key's exact string is correct. The two forms are never treated as
+> spellings of one another, in either direction, and the item is not excluded.
 
 Part (a) alone is not the rule. `parsed_name == gt_name` is satisfiable by a
 key that expects a name the model was never offered — which is exactly the
@@ -119,6 +125,26 @@ defect halts the run *before* GPU time is spent rather than after. It currently
 passes on every pinned row (see below); it exists so that a future upstream
 revision cannot introduce a defect that scores as a model failure.
 
+Part (b) also runs as a **standing manifest check**: `eval/fetch_pinned_bfcl.py`
+applies it to every pinned category on every fetch and every `--verify-only`
+pass, so a defect is caught when the data is verified rather than only when a
+category is scored. Each category is either checked or *declared* keyless in the
+manifest — `irrelevance` ships no `possible_answer` file by schema — and a
+category the manifest does not classify fails verification rather than being
+skipped, since "the key is absent" and "no key should exist" are otherwise
+indistinguishable from the file list. Receipts at the pinned revision:
+
+| category | rows | answer-name preflight |
+|---|---:|---|
+| `simple_python` | 400 | clean, 400/400 key items |
+| `multiple` | 200 | clean, 200/200 key items |
+| `live_simple` | 258 | clean, 258/258 key items |
+| `irrelevance` | 240 | no answer key by schema (declared) |
+
+This settles the co-primary before the freeze: `multiple`, the category most
+exposed to the qualified-name question at 62% qualified keys and 14% tail
+collisions, carries no key defect at the pinned revision.
+
 The amendment states the rule so it cannot drift, and records the measured
 reason it must not:
 
@@ -132,6 +158,13 @@ reason it must not:
   to the model in **every** row (0 exceptions in 858 rows). Exact matching is
   therefore always satisfiable; it never penalizes a model for a name the
   benchmark did not offer.
+- Part (c)'s case does not currently arise: **0 of 858 rows** present both a
+  qualified name and its own bare tail, and **0 rows** have a key expecting a
+  bare name that is another offered tool's tail. The clause is pinned anyway,
+  because it is the one configuration in which a tail-matching reader and an
+  exact-matching reader would silently disagree about which tool was selected,
+  and the prereg should not be the thing that has to be amended if a future
+  pinned revision introduces one.
 
 **Consequence for a disagreeing key.** If a pinned answer key expects a name
 that is *not* among the tools presented for that item, that item is internally

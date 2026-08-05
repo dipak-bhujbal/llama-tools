@@ -179,7 +179,8 @@ def load_verified_inputs(
         "manifest": {
             "path": _relative(manifest_path, repo_root),
             **_fingerprint(manifest_bytes),
-        }
+        },
+        "_criterion": manifest.get("canonical_key_criterion"),
     }
     for name, (category, role) in {
         "questions": (CATEGORY, QUESTIONS_ROLE),
@@ -432,6 +433,46 @@ def key_internal_consistency(questions_rows: list[dict], key_rows: list[dict]) -
     return {"consistent": True, "items_checked": checked, "defect": None}
 
 
+def apply_canonical_criterion(consistency: dict) -> dict:
+    """Which key does the rule select, given only the measured preflight results?
+
+    The rule is `canonical = pinned AND valid; when two pinned keys disagree,
+    the preflight decides`. Both candidates are hash-pinned, so provenance no
+    longer separates them and validity is the whole of it.
+
+    This takes the measured outcomes and nothing else — no key name, no score,
+    no record of what was chosen. That is the point: the report can then show
+    the rule producing the selection rather than the selection being asserted
+    alongside a rule. Had the preflight failed on the data-fix key, this same
+    function would return `release_key` and the headline would be 368/400.
+
+    Returns the selection, or `None` when the criterion does not discriminate —
+    which is a fresh owner decision, not a default.
+    """
+    valid = {name: bool(result["consistent"]) for name, result in consistency.items()}
+    survivors = sorted(name for name, ok in valid.items() if ok)
+    if len(survivors) == 1:
+        return {
+            "selected": survivors[0],
+            "decided": True,
+            "validity": valid,
+            "reason": (
+                f"{survivors[0]} is the only candidate whose every expected name appears "
+                f"among the tools its item presented"
+            ),
+        }
+    return {
+        "selected": None,
+        "decided": False,
+        "validity": valid,
+        "reason": (
+            "all candidate keys are valid, so the preflight does not discriminate"
+            if survivors
+            else "no candidate key is valid, so there is nothing to select"
+        ),
+    }
+
+
 # -------------------------------------------------------------- contrasts ----
 
 
@@ -603,10 +644,35 @@ def build_report(
         ),
     }
 
+    criterion = inputs.get("_criterion")
+    if not criterion:
+        raise ComparisonIntegrityError(
+            "the manifest declares no `canonical_key_criterion`; this report is the "
+            "permanent record of the canonical-key adjudication and must not be written "
+            "without the rule that produced it"
+        )
+    derived = apply_canonical_criterion(consistency)
+
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "release_commit": inputs["release_key"]["source_revision"],
         "datafix_commit": inputs["pinned_key"]["source_revision"],
+        "adjudication": {
+            **criterion,
+            "derived_from_measurement": derived,
+            "candidate_keys": {
+                "pinned_key": {
+                    "source_revision": inputs["pinned_key"]["source_revision"],
+                    "sha256": inputs["pinned_key"]["sha256"],
+                    "git_blob_sha1": inputs["pinned_key"]["git_blob_sha1"],
+                },
+                "release_key": {
+                    "source_revision": inputs["release_key"]["source_revision"],
+                    "sha256": inputs["release_key"]["sha256"],
+                    "git_blob_sha1": inputs["release_key"]["git_blob_sha1"],
+                },
+            },
+        },
         "inputs": {
             "manifest": inputs["manifest"],
             "questions": {k: v for k, v in inputs["questions"].items() if k != "rows"},
@@ -672,6 +738,29 @@ def check_report_invariants(report: dict) -> None:
             f"{report['contrasts']['invariance']['differences']}"
         )
 
+    adjudication = report["adjudication"]
+    derived = adjudication["derived_from_measurement"]
+    if not derived["decided"]:
+        raise ComparisonIntegrityError(
+            f"the canonical-key criterion does not decide between the candidates "
+            f"({derived['reason']}); the recorded selection "
+            f"{adjudication['selected']!r} therefore rests on something this artifact "
+            f"does not measure, and needs a fresh owner decision"
+        )
+    if adjudication["selected"] != derived["selected"]:
+        raise ComparisonIntegrityError(
+            f"the manifest records {adjudication['selected']!r} as canonical, but the "
+            f"recorded criterion applied to the measured preflight outcomes selects "
+            f"{derived['selected']!r} ({derived['reason']}); the rule and the choice "
+            f"have come apart"
+        )
+    selected_revision = adjudication["candidate_keys"][derived["selected"]]["source_revision"]
+    if adjudication["selected_source_revision"] != selected_revision:
+        raise ComparisonIntegrityError(
+            f"the adjudication names revision {adjudication['selected_source_revision']} "
+            f"but {derived['selected']} is pinned at {selected_revision}"
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -718,6 +807,20 @@ def main() -> None:
         else:
             first = result["defect"].splitlines()[1].strip()
             print(f"  {name:<12} INCONSISTENT — {first}")
+    print()
+
+    adjudication = report["adjudication"]
+    derived = adjudication["derived_from_measurement"]
+    print("canonical-key adjudication:")
+    print(f"  rule       {adjudication['rule']}")
+    print(f"  applied    selects {derived['selected']} — {derived['reason']}")
+    print(
+        f"  recorded   {adjudication['selected']} "
+        f"({adjudication['selected_source_revision'][:8]}), "
+        f"by {adjudication['adjudicated_by']} on {adjudication['adjudicated_on']} "
+        f"[{adjudication['adjudication_ref']}]"
+    )
+    print("  the recorded choice is the one the rule produces from the measurements above")
     print()
 
     print(

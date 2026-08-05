@@ -11,7 +11,8 @@
 Study 1 shipped an SFT-tuned Llama-3.1-8B tool-calling model (92.25% BFCL
 simple_python on 399 held-out examples; MMLU 0.659 vs 0.683 base) and killed
 two DPO variants against pre-registered abort criteria: training-time
-preference margins improved while held-out tool-use monotonically degraded.
+preference margins improved while held-out tool-use came in below SFT at every
+evaluated checkpoint.
 The published ADR concluded DPO's preference signal is redundant when SFT is
 at ceiling on ground-truth tasks. Study 2 (this handoff) tests whether DPO
 becomes non-redundant under corrected conditions: on-policy hard negatives
@@ -67,7 +68,7 @@ and "DPO still doesn't help" are acceptable, publishable endpoints.
 | Shipped SFT | **92.25% BFCL simple_python** (399 held-out); MMLU 0.659 vs base 0.683 (-2.4 pts, inside pre-set band) | eval artifacts |
 | DPO v1 smoke | 32 steps, batch 2, no eval set; rewards/accuracies hit 1.0 almost immediately (easy-negatives flag) | outputs/dpo-smoke |
 | DPO v2 | 622 steps, batch 2, peak LR 5e-06, ~1.2-1.3k pairs, eval every ~50 steps; margins grew past 9, logps/rejected drifted -28 to -135 unbounded | /workspace/keep/checkpoint-100..400+, logs |
-| Kill decision | Both DPO variants closed as documented negative results: held-out tool-use monotonically degraded while margins improved | ADR |
+| Kill decision | Both DPO variants closed as documented negative results: held-out tool-use came in below SFT at every evaluated checkpoint while margins improved | ADR |
 | Published | `centuriandip/llama-3.1-8b-tools-dpo-v2-evidence` (HF), repo on GitHub | public |
 
 ### 2.2 New assets produced 2026-08-04
@@ -390,7 +391,7 @@ Verified against committed configs and recovered artifacts:
 | "~1.2–1.3k pairs" | Matches neither arm: v1 = 10,242, v2 = 2,523. |
 | "batch 2" | Per-device. Effective batch is **16** (`GRAD_ACCUM_STEPS = 8`) in all three scripts. |
 | "SFT smoke ... eval_loss ~0.212" | That is the Week-4 **full** run's final value (0.2117). The Week-2 smoke was 500 examples / 29 steps. No evidence found for the "config said 1 epoch" discrepancy. |
-| "monotonically degraded held-out tool-use" | Marginal counts are monotonic, but under paired exact McNemar with Holm correction across the three contrasts, **no contrast is significant** (best adjusted p = 0.0638). ADR-008 has been corrected: it claims failure to improve, not measured degradation. |
+| "monotonically degraded held-out tool-use" | Marginal counts are monotonic, but under paired exact McNemar with Holm correction across the three contrasts, **no contrast is significant** (best adjusted p = 0.0638). ADR-008 has been corrected: it claims failure to improve, not measured degradation. **Applied 2026-08-05:** §0 and the §2.1 kill-decision row now read "came in below SFT at every evaluated checkpoint", which describes the marginal counts without implying three measured regressions. |
 
 ## D. §4 eval sets were never frozen
 

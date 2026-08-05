@@ -1,9 +1,13 @@
 # Upstream issue draft — BFCL v4 `simple_python_363` answer key
 
-**STATUS: DRAFT for the owner to file. Not filed by any agent.**
+**STATUS: filing authorized by the owner (#general msg 2063), not yet filed.**
 
-Ground Rule 7 puts anything public in human hands. This is text to paste, not
-an action taken. Target: `ShishirPatil/gorilla`, Issues.
+Ground Rule 7 makes publishing a human decision; the owner has taken it —
+"still file upstream, and the filing just got stronger". The remaining gate is
+review, not permission: this is filed only after the adjudication and standing-
+preflight commit is signed off, so the issue cites an artifact that already
+exists. Target: `ShishirPatil/gorilla`, Issues. Search for a duplicate first;
+link the existing issue instead if one is open.
 
 The argument got stronger after the scorer check. The original framing was
 "qualified naming is arguably correct" — a matter of taste. The evidence says
@@ -78,8 +82,19 @@ release commit is still scoring this item against a name it does not offer.
 - The comparison also measures the internal-consistency claim directly: the
   release key fails the answer-key preflight at `simple_python_363`, and the
   data-fix key passes on all 400 rows.
+- That measurement is what selected our canonical key, under a rule fixed in
+  advance of the outcome — *canonical = pinned AND valid; when two pinned keys
+  disagree, the preflight decides*. Both candidates are hash-pinned, so the
+  choice turned on validity alone; had the preflight failed on `9d8416a9…`
+  instead, the same rule would have selected the release key and our headline
+  would be lower. The rule, both keys' hashes, and the measured outcomes are
+  recorded in `eval/results/answer_key_comparison.json`, which fails to build if
+  the recorded choice is not the one the rule produces.
 - The 858-row and 29-item figures are reproducible from pinned data:
   `python eval/fetch_pinned_bfcl.py && python eval/answer_key_comparison.py`.
+  The first command now also runs the answer-name preflight over every pinned
+  category, so the "0 exceptions in 858 rows" claim above is re-checked on every
+  verification rather than measured once.
 - Filing this is what converts the disputed item from a private annoyance into
   a visible contribution, and gives the point somewhere to come back from if
   upstream amends the key.

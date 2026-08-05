@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "benchmark": "Berkeley Function Calling Leaderboard v4",
   "upstream_repository": "ShishirPatil/gorilla",
   "upstream_release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
@@ -8,6 +8,40 @@
   "license": {
     "spdx": "Apache-2.0",
     "url": "https://github.com/ShishirPatil/gorilla/blob/9d8416a96d1d69975493f1b6d60ff07d12a1726a/LICENSE"
+  },
+  "canonical_key_criterion": {
+    "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
+    "validity_check": "eval/bfcl_scoring.py:preflight_key_names — every name an answer key expects must be among the tools that item actually presented to the model",
+    "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
+    "adjudicated_by": "Dipak (owner)",
+    "adjudicated_on": "2026-08-05",
+    "adjudication_ref": "#general msg 2063",
+    "selected": "pinned_key",
+    "selected_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+    "measured_outcome": {
+      "pinned_key": "consistent — 400/400 items checked",
+      "release_key": "inconsistent — simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
+    },
+    "scope_of_the_choice": "The two keys differ at exactly one row of 400. Every candidate emits the qualified name at that item, so it is concordant across candidates: all paired contrasts, every McNemar input, and the DPO kill decision are byte-identical under either key. The choice moves one headline number (369/400 vs 368/400) and nothing else.",
+    "verified_by": "eval/answer_key_comparison.py re-derives this selection from the measured preflight outcomes and fails if the recorded selection is not what the rule produces"
+  },
+  "categories": {
+    "simple_python": {
+      "answer_key_policy": "required",
+      "note": "Study-1 primary. Answer key carries ground_truth per item."
+    },
+    "multiple": {
+      "answer_key_policy": "required",
+      "note": "Study-2 co-primary. Several tools per prompt, so the qualified-name class of defect that produced simple_python_363 is most likely here; the standing preflight covers it."
+    },
+    "live_simple": {
+      "answer_key_policy": "required",
+      "note": "Exposure/secondary set. Answer key carries ground_truth per item."
+    },
+    "irrelevance": {
+      "answer_key_policy": "none_by_schema",
+      "note": "Irrelevance items are scored on whether the model declines to call any function, so upstream ships no possible_answer file for this category. Declared here so the standing preflight records it as deliberately keyless rather than silently skipping a category that merely happens to be absent from the manifest."
+    }
   },
   "files": [
     {
@@ -98,6 +132,8 @@
       "category": "simple_python",
       "role": "answer_key_release_commit",
       "role_note": "The BFCL v4 release commit's answer key for this category, pinned as a comparison input only. It is NOT the key study 1 scored against and is not used by eval/bfcl_simple.py. eval/answer_key_comparison.py verifies it against these hashes and re-scores the committed generations under both keys, so the release-key figures rest on bytes rather than on a stated value.",
+      "preflight_expectation": "defective",
+      "preflight_expectation_note": "This key is the losing side of the canonical adjudication and is retained precisely because it fails the answer-name preflight at simple_python_363. The standing check asserts it still fails: if upstream semantics ever made it pass, the adjudication that selected the data-fix key would need revisiting rather than silently standing.",
       "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae",
       "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
       "local_path": "eval/bfcl_data/release_commit/possible_answer/BFCL_v4_simple_python.json",

@@ -28,6 +28,7 @@ import pytest
 
 from eval.answer_key_comparison import (
     ComparisonIntegrityError,
+    apply_canonical_criterion,
     build_report,
     check_report_invariants,
 )
@@ -68,23 +69,28 @@ def _spec(local_path: str, payload: bytes, revision: str, category: str, role: s
     }
 
 
-def _question_rows() -> list[dict]:
+def _question_rows(also_present: str | None = None) -> list[dict]:
     """Each item presents exactly the name the *pinned* key expects.
 
     That mirrors simple_python_363: the tool list offers the module-qualified
     name, the data-fix key expects it, and the release key asks for a bare tail
     the item never offered.
+
+    `also_present` adds a second tool to the disputed item, which is what makes
+    a *valid* disagreement expressible: two keys can then differ there while
+    both name something the item actually offered.
     """
-    return [
-        {
+    rows = []
+    for item_id in ITEM_IDS:
+        names = [QUALIFIED_NAME if item_id == DISPUTED else f"fn_{item_id}"]
+        if also_present is not None and item_id == DISPUTED:
+            names.append(also_present)
+        rows.append({
             "id": item_id,
             "question": [[{"role": "user", "content": item_id}]],
-            "function": [
-                {"name": QUALIFIED_NAME if item_id == DISPUTED else f"fn_{item_id}"}
-            ],
-        }
-        for item_id in ITEM_IDS
-    ]
+            "function": [{"name": name} for name in names],
+        })
+    return rows
 
 
 def _key_rows(name_at_disputed: str, extra_difference: str | None = None) -> list[dict]:
@@ -139,6 +145,17 @@ def _emitted_all(name_at_disputed: dict[str, str]) -> dict[str, dict[str, str]]:
 CANDIDATES = ("dpo-50", "sft")
 EXPOSURE = ("simple_python", "multiple")
 
+# The adjudication the manifest carries. Tests that care about it override a
+# field; every other test just needs the report to have one to record.
+CRITERION = {
+    "rule": "canonical = pinned AND valid; the preflight decides",
+    "adjudicated_by": "owner",
+    "adjudicated_on": "2026-08-05",
+    "adjudication_ref": "test",
+    "selected": "pinned_key",
+    "selected_source_revision": DATAFIX_REVISION,
+}
+
 # A second exposure category, so a tampered file that feeds only the published
 # exposure table — and no score — is still caught.
 EXTRA_QUESTIONS = [
@@ -162,6 +179,8 @@ def world(tmp_path: Path):
         emitted: dict[str, str] | None = None,
         drop: tuple[str, str] | None = None,
         drop_candidate: str | None = None,
+        criterion: dict | None = None,
+        also_present: str | None = None,
     ) -> tuple[Path, Path]:
         emitted = emitted or dict.fromkeys(CANDIDATES, QUALIFIED_NAME)
         data = tmp_path / "eval" / "bfcl_data"
@@ -170,7 +189,8 @@ def world(tmp_path: Path):
 
         payloads = {
             "eval/bfcl_data/BFCL_v4_simple_python.json": (
-                _jsonl(_question_rows()), DATAFIX_REVISION, "simple_python", "questions"),
+                _jsonl(_question_rows(also_present)), DATAFIX_REVISION, "simple_python",
+                "questions"),
             "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json": (
                 _jsonl(_key_rows(QUALIFIED_NAME)), DATAFIX_REVISION, "simple_python",
                 "answer_key"),
@@ -195,9 +215,10 @@ def world(tmp_path: Path):
         manifest_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "upstream_repository": "ShishirPatil/gorilla",
                     "default_source_revision": DATAFIX_REVISION,
+                    "canonical_key_criterion": dict(CRITERION, **(criterion or {})),
                     "files": files,
                 },
                 indent=2,
@@ -504,3 +525,95 @@ def test_internal_consistency_is_measured_for_each_key(world) -> None:
     assert consistency["release_key"]["consistent"] is False
     assert DISPUTED in consistency["release_key"]["defect"]
     assert UNQUALIFIED_NAME in consistency["release_key"]["defect"]
+
+
+# ------------------------------------------------ the canonical adjudication ----
+#
+# The owner picked the key that scores higher, one message after instructing us
+# to take the lower number. The defence is that the criterion is stated without
+# reference to the score and is applied by machine -- so these tests are mostly
+# about the rule still selecting correctly when the measurements are inverted.
+
+
+def test_the_criterion_selects_the_only_valid_key() -> None:
+    selection = apply_canonical_criterion(
+        {
+            "pinned_key": {"consistent": True, "items_checked": 400, "defect": None},
+            "release_key": {"consistent": False, "items_checked": 400, "defect": "..."},
+        }
+    )
+    assert selection["decided"] and selection["selected"] == "pinned_key"
+
+
+def test_the_criterion_is_outcome_independent() -> None:
+    """Invert which key is valid and the same rule hands back the other one.
+    If this ever needed a special case for the key that scores better, the rule
+    would be a rationalisation."""
+    selection = apply_canonical_criterion(
+        {
+            "pinned_key": {"consistent": False, "items_checked": 400, "defect": "..."},
+            "release_key": {"consistent": True, "items_checked": 400, "defect": None},
+        }
+    )
+    assert selection["decided"] and selection["selected"] == "release_key"
+
+
+@pytest.mark.parametrize("both", [True, False])
+def test_the_criterion_refuses_to_decide_when_it_cannot_discriminate(both: bool) -> None:
+    selection = apply_canonical_criterion(
+        {
+            "pinned_key": {"consistent": both, "items_checked": 400, "defect": None},
+            "release_key": {"consistent": both, "items_checked": 400, "defect": None},
+        }
+    )
+    assert not selection["decided"] and selection["selected"] is None
+
+
+def test_the_report_records_the_adjudication_with_both_key_hashes(world) -> None:
+    report = _report(world)
+    check_report_invariants(report)
+
+    adjudication = report["adjudication"]
+    assert adjudication["selected"] == "pinned_key"
+    assert adjudication["derived_from_measurement"]["selected"] == "pinned_key"
+    assert adjudication["candidate_keys"]["pinned_key"]["source_revision"] == DATAFIX_REVISION
+    assert adjudication["candidate_keys"]["release_key"]["source_revision"] == RELEASE_REVISION
+    assert adjudication["candidate_keys"]["pinned_key"]["sha256"] != (
+        adjudication["candidate_keys"]["release_key"]["sha256"]
+    )
+
+
+def test_a_recorded_choice_the_rule_does_not_produce_fails_closed(world) -> None:
+    """The artifact is the permanent record of *why* this key is canonical. A
+    manifest that names the other key while quoting this rule is the failure
+    mode worth catching: the prose would still read as principled."""
+    report = _report(world, criterion={"selected": "release_key",
+                                       "selected_source_revision": RELEASE_REVISION})
+    with pytest.raises(ComparisonIntegrityError, match="the rule and the choice have come apart"):
+        check_report_invariants(report)
+
+
+def test_an_adjudication_naming_the_wrong_revision_fails_closed(world) -> None:
+    report = _report(world, criterion={"selected_source_revision": RELEASE_REVISION})
+    with pytest.raises(ComparisonIntegrityError, match="but pinned_key is pinned at"):
+        check_report_invariants(report)
+
+
+def test_a_manifest_with_no_criterion_cannot_produce_the_artifact(world) -> None:
+    manifest_path, generations_path = world()
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["canonical_key_criterion"]
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    with pytest.raises(ComparisonIntegrityError, match="declares no `canonical_key_criterion`"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_the_criterion_cannot_decide_when_both_keys_are_valid(world) -> None:
+    """Two keys that disagree while both naming a tool the item actually offers.
+    The preflight has nothing to say, so the rule must refuse rather than let
+    the standing choice coast through on a check that did not discriminate."""
+    report = _report(world, release_name="second.fn", also_present="second.fn")
+    assert report["key_difference"]["differing_row_count"] == 1
+    assert all(k["consistent"] for k in report["key_internal_consistency"].values())
+    with pytest.raises(ComparisonIntegrityError, match="does not decide"):
+        check_report_invariants(report)
