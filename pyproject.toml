@@ -73,7 +73,19 @@ py-modules = []
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Quarantined intake is preserved byte-for-byte as evidence and must never be
+# reformatted; its receipt hashes would stop matching. Lint the promoted copy
+# under tests/fixtures/ instead.
+extend-exclude = ["intake/quarantine"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored intake (see tests/fixtures/REPRODUCTION.md). Held deliberately close
+# to the delivered bytes so the promotion diff stays reviewable — the only
+# content change is the corrected provenance string. Reformatting 55 lines of
+# template data would bury that. These codes are style-only and cannot affect
+# the generated fixtures, whose bytes are pinned by test_fixture_pairs.py.
+"tests/fixtures/scale_pairs_fixed.py" = ["E501", "RUF059", "B007", "B905"]

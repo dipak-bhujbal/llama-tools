@@ -13,9 +13,18 @@ not training data or measured evidence.
 | `fixture_pairs_train.jsonl` | 1,440 rows | `6b0215aae4bf18c806954916bbd889df0d8de1019292af2169cc86f35f0b8d04` |
 | `fixture_pairs_eval.jsonl` | 160 rows | `ae862c34c216c01f99a263400684fcbb1229e8ece7cf17e8c297c050c8232807` |
 | `fixture_audit_sample_50.jsonl` | 50 rows | `88e56ef65f18a7be7506de08f89d219ff9075e7f118cc9f27a774f764665265f` |
+| `mine_pairs.py` | 695 lines | `e62cc4dd2ed61b04aa037d60b566ff93a2e92e193436780d8a2b84990a87d968` |
 
-The expected fifth attachment, `mine_pairs.py`, was absent from the supplied
-folder. An exact-name and wildcard search under `~/Downloads` found no copy.
+The fifth attachment, `mine_pairs.py`, was absent from `~/Downloads/files` at
+first intake and arrived separately at `~/Downloads/mine_pairs.py` (owner,
+agentchattr message 2011). It was copied here unchanged; the hash above was
+confirmed independently by both agents. Its AST parses and its top-level imports
+are standard-library only, with `datasets`, `torch`, `transformers`, and `peft`
+imported lazily inside functions. **It is not promoted.** Codex's review raised
+seven must-fix issues — chiefly that it reimplements decontamination and ledger
+handling instead of using `mining/decontaminate.py` and `mining/ledger.py`, and
+that `--fresh`/`redo_last()` violate the append-only ledger contract — so it
+stays quarantined until integrated.
 
 ## Read-only intake checks
 
