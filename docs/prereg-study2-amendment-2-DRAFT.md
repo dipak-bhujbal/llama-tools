@@ -1,20 +1,31 @@
-# Amendment 2 (DRAFT) — yield denominator and function-name matching
+# Amendment 2 — yield denominator and function-name matching
 
-**STATUS: DRAFT. NOT ADOPTED. NOT PREREGISTERED.**
+**STATUS: ADOPTED 2026-08-05. Superseded by `docs/prereg-study2.md`.**
 
-This file is a proposal awaiting owner approval. It is deliberately *not* in
-`docs/prereg-study2.md` and *not* in that document's amendments table, because
-under Ground Rule 8 a threshold only counts as preregistered once it is
-committed to the preregistration itself — before the run it governs. On
-approval this text moves into `docs/prereg-study2.md` as Amendment 2, with a
-row in the amendments table citing the approving message.
+Adopted by the owner in #general msg 2075 and landed in the preregistration
+itself as **Amendment 2**, with a row in that document's amendments table. Under
+Ground Rule 8 a threshold counts as preregistered only once it is committed to
+the preregistration — so `docs/prereg-study2.md` is the governing text and this
+file is now the drafting record, retained to show what was proposed, what review
+changed, and when.
 
-**Status of data at time of drafting: no study-2 model output, evaluation
-result, or probe score has been observed. No model has been run. Both the
-`multiple` baseline and the mining yield are unmeasured.**
+**Status of data at time of adoption: no study-2 model output, evaluation
+result, or probe score had been observed. No model had been run. Both the
+`multiple` baseline and the mining yield were unmeasured.**
 
-Authorization pending: owner, #general msg 2024 ("yes in principle, with one
-check on the draft").
+Authorization: owner, #general msg 2024 ("yes in principle, with one check on
+the draft"), then msg 2075 ("Adopt it, with one wording tightening first").
+
+**Change made at adoption (msg 2075).** A2.1's denominator was "prompts the
+miner actually attempted". Attempts are the one thing the ledger does not
+preserve — a crashed-and-reconciled prompt is attempted twice, tombstoned once,
+mined once — so that wording would have deflated yield on exactly the runs that
+needed crash recovery, which is the silent lean this amendment exists to remove,
+applied to its own gate number. Replaced with the owner's text: unique
+post-screen prompts bearing an active, non-tombstoned ledger record, recomputable
+from the same artifact as the numerator. A2.3 also gained a scope note recording
+that argument-level matching is a preregistration amendment too, not a scoring
+detail.
 
 ---
 
@@ -42,15 +53,27 @@ it exists.
 > count accumulated by the miner as it runs, which cannot be recovered from the
 > artifact after the fact.
 >
-> The denominator is prompts drawn from the pool *after* the decontamination
-> screen has run, i.e. prompts the miner actually attempted. It is never the
-> requested `--n-prompts`, and never the pre-screen pool size.
+> The denominator is the count of **unique post-screen prompts bearing an
+> active (non-tombstoned) outcome record in the ledger**, recomputable from the
+> same artifact as the numerator. It is never the requested `--n-prompts`,
+> never the pre-screen pool size, and a re-mined prompt counts once.
 
 Two consequences follow from defining the numerator this way, and both are the
 reason for it. A rolled-back mining batch cannot inflate the numerator, because
 superseded records are not active. And the numerator is recomputable by anyone
 holding the ledger: the same ledger materializes to the same count, so a
 reported yield is checkable rather than merely reported.
+
+The denominator is defined against the same artifact for the same reason, and
+the earlier wording — "prompts the miner actually attempted" — did not survive
+it. Attempts are precisely what the ledger does not preserve: a prompt that
+crashes and is reconciled was attempted twice, tombstoned once, and mined once,
+so counting attempts would deflate yield on exactly the runs that needed crash
+recovery. That is the same class of silent lean this amendment exists to
+remove, turned on the amendment's own gate number. Counting unique prompts with
+an active record also keeps the two terms consistent through a rollback: a
+tombstoned prompt leaves the numerator and the denominator together and returns
+to both when re-mined, so yield never goes stale in one term only.
 
 Any projection to a larger pool (e.g. "projected pairs at 10k prompts") is
 computed on post-screen prompts and **must state the survival rate used for the
@@ -165,6 +188,15 @@ reason it must not:
   exact-matching reader would silently disagree about which tool was selected,
   and the prereg should not be the thing that has to be amended if a future
   pinned revision introduces one.
+
+**Scope: names only.** This section pins *function-name* matching. Argument-level
+matching semantics — value-in-accepted-list, the no-extra-arguments rule, the
+optional-argument convention, and the numeric coercion in `values_equal()` —
+remain whatever `eval/bfcl_scoring.py` implements today, which is what study 1
+scored against and is deliberately unchanged for parity. That parity is the
+point, and it carries a consequence worth stating rather than discovering: any
+future change to argument matching is a **preregistration amendment**, not a
+scoring detail, on the same footing as a change to the name rule.
 
 **Consequence for a disagreeing key.** If a pinned answer key expects a name
 that is *not* among the tools presented for that item, that item is internally
