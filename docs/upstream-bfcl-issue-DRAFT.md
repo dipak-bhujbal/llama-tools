@@ -1,13 +1,28 @@
-# Upstream issue draft — BFCL v4 `simple_python_363` answer key
+# Upstream issue — BFCL v4 `simple_python_363` answer key
 
-**STATUS: filing authorized by the owner (#general msg 2063), not yet filed.**
+**STATUS: FILED 2026-08-05 as
+[ShishirPatil/gorilla#1354](https://github.com/ShishirPatil/gorilla/issues/1354).**
 
-Ground Rule 7 makes publishing a human decision; the owner has taken it —
-"still file upstream, and the filing just got stronger". The remaining gate is
-review, not permission: this is filed only after the adjudication and standing-
-preflight commit is signed off, so the issue cites an artifact that already
-exists. Target: `ShishirPatil/gorilla`, Issues. Search for a duplicate first;
-link the existing issue instead if one is open.
+Authorized by the owner in #general msg 2063 ("still file upstream, and the
+filing just got stronger"), released by review sign-off of `5d0e32b` in msg
+2070, filed under the owner's GitHub account. Searched
+`simple_python_363`, `find_closest`, `restaurant_search`, `possible_answer
+simple_python` across open and closed issues and PRs first: no duplicate.
+
+Filed against upstream's `bfcl.md` issue template rather than as the free-form
+text below, so it carries the datapoint permalink, commit id, and
+previous/updated datapoint block their triage expects. The `bfcl` label could
+not be applied — it is not assignable by an outside contributor — so the title
+carries the `[BFCL]` prefix their template specifies.
+
+One claim was added after this draft was written, having been verified against
+the upstream API rather than inferred: `9d8416a9` is **32 commits ahead** of the
+release commit (2025-12-12 vs 2025-08-25) and its message reads "Add model
+Nanbeige and Fix some data bugs" (#1257). The draft said the fix "looks like" it
+already landed; upstream's own history says so.
+
+The text below is the pre-filing draft, kept as the record of what was prepared
+and reviewed.
 
 The argument got stronger after the scorer check. The original framing was
 "qualified naming is arguably correct" — a matter of taste. The evidence says
