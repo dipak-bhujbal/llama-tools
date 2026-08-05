@@ -20,7 +20,7 @@ An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for rel
 | dpo-300 | 14/20 | 20/20 |
 | dpo-400 | 11/20 | 18/20 |
 
-**DPO v2: closed as a second documented negative result.** The on-policy hard-negative design fixed DPO v1's training-time failure: held-out preference accuracy and margins improved without runaway chosen-reward damage. Independent BFCL evaluation still degraded monotonically: **364/400 at step 50, 363/400 at step 100, and 359/400 at step 150**, all below SFT's 369/400. The training signal did not transfer to fresh ground-truth tool use, so no DPO checkpoint shipped. Full analysis: [ADR-008](./docs/decisions/ADR-008-dpo-v2-negative-result.md).
+**DPO v2: closed as a second documented negative result.** The on-policy hard-negative design fixed DPO v1's training-time failure: held-out preference accuracy and margins improved without runaway chosen-reward damage. Held-out tool-use was still lower than SFT at every evaluated DPO checkpoint — **364/400 at step 50, 363/400 at step 100, and 359/400 at step 150**, against SFT's 369/400 — and no paired contrast was significant after Holm correction. The training signal did not transfer to fresh ground-truth tool use, so no DPO checkpoint shipped. Full analysis: [ADR-008](./docs/decisions/ADR-008-dpo-v2-negative-result.md).
 
 **Study 2: preparation only.** A follow-up study will test on-policy mining under bounded objectives and ground-truth checkpoint selection. Baselines, data provenance, endpoint qualification, and paid stages are gated before execution. No study-2 model run has started.
 

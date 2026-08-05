@@ -1,0 +1,68 @@
+{
+  "datafix_commit": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+  "disputed_item": {
+    "id": "simple_python_363",
+    "pinned_key_expects": [
+      "restaurant_search.find_closest"
+    ],
+    "release_key_expects": [
+      "find_closest"
+    ],
+    "tools_presented_to_the_model": [
+      "restaurant_search.find_closest"
+    ]
+  },
+  "provenance": {
+    "generations": "eval/results/study1_bfcl_simple_generations.jsonl",
+    "note": "The release-commit answer-key file is NOT committed to this repo. Its value at the disputed row is a stated input reproduced from an independent check, not a hash-verified one. Pinning the release key canonically would require committing that file and adding it to eval/manifests/bfcl_v4_study2.json with its hashes."
+  },
+  "qualified_name_exposure": {
+    "live_simple": {
+      "rows": 258,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 0,
+      "rows_with_module_qualified_key": 77
+    },
+    "multiple": {
+      "rows": 200,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 29,
+      "rows_with_module_qualified_key": 123
+    },
+    "simple_python": {
+      "rows": 400,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 0,
+      "rows_with_module_qualified_key": 167
+    }
+  },
+  "release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
+  "schema_version": 1,
+  "scores": {
+    "disputed_item_concordant": true,
+    "disputed_item_emitted": {
+      "dpo-100": "restaurant_search.find_closest",
+      "dpo-150": "restaurant_search.find_closest",
+      "dpo-50": "restaurant_search.find_closest",
+      "sft": "restaurant_search.find_closest"
+    },
+    "n": {
+      "dpo-100": 400,
+      "dpo-150": 400,
+      "dpo-50": 400,
+      "sft": 400
+    },
+    "pinned_key": {
+      "dpo-100": 363,
+      "dpo-150": 359,
+      "dpo-50": 364,
+      "sft": 369
+    },
+    "release_key": {
+      "dpo-100": 362,
+      "dpo-150": 358,
+      "dpo-50": 363,
+      "sft": 368
+    }
+  }
+}
