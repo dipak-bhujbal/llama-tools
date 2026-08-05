@@ -57,9 +57,14 @@ from fetch_pinned_bfcl import VerificationError, load_manifest, verify_payload  
 
 DEFAULT_MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
 DEFAULT_GENERATIONS = REPO_ROOT / "eval" / "results" / "study1_bfcl_simple_generations.jsonl"
+DEFAULT_EVIDENCE = REPO_ROOT / "eval" / "results" / "evidence.json"
 
 DISPUTED_ID = "simple_python_363"
 REFERENCE_CANDIDATE = "sft"
+# The study-1 sweep's candidate set. Pinned rather than inferred from the file:
+# inferring it means a file missing a whole candidate defines its own expected
+# set and passes every downstream check.
+EXPECTED_CANDIDATES = ("dpo-100", "dpo-150", "dpo-50", "sft")
 
 # The manifest roles this comparison consumes. Both keys are pinned; neither is
 # a stated value.
@@ -115,61 +120,138 @@ def _load_jsonl(payload: bytes) -> list[dict]:
     return [json.loads(line) for line in payload.decode("utf-8").splitlines() if line.strip()]
 
 
-def load_verified_inputs(manifest_path: Path, repo_root: Path) -> dict:
-    """Read every pinned input, verifying its bytes against the manifest first.
+def _verified_manifest_input(
+    manifest: dict, manifest_path: Path, repo_root: Path, category: str, role: str, label: str
+) -> dict:
+    """One manifest-pinned file, hash-verified, with its rows and fingerprint.
 
     `verify_payload` is the same check `fetch_pinned_bfcl.py` runs at download
     time: sha256, Git blob id, row count, unique-id count, and the sorted-id
-    digest. Re-running it here means the comparison cannot quietly score
+    digest. Re-running it here means the comparison cannot quietly compute
     against a file that was edited after it was pinned.
+    """
+    specs = [
+        spec
+        for spec in manifest["files"]
+        if spec.get("category") == category and spec.get("role") == role
+    ]
+    if len(specs) != 1:
+        raise ComparisonIntegrityError(
+            f"manifest {manifest_path} has {len(specs)} entries for "
+            f"{category}/{role}; this comparison needs exactly one"
+        )
+    spec = specs[0]
+    path = repo_root / spec["local_path"]
+    if not path.is_file():
+        raise ComparisonIntegrityError(
+            f"missing pinned input {spec['local_path']} for {category}/{role}; "
+            f"run `python eval/fetch_pinned_bfcl.py` first"
+        )
+    payload = path.read_bytes()
+    try:
+        verify_payload(payload, spec)
+    except VerificationError as exc:
+        raise ComparisonIntegrityError(f"{label}: {exc}") from exc
+    return {
+        "path": spec["local_path"],
+        "source_revision": spec["source_revision"],
+        "upstream_path": spec["upstream_path"],
+        "rows": _load_jsonl(payload),
+        **_fingerprint(payload),
+    }
+
+
+def load_verified_inputs(
+    manifest_path: Path, repo_root: Path, exposure_categories: tuple[str, ...] = ()
+) -> dict:
+    """Read every pinned input this report depends on, verifying each first.
+
+    Every file whose bytes reach a number in the report is resolved through the
+    manifest and hash-verified — including the exposure categories, whose
+    858-row and 29-item figures feed the preregistration amendment and the
+    upstream issue. A figure quoted from an unverified file is a figure nobody
+    can check.
     """
     manifest_bytes = manifest_path.read_bytes()
     manifest = load_manifest(manifest_path)
 
-    wanted = {
-        "questions": (CATEGORY, QUESTIONS_ROLE),
-        "pinned_key": (CATEGORY, PINNED_KEY_ROLE),
-        "release_key": (CATEGORY, RELEASE_KEY_ROLE),
-    }
     inputs: dict = {
         "manifest": {
             "path": _relative(manifest_path, repo_root),
             **_fingerprint(manifest_bytes),
         }
     }
+    for name, (category, role) in {
+        "questions": (CATEGORY, QUESTIONS_ROLE),
+        "pinned_key": (CATEGORY, PINNED_KEY_ROLE),
+        "release_key": (CATEGORY, RELEASE_KEY_ROLE),
+    }.items():
+        inputs[name] = _verified_manifest_input(
+            manifest, manifest_path, repo_root, category, role, name
+        )
 
-    for name, (category, role) in wanted.items():
-        specs = [
-            spec
-            for spec in manifest["files"]
-            if spec.get("category") == category and spec.get("role") == role
-        ]
-        if len(specs) != 1:
-            raise ComparisonIntegrityError(
-                f"manifest {manifest_path} has {len(specs)} entries for "
-                f"{category}/{role}; this comparison needs exactly one"
-            )
-        spec = specs[0]
-        path = repo_root / spec["local_path"]
-        if not path.is_file():
-            raise ComparisonIntegrityError(
-                f"missing pinned input {spec['local_path']} for {category}/{role}; "
-                f"run `python eval/fetch_pinned_bfcl.py` first"
-            )
-        payload = path.read_bytes()
-        try:
-            verify_payload(payload, spec)
-        except VerificationError as exc:
-            raise ComparisonIntegrityError(f"{name}: {exc}") from exc
-        inputs[name] = {
-            "path": spec["local_path"],
-            "source_revision": spec["source_revision"],
-            "upstream_path": spec["upstream_path"],
-            "rows": _load_jsonl(payload),
-            **_fingerprint(payload),
+    if exposure_categories:
+        inputs["exposure"] = {
+            category: {
+                role: _verified_manifest_input(
+                    manifest, manifest_path, repo_root, category, role, f"{category}/{role}"
+                )
+                for role in (QUESTIONS_ROLE, PINNED_KEY_ROLE)
+            }
+            for category in exposure_categories
         }
-
     return inputs
+
+
+def load_verified_generations(
+    generations_path: Path, evidence_path: Path, repo_root: Path
+) -> tuple[list[dict], dict]:
+    """Read the per-item generations, verified against the committed evidence index.
+
+    Fingerprinting whatever file arrives records *a* hash; it does not establish
+    that this is the study-1 run's output. `eval/results/evidence.json` already
+    pins that run's sha256 and row count, so this reads the pin and checks
+    against it. Without that, an input missing an entire candidate hashes
+    perfectly well and produces a smaller, self-consistent, wrong report.
+    """
+    evidence_bytes = evidence_path.read_bytes()
+    evidence = json.loads(evidence_bytes)
+    local_copy = _relative(generations_path, repo_root)
+
+    artifacts = [
+        artifact
+        for artifact in evidence.get("artifacts", [])
+        if artifact.get("local_copy") == local_copy
+    ]
+    if len(artifacts) != 1:
+        raise ComparisonIntegrityError(
+            f"evidence index {_relative(evidence_path, repo_root)} has {len(artifacts)} "
+            f"entries for {local_copy}; the generations input must be pinned exactly once"
+        )
+    artifact = artifacts[0]
+
+    payload = generations_path.read_bytes()
+    actual_sha256 = _sha256(payload)
+    if actual_sha256 != artifact["sha256"]:
+        raise ComparisonIntegrityError(
+            f"generations {local_copy}: sha256 {actual_sha256} does not match the "
+            f"evidence index pin {artifact['sha256']}; this is not the study-1 run's output"
+        )
+    rows = _load_jsonl(payload)
+    if len(rows) != artifact["row_count"]:
+        raise ComparisonIntegrityError(
+            f"generations {local_copy}: {len(rows)} rows, but the evidence index pins "
+            f"{artifact['row_count']}"
+        )
+
+    provenance = {
+        "path": _relative(evidence_path, repo_root),
+        "source_repository": evidence.get("source_repository"),
+        "source_revision": evidence.get("source_revision"),
+        "pinned_row_count": artifact["row_count"],
+        **_fingerprint(evidence_bytes),
+    }
+    return rows, provenance
 
 
 def _rows_by_id(rows: list[dict], label: str) -> dict[str, dict]:
@@ -250,12 +332,21 @@ def _parsed_call(generation_row: dict) -> dict | None:
     return {"name": generation_row["parsed_name"], "arguments": generation_row["parsed_args"]}
 
 
-def rescore(generations: list[dict], key_rows: list[dict], key_label: str) -> dict:
+def rescore(
+    generations: list[dict],
+    key_rows: list[dict],
+    key_label: str,
+    expected_candidates: tuple[str, ...] = EXPECTED_CANDIDATES,
+) -> dict:
     """Re-score every (candidate, item) under one key with the study's scorer.
 
-    Returns {candidate: {item_id: overall_ok}}. Every candidate must cover the
-    key's id set exactly — a candidate missing items would otherwise produce a
-    smaller denominator and a flattering rate.
+    Returns {candidate: {item_id: overall_ok}}. The candidate set must be
+    exactly `expected_candidates` and each must cover the key's id set exactly.
+    Both halves matter and neither implies the other: a candidate missing some
+    items produces a flattering rate on a smaller denominator, while a
+    candidate missing *entirely* leaves every surviving candidate complete and
+    self-consistent — a report that looks perfect and silently dropped a
+    comparison arm.
     """
     key = _rows_by_id(key_rows, key_label)
     outcomes: dict[str, dict[str, bool]] = {}
@@ -276,6 +367,14 @@ def rescore(generations: list[dict], key_rows: list[dict], key_label: str) -> di
     if not outcomes:
         raise ComparisonIntegrityError("generations contain no rows")
 
+    if set(outcomes) != set(expected_candidates):
+        absent = sorted(set(expected_candidates) - set(outcomes))
+        unexpected = sorted(set(outcomes) - set(expected_candidates))
+        raise ComparisonIntegrityError(
+            f"generations cover candidates {sorted(outcomes)}, but this comparison "
+            f"expects {sorted(expected_candidates)}; absent={absent} unexpected={unexpected}"
+        )
+
     expected_ids = set(key)
     for candidate, per_item in sorted(outcomes.items()):
         if set(per_item) != expected_ids:
@@ -284,6 +383,13 @@ def rescore(generations: list[dict], key_rows: list[dict], key_label: str) -> di
                 f"candidate {candidate!r} covers {len(per_item)} of {len(expected_ids)} "
                 f"items under {key_label}; missing {missing[:3]}"
             )
+
+    expected_rows = len(expected_candidates) * len(expected_ids)
+    if len(generations) != expected_rows:
+        raise ComparisonIntegrityError(
+            f"generations have {len(generations)} rows; "
+            f"{len(expected_candidates)} candidates x {len(expected_ids)} items = {expected_rows}"
+        )
     return outcomes
 
 
@@ -386,18 +492,19 @@ def _key_names(answer_row: dict) -> set[str]:
     return names
 
 
-def qualified_name_stats(repo_root: Path) -> dict:
-    """How exposed each category is to the qualified-vs-unqualified question."""
-    data = repo_root / "eval" / "bfcl_data"
+def qualified_name_stats(exposure_inputs: dict) -> dict:
+    """How exposed each category is to the qualified-vs-unqualified question.
+
+    Reads only already-verified payloads. These counts are quoted in the
+    preregistration amendment and in the upstream issue draft, so they must be
+    as traceable as the scores are — computing them from raw files on disk
+    would let an edited question file move a published figure while the
+    report's recorded inputs stayed reassuringly unchanged.
+    """
     out: dict[str, dict] = {}
-    for category in EXPOSURE_CATEGORIES:
-        questions = _rows_by_id(
-            _load_jsonl((data / f"BFCL_v4_{category}.json").read_bytes()), f"{category} questions"
-        )
-        answers = _rows_by_id(
-            _load_jsonl((data / "possible_answer" / f"BFCL_v4_{category}.json").read_bytes()),
-            f"{category} answer key",
-        )
+    for category, roles in exposure_inputs.items():
+        questions = _rows_by_id(roles[QUESTIONS_ROLE]["rows"], f"{category} questions")
+        answers = _rows_by_id(roles[PINNED_KEY_ROLE]["rows"], f"{category} answer key")
 
         qualified_rows = 0
         key_not_presented = 0
@@ -430,11 +537,15 @@ def build_report(
     generations_path: Path = DEFAULT_GENERATIONS,
     repo_root: Path = REPO_ROOT,
     *,
-    include_exposure: bool = True,
+    evidence_path: Path = DEFAULT_EVIDENCE,
+    expected_candidates: tuple[str, ...] = EXPECTED_CANDIDATES,
+    exposure_categories: tuple[str, ...] = EXPOSURE_CATEGORIES,
 ) -> dict:
-    inputs = load_verified_inputs(manifest_path, repo_root)
+    inputs = load_verified_inputs(manifest_path, repo_root, exposure_categories)
     generations_bytes = generations_path.read_bytes()
-    generations = _load_jsonl(generations_bytes)
+    generations, evidence_provenance = load_verified_generations(
+        generations_path, evidence_path, repo_root
+    )
 
     difference = key_difference(inputs["pinned_key"]["rows"], inputs["release_key"]["rows"])
     questions = _rows_by_id(inputs["questions"]["rows"], "questions")
@@ -444,8 +555,12 @@ def build_report(
         )
 
     recomputation = check_recomputation_matches_the_run(generations, inputs["pinned_key"]["rows"])
-    pinned_outcomes = rescore(generations, inputs["pinned_key"]["rows"], "the pinned key")
-    release_outcomes = rescore(generations, inputs["release_key"]["rows"], "the release key")
+    pinned_outcomes = rescore(
+        generations, inputs["pinned_key"]["rows"], "the pinned key", expected_candidates
+    )
+    release_outcomes = rescore(
+        generations, inputs["release_key"]["rows"], "the release key", expected_candidates
+    )
 
     candidates = sorted(pinned_outcomes)
     n = {candidate: len(pinned_outcomes[candidate]) for candidate in candidates}
@@ -501,7 +616,16 @@ def build_report(
                 "path": _relative(generations_path, repo_root),
                 "rows": len(generations),
                 "candidates": candidates,
+                "verified_against": evidence_provenance["path"],
                 **_fingerprint(generations_bytes),
+            },
+            "evidence_index": evidence_provenance,
+            "exposure": {
+                category: {
+                    role: {k: v for k, v in spec.items() if k != "rows"}
+                    for role, spec in roles.items()
+                }
+                for category, roles in inputs.get("exposure", {}).items()
             },
         },
         "key_difference": difference,
@@ -518,8 +642,8 @@ def build_report(
         # Kept for continuity with schema_version 1 consumers.
         "disputed_item_emitted": emitted,
     }
-    if include_exposure:
-        report["qualified_name_exposure"] = qualified_name_stats(repo_root)
+    if exposure_categories:
+        report["qualified_name_exposure"] = qualified_name_stats(inputs["exposure"])
     return report
 
 
@@ -564,7 +688,13 @@ def main() -> None:
 
     print("verified inputs (sha256):")
     for name, spec in report["inputs"].items():
-        print(f"  {name:<12} {spec['sha256']}  {spec.get('path', '')}")
+        if name == "exposure":
+            for category, roles in spec.items():
+                for role, entry in roles.items():
+                    label = f"{category}/{role}"
+                    print(f"  {label:<34} {entry['sha256']}  {entry['path']}")
+            continue
+        print(f"  {name:<34} {spec['sha256']}  {spec.get('path', '')}")
     print()
 
     print(

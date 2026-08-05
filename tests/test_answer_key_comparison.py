@@ -9,6 +9,12 @@ mutated input file, a candidate missing items, and a stored flag that no longer
 matches the committed scorer must all fail the run rather than produce a
 confident-looking artifact.
 
+They also attack the inputs' provenance, which is the quieter failure: a
+generations file missing an entire candidate leaves every surviving candidate
+complete and self-consistent, and a tampered exposure file moves a published
+figure while the report's recorded inputs look untouched. Both are covered
+here, at the evidence pin and again at the expected candidate set.
+
 The fixtures are synthetic and tiny; the last test checks the committed report
 still regenerates from the real pinned inputs.
 """
@@ -130,9 +136,24 @@ def _emitted_all(name_at_disputed: dict[str, str]) -> dict[str, dict[str, str]]:
     }
 
 
+CANDIDATES = ("dpo-50", "sft")
+EXPOSURE = ("simple_python", "multiple")
+
+# A second exposure category, so a tampered file that feeds only the published
+# exposure table — and no score — is still caught.
+EXTRA_QUESTIONS = [
+    {"id": "multiple_0", "function": [{"name": "circle.get"}, {"name": "triangle.get"}]},
+    {"id": "multiple_1", "function": [{"name": "plain"}]},
+]
+EXTRA_ANSWERS = [
+    {"id": "multiple_0", "ground_truth": [{"circle.get": {"x": ["1"]}}]},
+    {"id": "multiple_1", "ground_truth": [{"plain": {"x": ["1"]}}]},
+]
+
+
 @pytest.fixture
 def world(tmp_path: Path):
-    """A self-contained repo root with a manifest, both keys, and generations."""
+    """A self-contained repo root: manifest, both keys, generations, evidence index."""
 
     def build(
         *,
@@ -140,27 +161,34 @@ def world(tmp_path: Path):
         extra_difference: str | None = None,
         emitted: dict[str, str] | None = None,
         drop: tuple[str, str] | None = None,
+        drop_candidate: str | None = None,
     ) -> tuple[Path, Path]:
-        emitted = emitted or {"sft": QUALIFIED_NAME, "dpo-50": QUALIFIED_NAME}
+        emitted = emitted or dict.fromkeys(CANDIDATES, QUALIFIED_NAME)
         data = tmp_path / "eval" / "bfcl_data"
         (data / "possible_answer").mkdir(parents=True)
         (data / "release_commit" / "possible_answer").mkdir(parents=True)
 
         payloads = {
             "eval/bfcl_data/BFCL_v4_simple_python.json": (
-                _jsonl(_question_rows()), DATAFIX_REVISION, "questions"),
+                _jsonl(_question_rows()), DATAFIX_REVISION, "simple_python", "questions"),
             "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json": (
-                _jsonl(_key_rows(QUALIFIED_NAME)), DATAFIX_REVISION, "answer_key"),
+                _jsonl(_key_rows(QUALIFIED_NAME)), DATAFIX_REVISION, "simple_python",
+                "answer_key"),
             RELEASE_KEY_PATH: (
                 _jsonl(_key_rows(release_name, extra_difference)),
                 RELEASE_REVISION,
+                "simple_python",
                 "answer_key_release_commit",
             ),
+            "eval/bfcl_data/BFCL_v4_multiple.json": (
+                _jsonl(EXTRA_QUESTIONS), DATAFIX_REVISION, "multiple", "questions"),
+            "eval/bfcl_data/possible_answer/BFCL_v4_multiple.json": (
+                _jsonl(EXTRA_ANSWERS), DATAFIX_REVISION, "multiple", "answer_key"),
         }
         files = []
-        for local_path, (payload, revision, role) in payloads.items():
+        for local_path, (payload, revision, category, role) in payloads.items():
             (tmp_path / local_path).write_bytes(payload)
-            files.append(_spec(local_path, payload, revision, "simple_python", role))
+            files.append(_spec(local_path, payload, revision, category, role))
 
         manifest_path = tmp_path / "eval" / "manifests" / "bfcl_v4_study2.json"
         manifest_path.parent.mkdir(parents=True)
@@ -184,19 +212,65 @@ def world(tmp_path: Path):
                 for row in generations
                 if not (row["model_name"] == candidate and row["id"] == item_id)
             ]
+        if drop_candidate is not None:
+            generations = [r for r in generations if r["model_name"] != drop_candidate]
         generations_path = tmp_path / "eval" / "results" / "generations.jsonl"
         generations_path.parent.mkdir(parents=True)
-        generations_path.write_bytes(_jsonl(generations))
+        payload = _jsonl(generations)
+        generations_path.write_bytes(payload)
+
+        # The evidence index pins what the run produced. It is written from the
+        # generations as built, so a test that mutates the file afterwards is
+        # attacking the pin rather than moving it too.
+        (tmp_path / "eval" / "results" / "evidence.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_repository": "example/evidence",
+                    "source_revision": "a" * 40,
+                    "artifacts": [
+                        {
+                            "kind": "per-item generations",
+                            "local_copy": "eval/results/generations.jsonl",
+                            "sha256": _digest("sha256", payload),
+                            "row_count": len(generations),
+                        }
+                    ],
+                },
+                indent=2,
+            )
+        )
         return manifest_path, generations_path
 
     build.root = tmp_path  # type: ignore[attr-defined]
     return build
 
 
-def _report(world, **kwargs) -> dict:
+def _build(world, **kwargs) -> dict:
     manifest_path, generations_path = world(**kwargs)
     return build_report(
-        manifest_path, generations_path, world.root, include_exposure=False
+        manifest_path,
+        generations_path,
+        world.root,
+        evidence_path=world.root / "eval" / "results" / "evidence.json",
+        expected_candidates=CANDIDATES,
+        exposure_categories=EXPOSURE,
+    )
+
+
+def _report(world, **kwargs) -> dict:
+    return _build(world, **kwargs)
+
+
+def _rebuild(world, manifest_path: Path, generations_path: Path) -> dict:
+    """Re-run against an already-built world, after a test has tampered with it."""
+    return build_report(
+        manifest_path,
+        generations_path,
+        world.root,
+        evidence_path=world.root / "eval" / "results" / "evidence.json",
+        expected_candidates=CANDIDATES,
+        exposure_categories=EXPOSURE,
     )
 
 
@@ -271,7 +345,7 @@ def test_changed_input_bytes_fail_closed(world) -> None:
     key_path.write_bytes(_jsonl(rows))
 
     with pytest.raises(ComparisonIntegrityError, match="sha256"):
-        build_report(manifest_path, generations_path, world.root, include_exposure=False)
+        _rebuild(world, manifest_path, generations_path)
 
 
 def test_a_missing_pinned_input_fails_closed(world) -> None:
@@ -279,7 +353,7 @@ def test_a_missing_pinned_input_fails_closed(world) -> None:
     (world.root / RELEASE_KEY_PATH).unlink()
 
     with pytest.raises(ComparisonIntegrityError, match="missing pinned input"):
-        build_report(manifest_path, generations_path, world.root, include_exposure=False)
+        _rebuild(world, manifest_path, generations_path)
 
 
 def test_a_candidate_missing_an_item_fails_closed(world) -> None:
@@ -287,19 +361,121 @@ def test_a_candidate_missing_an_item_fails_closed(world) -> None:
     manifest_path, generations_path = world(drop=("dpo-50", "item_1"))
 
     with pytest.raises(ComparisonIntegrityError, match="covers 2 of 3 items"):
-        build_report(manifest_path, generations_path, world.root, include_exposure=False)
+        _rebuild(world, manifest_path, generations_path)
+
+
+def _repin(world, generations_path: Path) -> None:
+    """Re-point the evidence index at the current generations bytes.
+
+    Used only by tests that need to get *past* the pin to attack a later check.
+    """
+    evidence_path = world.root / "eval" / "results" / "evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    payload = generations_path.read_bytes()
+    artifact = evidence["artifacts"][0]
+    artifact["sha256"] = _digest("sha256", payload)
+    artifact["row_count"] = len(
+        [line for line in payload.decode().splitlines() if line.strip()]
+    )
+    evidence_path.write_text(json.dumps(evidence, indent=2))
 
 
 def test_generations_that_disagree_with_the_scorer_fail_closed(world) -> None:
     """The release column is only credible if the same code reproduces the
-    pinned column the run actually recorded."""
+    pinned column the run actually recorded.
+
+    The evidence pin is moved to match, so this attacks the drift check rather
+    than stopping at the hash: a file can be perfectly pinned and still
+    disagree with the scorer it claims to have been produced by.
+    """
     manifest_path, generations_path = world()
     rows = [json.loads(line) for line in generations_path.read_text().splitlines() if line.strip()]
     rows[0]["overall_ok"] = not rows[0]["overall_ok"]
     generations_path.write_bytes(_jsonl(rows))
+    _repin(world, generations_path)
 
     with pytest.raises(ComparisonIntegrityError, match="no longer agree"):
-        build_report(manifest_path, generations_path, world.root, include_exposure=False)
+        _rebuild(world, manifest_path, generations_path)
+
+
+# --------------------------------------------- provenance of the inputs ------
+
+
+def test_a_whole_missing_candidate_fails_the_evidence_pin(world) -> None:
+    """The dangerous case: every surviving candidate is complete and
+    self-consistent, so nothing downstream notices an arm was dropped. The
+    committed pin on the run's bytes is what notices."""
+    manifest_path, generations_path = world()
+    rows = [json.loads(line) for line in generations_path.read_text().splitlines() if line.strip()]
+    generations_path.write_bytes(_jsonl([r for r in rows if r["model_name"] != "dpo-50"]))
+
+    with pytest.raises(ComparisonIntegrityError, match="sha256"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_a_whole_missing_candidate_fails_even_when_the_pin_agrees(world) -> None:
+    """Second line of defence: a short run pinned to its own short output is
+    still missing an arm, and the expected candidate set says so."""
+    manifest_path, generations_path = world(drop_candidate="dpo-50")
+
+    with pytest.raises(ComparisonIntegrityError, match="expects \\['dpo-50', 'sft'\\]"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_an_unexpected_extra_candidate_fails_closed(world) -> None:
+    manifest_path, generations_path = world(
+        emitted={"sft": QUALIFIED_NAME, "dpo-50": QUALIFIED_NAME, "dpo-999": QUALIFIED_NAME}
+    )
+    _repin(world, generations_path)
+
+    with pytest.raises(ComparisonIntegrityError, match="unexpected=\\['dpo-999'\\]"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_generations_not_named_in_the_evidence_index_fail_closed(world) -> None:
+    """Fingerprinting an arbitrary file records a hash; it does not establish
+    the file is the study-1 run's output."""
+    manifest_path, generations_path = world()
+    stranger = generations_path.with_name("some_other_generations.jsonl")
+    stranger.write_bytes(generations_path.read_bytes())
+
+    with pytest.raises(ComparisonIntegrityError, match="pinned exactly once"):
+        _rebuild(world, manifest_path, stranger)
+
+
+def test_a_tampered_exposure_input_fails_closed(world) -> None:
+    """The exposure figures feed the prereg amendment and the upstream issue,
+    so they must be as traceable as the scores — even though no score reads
+    the `multiple` files."""
+    manifest_path, generations_path = world()
+    path = world.root / "eval/bfcl_data/BFCL_v4_multiple.json"
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows[0]["function"][0]["name"] = "tampered.name"
+    path.write_bytes(_jsonl(rows))
+
+    with pytest.raises(ComparisonIntegrityError, match="multiple/questions"):
+        _rebuild(world, manifest_path, generations_path)
+
+
+def test_every_exposure_input_is_recorded_in_the_report(world) -> None:
+    report = _report(world)
+    exposure = report["inputs"]["exposure"]
+
+    assert set(exposure) == set(EXPOSURE)
+    for category in EXPOSURE:
+        for role in ("questions", "answer_key"):
+            entry = exposure[category][role]
+            assert entry["sha256"] and entry["path"] and entry["source_revision"]
+    assert set(report["qualified_name_exposure"]) == set(EXPOSURE)
+
+
+def test_the_evidence_index_provenance_is_recorded(world) -> None:
+    report = _report(world)
+    index = report["inputs"]["evidence_index"]
+
+    assert index["pinned_row_count"] == 6
+    assert index["source_repository"] == "example/evidence"
+    assert report["inputs"]["generations"]["verified_against"] == index["path"]
 
 
 # ------------------------------------------------------- committed report ----
