@@ -886,13 +886,14 @@ Recomputing `α_look` after seeing how many looks actually happened would be the
 one level down from the one Amendment 2 fixed: a threshold that moves with the data it
 judges.
 
-**What `α_look` is now for, and what it is not.** No kill depends on it — kill lines are
-absolute counts (§3.7 rule 4). It gives the baseline diagnostic a multiplicity-aware display
-threshold and, at final within-arm selection only, defines §3.9's McNemar-indistinguishable
-top set. A bare `p < 0.05` across up to twenty saved looks would give twenty opportunities for
-a false flag; Bonferroni over `L_max` fixes the operational threshold before the number of
-realized looks is known. **These p-values are never endpoint inference:** they enter none of
-§4's families and are never reported as evidence of a study effect.
+**What `α_look` is now for, and what it is not.** **Nothing mechanical depends on it.** Kill
+lines are absolute counts (§3.7 rule 4) and, since the owner's Decision A (#general msg 2292),
+selection is an absolute item cap with no significance test anywhere in it (§3.9). `α_look`
+survives for exactly one purpose: giving the recorded per-look McNemar diagnostic a
+multiplicity-aware display threshold, so a reader is not handed twenty bare `p < 0.05`
+opportunities to over-read. Bonferroni over `L_max` fixes it before the realized look count is
+known. **These p-values are never endpoint inference:** they enter none of §4's families and
+are never reported as evidence of a study effect.
 
 ### 3.9 Checkpoint selection `[candidate]`
 
@@ -902,17 +903,46 @@ the set of selectable checkpoints and the set of dev measurements are the same s
 > **Eligible** = a checkpoint whose dev correct-count satisfies `n_ckpt >= n_base - 2` — a
 > fixed **non-inferiority margin of 2 items (0.78 points)** against the frozen SFT baseline.
 >
-> Among eligible checkpoints, define the **observed leader** as the checkpoint with the
-> highest dev correct-count; if several have the same count, use the one with the most
-> optimizer steps as the deterministic comparison anchor.
+> Among eligible checkpoints, the **leader** is the one with the highest dev correct-count.
 >
-> The **McNemar-indistinguishable top set** contains the observed leader and every other
-> eligible checkpoint whose paired per-item outcomes are **not significantly worse** than
-> that leader by exact two-sided McNemar at `α_look = 0.0025` (§3.8), meaning `p >= 0.0025`.
-> This is an operational statistical tie, **not** an equivalence or non-inferiority claim.
+> The **tie set** is every eligible checkpoint within **`K = 3` items** of the leader's
+> correct-count on the 258-item subset. Beyond `K`, **accuracy wins outright**.
 >
-> **Selected** = the checkpoint in that top set with the most optimizer steps. **If no
+> **Selected** = the checkpoint in the tie set with the most optimizer steps. **If no
 > checkpoint is eligible, the arm has no candidate** (§4.7).
+
+**No significance test appears in selection, and that is the point.** An earlier candidate
+defined the tie set by exact McNemar at `α_look = 0.0025`. The owner retired that rule and
+specified the one above (#general msg 2292), naming the defect in his own rider: it stated an
+intent — *"a point apart is noise"* — and then named a mechanism that contradicts it by a
+factor of six. Two things were wrong with borrowing that threshold:
+
+- **`α_look` was calibrated for a different question.** It exists so an arm is rarely killed
+  by chance across up to 20 looks (§3.8). Nothing about that calibration makes it a tie
+  detector.
+- **Failing to reject is not equivalence.** A 6-point gap that misses significance at
+  `α = 0.0025` is not a tie; it is a difference the test was underpowered to confirm. Calling
+  it a tie is the same error, one level down, that §3.9's eligibility margin already fixed by
+  replacing "not significantly worse" with an absolute count.
+
+**And the wide reading was not merely conservative — it was directionally biased against the
+candidate.** With everything inside a ~6-point band tying and step count deciding, the rule
+collapses to *final-checkpoint-unless-vetoed*: Option B wearing §6-compliant clothing. Against
+a peak-then-degrade trajectory — the only shape this intervention family has exhibited, where
+study 1's committed per-item rows give 364 / 363 / 359 correct at steps 50 / 100 / 150 — it
+would systematically select **past** the peak. Decision C's entire selection benefit would
+evaporate at the moment of selection.
+
+**Why `K = 3` items.** It is unit-exact — items, not points with rounding ambiguity — and
+`3 / 258 = 1.16 points` is the literal calibration of what the rider claimed. It lands against
+measured data rather than intuition: study 1's checkpoint-to-checkpoint spreads, recomputed
+from `eval/results/study1_bfcl_simple_generations.jsonl`, were **0.25 to 1.25 points**, which
+on a 258-item subset is **1 to 3 items**. So past-like noise spreads tie and step count
+protects against an undertrained winner, while **4 items or more (≥1.55 points) wins on
+merit**. `K = 5` (1.94 points, roughly one unpaired standard error at n = 258) was offered as
+an explicitly conservative alternative and is **not** taken: a wider band re-introduces the
+step-count bias this rule exists to remove, and the argument for narrowing does not stop
+halfway. Pinned now, before any curve exists that a choice of `K` could be made to flatter.
 
 **The eligibility margin is strictly tighter than the kill margin, and has to be.** The kill
 line fires at a 3-item loss sustained over two looks (§3.7 rule 4); an earlier draft made
@@ -1111,11 +1141,21 @@ Exact two-sided McNemar on discordant pairs, plus **Tango's score interval** for
 difference of proportions, 95%, reported regardless of direction or significance. Marginal
 binomial CIs are reported and decide nothing.
 
-**Recorded as missing rather than assumed present:** `eval/paired_analysis.py` already
-computes exact McNemar and Holm adjustment, but **the Tango interval is not implemented
-yet**. It is a build item before any analysis runs, with a unit test against published worked
-values. A1.4 is frozen and names the interval; the code has to catch up to the document, not
-the reverse.
+**Implemented, with its provenance stated rather than implied.** `eval/paired_analysis.py`
+computes exact McNemar, Holm adjustment, and — since commit `92346e6` — Tango's score
+interval, exposed for every contrast and in the CLI. A1.4 named the interval before the code
+existed; the code has now caught up to the document rather than the document being trimmed to
+the code.
+
+The interval is validated two ways, because either alone leaves a hole: **conformance**
+against `PropCIs` 0.3-0 (a GPL-licensed third-party implementation citing Tango 1998, used as
+a checksum-pinned black-box oracle — no code copied into this Apache-2.0 repository, and the
+tests run offline with pinned values), and **structural** checks that the endpoints solve the
+score equation, bracket the point estimate, mirror under swapping `b`/`c`, and honour the
+documented degeneracies. **The oracle vectors are arbitrary synthetic counts, not study
+data**, and neither R nor PropCIs is a runtime or CI dependency. Tango (1998) itself is
+paywalled and no accessible worked table was found, so nothing here claims to reproduce a
+primary-source table.
 
 ### 4.3 Discordance is reported, not just the p-value `[candidate]`
 
