@@ -1,0 +1,94 @@
+{
+  "criterion_id": "bfcl-pool-decontamination/v1",
+  "criterion": "Screen each retained pool prompt against every manifest entry with role=questions. Cascade, in this order, stopping at the first match: (1) 13-gram overlap on normalized user text; (2) exact collision between a presented function name and a name presented by an eval item. Where two categories share a gram or a name, the first category loaded from the manifest wins, so manifest order is part of this criterion. A retained row that cannot be screened deterministically is a hard failure, never a new exclusion bucket.",
+  "implementation": [
+    {
+      "path": "mining/decontaminate_pool.py",
+      "sha256": "af3f41485b11a321754f6db4e6205c38fbc607dfe19eb52997d390e7b288df1e"
+    },
+    {
+      "path": "mining/decontaminate.py",
+      "sha256": "c990d7d25be3ed3629be554596170b75bf2b5bb546448dd86116fb7c98114b73"
+    },
+    {
+      "path": "mining/pool_strata.py",
+      "sha256": "2a9a0a7557d4671f26cfc83bbf88f57ac59dbfcf48b9373e9cf1272db9200d64"
+    }
+  ],
+  "eligibility_criterion_id": "pool-target-structural-eligibility/v1",
+  "eligibility_receipt": {
+    "path": "mining/receipts/sft_dedup_v2_target_preflight.json",
+    "sha256": "a4e467c9b3f5dbe8382cc9efd8540c79a591e5be98e0f013c863716ec1e69868",
+    "criterion_id": "pool-target-structural-eligibility/v1",
+    "counts": {
+      "raw_rows": 12143,
+      "prompt_ineligible": 5,
+      "structurally_excluded": 56,
+      "retained_rows": 12082
+    }
+  },
+  "source": {
+    "path": "data/processed/sft_dedup_v2.jsonl",
+    "sha256": "9e5b7b4f3a5990b5c92e1d5f1b84d8664a9cce006f88087db7cc7219ffe76b2b"
+  },
+  "manifest": {
+    "path": "eval/manifests/bfcl_v4_study2.json",
+    "sha256": "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
+  },
+  "screened_question_files": [
+    {
+      "local_path": "eval/bfcl_data/BFCL_v4_simple_python.json",
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "category": "simple_python",
+      "role": "questions"
+    },
+    {
+      "local_path": "eval/bfcl_data/BFCL_v4_multiple.json",
+      "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+      "category": "multiple",
+      "role": "questions"
+    },
+    {
+      "local_path": "eval/bfcl_data/BFCL_v4_irrelevance.json",
+      "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6",
+      "category": "irrelevance",
+      "role": "questions"
+    },
+    {
+      "local_path": "eval/bfcl_data/BFCL_v4_live_simple.json",
+      "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4",
+      "category": "live_simple",
+      "role": "questions"
+    }
+  ],
+  "reconciliation": "12143 cleaned source - 5 prompt-ineligible - 56 target-structural exclusions = 12082 screen inputs",
+  "screen_input_rows": 12082,
+  "pre_screen": {
+    "multi": 8984,
+    "single": 3098,
+    "total": 12082
+  },
+  "screen_input_id_sha256": "af5eed324868af3fc93449b044064b783cf9698baa544441cb100f6777ccadaa",
+  "prompt_ineligible": 5,
+  "structurally_excluded": 56,
+  "dropped": {
+    "multi": 811,
+    "single": 101,
+    "total": 912,
+    "by_reason": {
+      "fn_name": 911,
+      "ngram_overlap": 1
+    }
+  },
+  "survivors": {
+    "multi": 8173,
+    "single": 2997,
+    "total": 11170
+  },
+  "post_screen_id_sha256": "4271ca82e6c9fc568e79d70757895358c322ed3d61a6bef0f3682486f55f8741",
+  "weights": {
+    "n_multi": 8173,
+    "n_single": 2997,
+    "N": 11170
+  }
+}

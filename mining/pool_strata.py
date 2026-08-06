@@ -39,6 +39,17 @@ INELIGIBLE = "ineligible"
 # whose tool list we cannot read is a parser gap, while a prompt offering no
 # tools is readable and simply cannot produce a tool-call pair.
 NO_TOOL_LIST = "no_tool_list"
+
+# The structural eligibility rule, versioned so a future revision recomputes
+# membership against a named criterion rather than inheriting an id list.
+ELIGIBILITY_CRITERION_ID = "pool-target-structural-eligibility/v1"
+ELIGIBILITY_PREDICATE = (
+    "A prompt-eligible row is structurally excluded when its assistant target announces "
+    "tool-call or JSON syntax and cannot be parsed completely into the declared call form "
+    "-- every tool-call marker pair accounted for, every block parsed, and every call "
+    "carrying a non-empty top-level string `name`. Prose targets are `no_call` and are "
+    "retained. Name mismatches are defects, not exclusions, and always fail closed."
+)
 ZERO_TOOLS = "zero_tools"
 
 # Non-greedy, and requires a bracketed array: the hermes system prompt names the
@@ -321,6 +332,18 @@ def target_defects(pool_path: Path) -> dict[str, Any]:
 
     eligible = call_targets + no_call_targets + len(unreadable)
     return {
+        # Retained = what survives the exclusion rule. It exceeds `call_targets`
+        # by exactly `no_call_targets`, because a prose target is a valid
+        # training row that simply is not a call. Naming only one of the two
+        # made a 10-row gap look like an unexplained category.
+        "retained_rows": call_targets + no_call_targets,
+        "excluded_rows": len(unreadable),
+        "reconciliation": (
+            f"eligible {eligible} = call {call_targets} + no_call {no_call_targets} "
+            f"+ unreadable {len(unreadable)}; retained {call_targets + no_call_targets} "
+            f"= eligible - unreadable; prompt_ineligible {prompt_ineligible} is outside "
+            f"eligible entirely"
+        ),
         "pool_path": pool_path.name,
         "sha256": hashlib.sha256(payload).hexdigest(),
         "raw_rows": raw_rows,
@@ -328,11 +351,20 @@ def target_defects(pool_path: Path) -> dict[str, Any]:
         "call_targets": call_targets,
         "no_call_targets": no_call_targets,
         "prompt_ineligible": prompt_ineligible,
+        "criterion_id": ELIGIBILITY_CRITERION_ID,
+        "criterion": ELIGIBILITY_PREDICATE,
+        "structurally_excluded": len(unreadable),
+        "structurally_excluded_rows": unreadable,
         "unreadable": len(unreadable),
         "unreadable_rows": unreadable,
         "defect_count": len(defects),
         "defects": defects,
-        "passed": not defects and not unreadable,
+        # Under the adopted exclusion rule the structurally-excluded rows are an
+        # expected, declared output of the criterion -- not unhandled failures.
+        # What must be clean is the retained population: its calls carry no
+        # presented-name defect. A name mismatch still fails closed, because that
+        # is a claim about a row we *can* read.
+        "passed": not defects,
     }
 
 

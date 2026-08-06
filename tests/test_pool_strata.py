@@ -225,8 +225,14 @@ def test_the_preflight_fails_closed_on_an_unreadable_eligible_target(tmp_path: P
 
     report = target_defects(pool)
 
-    assert report["unreadable"] == 1
-    assert report["passed"] is False, "an unreadable eligible target must stop the freeze"
+    # Before the owner adopted (b) this asserted passed is False. Under the
+    # adopted rule such a row is a declared structural exclusion, not an
+    # unhandled failure -- it is counted and named, and the retained population
+    # is what must be clean. The fail-closed guarantee now lives on name
+    # mismatches; see test_a_retained_name_mismatch_still_fails_closed.
+    assert report["structurally_excluded"] == 1
+    assert report["structurally_excluded_rows"][0]["source_id"] == "broken"
+    assert report["passed"] is True
 
 
 def test_a_prompt_ineligible_row_is_not_applicable_rather_than_a_pass(tmp_path: Path) -> None:
@@ -311,3 +317,45 @@ def test_the_receipt_preserves_every_failure_identity(tmp_path: Path) -> None:
     assert {row["source_id"] for row in report["unreadable_rows"]} == {
         f"broken-{index}" for index in range(56)
     }
+
+
+def test_a_retained_name_mismatch_still_fails_closed(tmp_path: Path) -> None:
+    """Structural exclusions are a declared output of the rule and do not fail
+    the run. A name mismatch in a row we *can* read is a different claim, and
+    still stops everything."""
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {"source_id": "excluded", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": "<tool_call>\n{'arguments': {}}\n</tool_call>"}]},
+        {"source_id": "mismatch", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": '[{"name": "invented", "arguments": {}}]'}]},
+    ]
+    pool.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["structurally_excluded"] == 1
+    assert report["defect_count"] == 1
+    assert report["passed"] is False
+
+
+def test_structural_exclusions_alone_do_not_fail_the_run(tmp_path: Path) -> None:
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {"source_id": "excluded", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": "<tool_call>\n{'arguments': {}}\n</tool_call>"}]},
+        {"source_id": "ok", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": '[{"name": "a", "arguments": {}}]'}]},
+    ]
+    pool.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["structurally_excluded"] == 1
+    assert report["retained_rows"] == 1
+    assert report["criterion_id"] == "pool-target-structural-eligibility/v1"
+    assert report["passed"] is True

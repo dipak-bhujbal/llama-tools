@@ -107,17 +107,27 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[DRAFT — awaiting codex review and owner adoption]`
+## 2. Mining `[ADOPTION CANDIDATE — codex signed off the full candidate content at 6110545 (#general msg 2173); awaiting owner adoption]`
 
-Drafting authorized by the owner, #general msg 2095. **This section is not yet frozen and
-does not yet govern anything.** It becomes `[FROZEN]` only when codex has signed off on the
-gate arithmetic and @dipak has explicitly adopted it, at which point it gets an adoption
-line and a row in the amendments table — the same bar Amendment 2 had to clear.
+Drafting authorized by the owner, #general msg 2095. The **decontamination artifact
+package** was signed off at `0dccddd` (#general msg 2169); that sign-off covered the
+implementation and artifact, and explicitly left §2 as a draft. **Codex signed off the full
+candidate content at `6110545` (#general msg 2173); awaiting owner adoption.** This section
+does **not** govern anything:
+it becomes `[FROZEN]` when @dipak explicitly adopts it, at which point the adoption line
+below is completed and the amendments-table row loses its *pending* marker — the same bar
+Amendment 2 cleared.
 
-Both owner decisions are now made (#general msg 2108): §2.5 weights are artifact-derived on
-exact counts, and §2.7 fixes the mining population as the curated SFT pool at its cleaned
-revision. What remains before freezing is mechanical: re-run decontamination over that
-revision, derive the weights from the resulting artifact, and record both here.
+> **Adoption line — @dipak:** *pending.* Adopting freezes §§2.1–2.11 as written, including
+> the yield gate arithmetic, the exclusion criterion, and the weights
+> **(8,173, 2,997, 11,170)** derived from the committed
+> decontamination artifact (sha256 `fb7a0200dbeeabb8…`).
+> No study-2 model output has been observed; adoption authorizes **no model call and no
+> spend**.
+
+All owner decisions are made and all mechanical work is done: the decontamination artifact
+is built and committed, the weights are derived from it as an exact integer triple, and
+codex has verified every binding independently. What remains is the owner's adoption.
 
 No mining run had produced a single pair when this was drafted; no yield number of any kind
 had been observed.
@@ -134,7 +144,7 @@ had been observed.
 The adapter revision is the one already pinned in §0.2; the same string governs both, so the
 probe and the mining run cannot silently diverge.
 
-### 2.2 Strata `[proposed]`
+### 2.2 Strata `[adoption candidate]`
 
 Every mined prompt is assigned to exactly one stratum by the count of tools its prompt
 presents:
@@ -169,7 +179,7 @@ one silently reclassifies the other. That is not hypothetical — see the note i
 Every ledger record carries its `stratum` label, so `y_multi` and `y_single` are recomputable
 from the artifact rather than reconstructed from a run log.
 
-### 2.3 Allocation `[proposed]`
+### 2.3 Allocation `[adoption candidate]`
 
 **Proportional.** Each stratum is sampled in proportion to its target weight `w_s` (§2.5).
 Both strata receive a **nonzero** allocation in the pilot and in the calibration run, so
@@ -179,7 +189,7 @@ Allocation is planned proportionally but **realized** allocation is what gets re
 gate arithmetic in §2.6 standardizes to the target weights regardless, so integer rounding
 or a failed prompt cannot move the gate.
 
-### 2.4 Sampling parameters `[proposed]`
+### 2.4 Sampling parameters `[adoption candidate]`
 
 | | |
 |---|---|
@@ -191,13 +201,27 @@ or a failed prompt cannot move the gate.
 | pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
 | calibration | `--n-prompts 1000`, `--out-dir mining_out` |
 
-### 2.5 Target weights `[decided — artifact-derived, exact counts]`
+### 2.5 Target weights `[adoption candidate — artifact-derived, exact counts]`
 
 Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weights are not
 the literal 65/35 of the earlier instruction — that figure descends from a composition count
 that could read only one of the pool's two prompt formats (§2.6). The rule:
 
-The rule referred to by option (a):
+**Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, sha256
+`fb7a0200dbeeabb831006eeb800a23d3c92d89a468666c61b098ca1277231906`, criterion
+`bfcl-pool-decontamination/v1`):
+
+> **`(n_multi, n_single, N)` = (8,173, 2,997, 11,170)**
+>
+> Stored as exact integers. The multi share
+> 8173/11170 = 73.169% is **derived at display time and
+> never stored**, so `P_std` is computed from exact ratios.
+
+12143 cleaned source - 5 prompt-ineligible - 56 target-structural exclusions = 12082 screen inputs; of those, 912 were dropped
+({'fn_name': 911, 'ngram_overlap': 1}) leaving 11,170 survivors. §1's 12,160-row figures remain
+non-comparable: different source revision, different denominator.
+
+The rule this implements:
 
 > `w_s` = (active post-screen prompts in stratum `s`) / (all active post-screen prompts),
 > computed from the **committed, hash-pinned decontamination artifact** over the mining
@@ -211,7 +235,7 @@ If fixed design weights are ever preferred to natural composition, they may be u
 if labelled a design choice rather than measured composition, and recorded here before the
 run.
 
-### 2.6 Yield gate arithmetic `[proposed]`
+### 2.6 Yield gate arithmetic `[adoption candidate]`
 
 > `y_s` = (active pairs materialized from stratum `s`) / (active post-screen prompts mined
 > in stratum `s`), both terms as defined by Amendment 2 A2.1.
@@ -268,7 +292,7 @@ of 12,155 classifiable rows, not 66.8%**. The post-screen figure, and therefore
 never edited in place. The figures above are reproducible from the committed parser and the
 recorded digest rather than being a second uncommitted count.
 
-### 2.7 Mining population `[decided — curated SFT pool, cleaned revision]`
+### 2.7 Mining population `[adoption candidate — curated SFT pool, cleaned revision]`
 
 Owner decision, #general msg 2108: **the curated SFT pool at the cleaned revision**, with
 decontamination and weights re-run over it.
@@ -298,7 +322,7 @@ population. §1's decontamination figures do **not** carry over — they were co
 pre-screen counts; §2.5's weights come from the post-screen artifact once decontamination is
 re-run here, and that artifact governs.
 
-### 2.8 The pool's own targets are preflighted `[proposed]`
+### 2.8 The pool's own targets are preflighted `[adoption candidate]`
 
 Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
 pool's own targets.
@@ -308,10 +332,12 @@ pool's own targets.
 > failing this is a training-side `simple_python_363`: it teaches the model to invent a tool
 > name, and no downstream eval attributes that habit back to the pool.
 >
-> **This fails closed.** A defect, or an eligible target the parser cannot read, is a
-> **stop condition** for the freeze and for mining — not a row to drop. Excluding such rows
-> would repair the denominator by discarding the evidence that something is wrong, which is
-> the opposite of what A2.3 does with a defective answer key.
+> **Fail-closed rule, as adopted.** A **retained name mismatch always stops** the freeze and
+> mining: it is a claim about a row we can read, and dropping it would repair the denominator
+> by discarding evidence, which is the opposite of what A2.3 does with a defective answer
+> key. An **unreadable target is excluded only under the owner-adopted, versioned criterion
+> `pool-target-structural-eligibility/v1`**, which names it, counts it, and commits its
+> identity; **absent that criterion it stops the run.**
 
 Targets are classified three ways, because "not a tool call" and "a tool call we cannot
 read" are different facts:
@@ -320,48 +346,154 @@ read" are different facts:
 - **`no_call`** — a target that deliberately answers in prose, e.g. asking for a missing
   argument rather than guessing one. Legitimate training signal, not a defect.
 - **`unreadable`** — a target that announces itself as a tool call, or as JSON, and then
-  does not parse. A hard failure.
+  does not parse. Under the adopted criterion `pool-target-structural-eligibility/v1` this is a **structural exclusion**, counted
+  and named; absent such a criterion it is a hard failure that stops the run.
 
 Rows whose *prompt* is ineligible (§2.2) are counted as **not applicable** rather than as
 checked passes: the prompt is outside the mining population, so its target is not a target
 this study will use.
 
-**Result at the pinned revision** (`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`,
-receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
+**Current result at the pinned revision**, under the adopted exclusion rule
+(`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`, receipt at
+`mining/receipts/sft_dedup_v2_target_preflight.json`, criterion `pool-target-structural-eligibility/v1`):
 
 | | |
 |---|---:|
 | raw rows | 12,143 |
-| eligible rows | 12,138 |
+| prompt-ineligible (n/a, §2.2) | 5 |
+| structurally excluded (§2.8 rule) | 56 |
+| **retained** | **12,082** |
 | ├ call targets | 12,072 |
-| ├ no-call targets | 10 |
-| └ **unreadable** | **56** |
-| prompt-ineligible (n/a) | 5 |
-| name defects | 0 |
-| **passed** | **False** |
+| └ no-call targets | 10 |
+| retained name defects | 0 |
+| **passed** | **True** |
 
-**The preflight does not pass, and §2 cannot freeze until it does.** 56 eligible
-targets are `<tool_call>` blocks carrying no top-level `name` — their only top-level key is
-`arguments`, with the call's name nested inside it. They are not well-formed
-`{name, arguments}` calls, so this study cannot check what tool they teach.
+Eligible 12138 = call 12072 + no_call 10 + unreadable 56; retained 12082 = eligible - unreadable; prompt_ineligible 5 is outside eligible entirely. The CLI exits 0 here and exits non-zero on any retained
+name defect.
 
-No name defects were found among the 12,072 targets that *are* well-formed.
+*Historical note, kept because the discovery is the reason this clause exists.* Before the
+owner adopted (b), the same 56 rows were reported as `unreadable`
+with `passed: False`, and §2 was correctly blocked. Adopting the exclusion did not make the
+defect go away — it made the 56 rows a **declared, named output of
+a versioned rule** rather than an unhandled failure. Their identities are still committed in
+the receipt, and a name defect among the retained rows still fails closed.
 
-> **@dipak: repairing these 56 rows is a material data change and neither agent should
-> make it silently.** Two options, both requiring your decision:
+**Owner decision, #general msg 2134: (b) preregistered exclusion.**
+
+> **The exclusion is defined by rule, not by list.** Criterion
+> **`pool-target-structural-eligibility/v1`**, recorded in the receipt:
 >
-> **(a) Documented deterministic repair** — lift the nested `arguments.name` to top level
-> under a committed, tested transform, producing a new cleaned revision with its own sha256.
-> Recovers 56 rows; changes training data.
+> *A prompt-eligible row is structurally excluded when its assistant target announces tool-call or JSON syntax and cannot be parsed completely into the declared call form -- every tool-call marker pair accounted for, every block parsed, and every call carrying a non-empty top-level string `name`. Prose targets are `no_call` and are retained. Name mismatches are defects, not exclusions, and always fail closed.*
 >
-> **(b) Preregistered exclusion** — declare these rows out of the mining population here,
-> before any generation, with the count and the reason recorded. Loses 56 rows of
-> 12,138 (0.5%); changes nothing else.
+> Membership is re-derived from this criterion against whatever revision is pinned; it is
+> never inherited from a frozen list of ids.
+>
+> The receipt records that rule's **current output**: 56 rows at
+> `sft_dedup_v2.jsonl` sha256 `9e5b7b4f3a5990b5…`, all identities committed. A future
+> revision recomputes membership rather than carrying these ids forward, so the list can
+> never silently diverge from the rule that produced it.
+>
+> **The population is defined post-exclusion.** The exclusion is part of the population's
+> definition, not a deletion from it — fixed before any generation, by a deterministic
+> structural rule that no model output touches. §2.5's weights are derived over this
+> post-exclusion, post-decontamination population, so the exclusion's systematic single-tool
+> skew is *described* by the weights rather than hidden beneath them.
+
+**Why exclusion rather than repair, recorded so the reasoning survives the decision.** The
+nested `arguments.name` is a strong hint about intent, not a certainty: a row corrupt in one
+place is a row whose intent is being guessed at, and 56 guessed ground truths entering the
+pool as *verification keys* is synthesized provenance for a 0.46% gain.
+
+**Inclusion would not have been neutral.** The concrete path is in the **quarantined**
+`intake/quarantine/2026-08-04-chat-attachments/mine_pairs.py`, which has never been run and
+must not be promoted unchanged: a target that fails call-parse is assigned
+`gt = {"type": "no_call"}`, the verifier then grades any tool call against it as
+`spurious_tool_call`, and a 1–7-of-8 pass split forms inverted preference pairs while 0/8
+writes the false ground truth into the SFT bucket. Applied to these 56 rows that is
+systematically inverted training signal — teaching the model *not* to call tools on prompts
+that wanted them. This is a quarantined implementation path, not an outcome of any run. This preflight closed a live path to poisoned pairs; it did not find a cosmetic
+defect. That is why §2.8's classifier distinguishes `unreadable` from `no_call` rather than
+collapsing both into "not a call".
+
+**Count reconciliation** (eligible 12138 = call 12072 + no_call 10 + unreadable 56; retained 12082 = eligible - unreadable; prompt_ineligible 5 is outside eligible entirely). Retained (12,082) exceeds
+well-formed call targets (12,072) by exactly the 10
+`no_call` rows, which are legitimate training data and are kept.
 
 An earlier version of this section reported `unreadable: 0, passed: true`. That receipt was
 invalid: the parser fell back to a regex search for `"name"`, which matched the *nested*
 argument key and reported these 56 malformed targets as valid calls. A check that
 invents the value it is checking is worse than no check, and the fallback has been removed.
+
+### 2.9 The decontamination artifact `[adoption candidate — artifact signed off at 0dccddd]`
+
+Spec settled in #general msgs 2143 and 2150, recorded here so the implementer works from the
+preregistration rather than from chat. **Exclusion precedes screening**, so the screen input
+is 12,082:
+
+```
+12,143 cleaned source − 5 prompt-ineligible − 56 target-structural exclusions = 12,082
+```
+
+That reconciliation is stated in the artifact **before** any drop or survival count.
+
+Criterion **`bfcl-pool-decontamination/v1`**, whose predicate pins the 13-gram user-text
+normalization rule, the presented-function-name collision rule, all four manifest
+categories, **the cascade order**, and fail-closed parsing.
+
+Required contents:
+
+- source path + sha256 (`sft_dedup_v2`); implementation identity
+- eligibility criterion id + target-preflight receipt hash
+- **the SHA-256 of each of the four screened `role=questions` files** from the pinned
+  manifest, as `(category, local_path, sha256)` tuples — the screened question *bytes*, not
+  the manifest file and not the answer keys — plus the manifest's own hash. A future BFCL
+  re-pin then detectably invalidates this artifact instead of silently coexisting with it
+- sorted-id digest of the 12,082 screen-input population, and of the post-screen population
+- exact pre/post counts by `multi`/`single`, by drop reason, and in total
+- **weights as the integer triple `(n_multi, n_single, N)`** — decimals are display-only,
+  derived at render time. Exact ratios in, exact `P_std` out.
+
+**Match order, pinned.** A row tripping both screens is attributed to whichever runs first,
+so "first-match drop reason" is meaningless unless the order is part of the criterion:
+
+> **1. 13-gram user-text overlap. 2. Exact presented-function-name collision. Stop at the
+> first match.**
+>
+> **Category tie-break:** both screens index `gram → category` and `name → category` with
+> `setdefault`, so where two categories share a gram or a function name, the **first
+> category loaded from the manifest wins**, in manifest file order. That order is therefore
+> part of the criterion too, and the manifest order in force is recorded in the artifact.
+
+This matches `Decontaminator.is_contaminated` as implemented today; if the code order ever
+changes, the criterion id changes with it.
+
+A row that survives eligibility but cannot be deterministically screened is a **hard
+failure**, not a new exclusion bucket.
+
+§1's 12,160-row figures are **explicitly non-comparable**: different source revision and
+different denominator.
+
+### 2.10 Expected: near-zero spurious-call pairs `[adoption candidate; owner-directed]`
+
+Recorded in advance so it is never mistaken for a miner defect. The retained population
+carries only **10 genuine `no_call` rows in 12,082**, so mined **spurious-call preference
+pairs will be approximately zero**. That is a property of the training pool, not of the
+miner, and it is consistent with `irrelevance` being a descriptive secondary rather than an
+endpoint: this pool barely exercises no-call behaviour at all.
+
+An implementation that produced *many* spurious-call pairs from this pool would be the
+anomaly worth investigating.
+
+### 2.11 The miner re-asserts eligibility at load `[adoption candidate; owner-directed]`
+
+The pool arrives pre-screened, and the miner **re-asserts that every row it receives parses
+under `pool-target-structural-eligibility/v1`, refusing the run otherwise.** Checked twice,
+trusted once.
+
+The quarantined `mine_pairs.py` did the opposite: a target it could not parse silently
+became a `no_call` ground truth. **That fallback is replaced by a refusal, never a
+reclassification** — a row the miner cannot read is a stop condition, not a row it gets to
+reinterpret.
 
 ## 3. Training arms `[PENDING]`
 
@@ -395,6 +527,7 @@ the superseded language verbatim and supersedes it by reference.
 |---|---|---|---|---|
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
+| 3 | *pending* | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | *awaiting owner adoption* |
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
 Argument-level matching semantics stay as `eval/bfcl_scoring.py` implements them
