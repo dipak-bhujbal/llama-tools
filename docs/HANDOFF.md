@@ -304,7 +304,10 @@ a parallel ablation arm later)
 - [x] Paper: §2 decisions taken (weights, population, exclusion)  [H]
 - [ ] **NEXT** exclusion-aware decontamination CLI + artifact  [A]  <- satisfies A2.2
 - [ ] §2.5 weights derived from that artifact; §2 frozen  [A+H]
-- [ ] Mining rewrite: promote mine_pairs around ledger/decontaminate  [A]
+- [ ] Mining rewrite: **build** production `mining/mine_pairs.py` around ledger/
+      decontaminate/pool_strata. The quarantined copy is **reference-only and must
+      not be promoted unchanged** — it assigns `no_call` ground truth on parse
+      failure, which mints inverted preference pairs.  [A]
 - [ ] P1 self-test + pilot(100) + report            [A->G]  <- **first spend**
 - [ ] P1 full mine(1000) + commit evidence          [A]
 - [ ] P2 gate applied + countersigned               [A+H]
