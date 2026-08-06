@@ -4,11 +4,11 @@ Post-trained Llama-3.1-8B for structured tool-calling in AI agents.
 
 ## What this is
 
-An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for reliable function-calling behavior: correct tool selection, correct argument formatting, correct types, no hallucinated tools. Full SFT + DPO training pipeline, evaluated on the Berkeley Function Calling Leaderboard (BFCL), with quantized variants for production serving.
+An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for reliable function-calling behavior: correct tool selection, correct argument formatting, correct types, no hallucinated tools. The repository contains the SFT and DPO training pipelines, BFCL and MMLU evaluation code, and the evidence behind the decision to ship SFT without either DPO variant. Quantized variants remain planned work.
 
-## Status — 2026-07-20
+## Status — 2026-08-04
 
-**SFT stage: shipped.** `centuriandip/llama-3.1-8b-tools-sft` is live on HuggingFace (private; public flip planned after Week 7 eval). LoRA-SFT of Llama-3.1-8B-Instruct on 12,160 curated tool-calling examples, 3 epochs, 9h 09m on 1x RTX A6000, approximately $4.55 compute. Eval loss improved at all 11 checkpoints (0.4625 → 0.2117), zero overfitting signal through 3 full epochs. Released same-day via a signed, eval-gated checklist using the companion [release-kit](https://github.com/dipak-bhujbal/release-kit) framework.
+**SFT is the selected final model.** `centuriandip/llama-3.1-8b-tools-sft` remains private on Hugging Face. LoRA-SFT on 12,160 curated tool-calling examples ran for 3 epochs (9h 09m on 1x RTX A6000, approximately $4.55 compute). Eval loss improved at all 11 checkpoints (0.4625 → 0.2117). On the 400-item BFCL v4 `simple_python` set, SFT scored **369/400 = 92.25%** with perfect function-name selection and JSON validity. The accepted study-1 record reports MMLU 5-shot **0.659 vs 0.683 base** (−2.4 points).
 
 **DPO v1: closed as a documented negative result.** Full DPO on the 10,242-pair rule-perturbed preference set degraded the policy rather than improving it. The pre-registered health metric (`eval_rewards/chosen`) caught the degradation mid-run (−0.36 → −0.53), the run was stopped early at step 400/622, and a checkpoint sweep with human diff-read confirmed monotonic regression — the SFT baseline beat every DPO checkpoint on the trainer's own holdout (16/20 vs 15/14/14/11 exact match; checkpoint-400 emitted invalid JSON). Root cause: rule-based rejecteds were trivially separable, so the optimizer had no ranking work left and ate the SFT signal instead. **The SFT model remains the shipped model.** Full analysis: [ADR-006](./docs/decisions/ADR-006-dpo-v1-negative-result.md).
 
@@ -20,23 +20,25 @@ An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for rel
 | dpo-300 | 14/20 | 20/20 |
 | dpo-400 | 11/20 | 18/20 |
 
-**DPO v2: designed, optional scope.** Rejecteds sampled from the SFT model's own failures (on-policy hard negatives) instead of rule perturbations, with tightened kill lines and pre-registered abort conditions at every stage. Design: [ADR-007](./docs/decisions/ADR-007-dpo-v2-on-policy-rejecteds.md). Pipeline code is in `data/sample_failures.py`, `data/build_dpo_v2_pairs.py`, `train/dpo_v2_full.py`.
+**DPO v2: closed as a second documented negative result.** The on-policy hard-negative design fixed DPO v1's training-time failure: held-out preference accuracy and margins improved without runaway chosen-reward damage. Held-out tool-use was still lower than SFT at every evaluated DPO checkpoint — **364/400 at step 50, 363/400 at step 100, and 359/400 at step 150**, against SFT's 369/400 — and no paired contrast was significant after Holm correction. The training signal did not transfer to fresh ground-truth tool use, so no DPO checkpoint shipped. Full analysis: [ADR-008](./docs/decisions/ADR-008-dpo-v2-negative-result.md).
 
-**Upcoming:** BFCL evaluation (upstream moved to v4; we will evaluate on the current leaderboard version), quantized variants, public model release.
+**Study 2: preparation only.** A follow-up study will test on-policy mining under bounded objectives and ground-truth checkpoint selection. Baselines, data provenance, endpoint qualification, and paid stages are gated before execution. No study-2 model run has started.
 
-See [`docs/progress/week-6-7-dpo-run-log.md`](./docs/progress/week-6-7-dpo-run-log.md) for the DPO arc lab notebook.
+The BFCL report and per-item generations are preserved in the public [`llama-3.1-8b-tools-dpo-v2-evidence`](https://huggingface.co/datasets/centuriandip/llama-3.1-8b-tools-dpo-v2-evidence) dataset and indexed under [`eval/results/`](./eval/results/). The public MMLU file is the 200-item smoke; the full 14,042-item raw output has not yet been recovered, and this evidence gap is recorded explicitly rather than filled from memory.
 
 ## Quick links
 
 | Artifact | Location | State |
 |---|---|---|
-| SFT model | `centuriandip/llama-3.1-8b-tools-sft` | Private; public after eval |
-| Preference dataset | `centuriandip/tool-calling-preferences` | Private until release |
-| Final model (SFT+DPO) | `centuriandip/llama-3.1-8b-tools` | On hold — only ships if DPO v2 beats SFT |
+| SFT model | `centuriandip/llama-3.1-8b-tools-sft` | Private; selected final model |
+| Preference dataset | `centuriandip/tool-calling-preferences` | Private |
+| Planned SFT+DPO model | `centuriandip/llama-3.1-8b-tools` | Not published; both DPO variants failed the ship gate |
 | DPO v1 checkpoints + sweep report | HF staging (`dpo-checkpoints/`, `dpo-sweep/`) | Archived evidence (ADR-006) |
+| DPO v2 checkpoints + eval evidence | [`centuriandip/llama-3.1-8b-tools-dpo-v2-evidence`](https://huggingface.co/datasets/centuriandip/llama-3.1-8b-tools-dpo-v2-evidence) | Public negative-result evidence |
+| Committed eval index | [`eval/results/`](./eval/results/) | BFCL report + content-addressed evidence manifest |
 | Technical report | [`docs/report/`](./docs/report/) | In progress |
-| ADRs | [`docs/decisions/`](./docs/decisions/) | 7 accepted |
-| Lab notebook | [`docs/progress/week-6-7-dpo-run-log.md`](./docs/progress/week-6-7-dpo-run-log.md) | Live |
+| ADRs | [`docs/decisions/`](./docs/decisions/) | 8 accepted |
+| Lab notebook | [`docs/progress/week-6-7-dpo-run-log.md`](./docs/progress/week-6-7-dpo-run-log.md) | Study-1 DPO arc closed |
 
 ## Training results (SFT)
 
@@ -54,7 +56,7 @@ See [`docs/progress/week-6-7-dpo-run-log.md`](./docs/progress/week-6-7-dpo-run-l
 
 Qualitative gate (5 held-out prompts, reviewed before release): 4/5 exact match to gold including three multi-call cases; 1/5 subtle argument miss (`"lr": "en-US"` vs expected `"pt-BR"` — right tool, right schema, wrong locale grounding). This argument-grounding failure class is the explicit target of the DPO stage.
 
-BFCL benchmark numbers are not yet available. Formal evaluation against the current leaderboard version is scheduled for Week 7, with scores for base Llama-3.1-8B-Instruct and the shipped SFT model to be published at `eval/results/week-7.md` (plus DPO v2 if it earns a release per ADR-007).
+Formal BFCL v4 `simple_python` results are committed at [`eval/results/study1_bfcl_simple_report.md`](./eval/results/study1_bfcl_simple_report.md). The frozen input/key manifest contains **400** rows and unique ids, matching the scorer and archived per-item generations. The earlier `n=399` text was a newline-counting error and has been corrected; the reported 369/400 score itself was always 92.25%.
 
 ## Data quality
 
@@ -80,7 +82,7 @@ llama-tools/
 ├── quantize/                      # AWQ int4 quantization pipeline
 ├── model_card/                    # Model card source (sft_model_card.md)
 └── docs/
-    ├── decisions/                 # 5 Architecture Decision Records (ADRs)
+    ├── decisions/                 # 8 accepted Architecture Decision Records (ADRs)
     ├── learning/                  # Mode A learning ramps (Weeks 1-4+)
     ├── progress/                  # Lab notebooks (weeks-1-3.md, week-4-run-log.md)
     └── report/                    # Technical report (in progress)

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-20
-**Decision:** Do not merge any DPO v2 checkpoint. The Week 4 SFT model (`centuriandip/llama-3.1-8b-tools-sft`) remains the shipped model. DPO v2 is closed as a documented negative result: on-policy hard-pair DPO trained cleanly on preference metrics but monotonically degraded held-out tool-use *and* general capability (MMLU). The `centuriandip/llama-3.1-8b-tools` repo (planned SFT+DPO) stays unpublished. The project ships SFT.
+**Decision:** Do not merge any DPO v2 checkpoint. The Week 4 SFT model (`centuriandip/llama-3.1-8b-tools-sft`) remains the shipped model. DPO v2 is closed as a documented negative result: on-policy hard-pair DPO trained cleanly on preference metrics but produced **no improvement** on held-out tool-use or general capability (MMLU), with point estimates trending against it. (See the statistical correction in Stage 4 below: under a paired test with multiplicity correction, no individual checkpoint contrast is significant, so this ADR does not claim measured degradation — it claims a failure to improve.) The `centuriandip/llama-3.1-8b-tools` repo (planned SFT+DPO) stays unpublished. The project ships SFT.
 
 ## Context
 
@@ -21,7 +21,9 @@ By every training-time signal, DPO v2 fixed the ADR-006 failure mode. The v2 hyp
 
 ## Stage 4 results (held-out evaluation)
 
-### BFCL v4 simple_python (399 held-out prompts, greedy generation, exact-match arg-in-accepted-list scoring)
+### BFCL v4 simple_python (400 held-out prompts, greedy generation, exact-match arg-in-accepted-list scoring)
+
+> **Factual correction (2026-08-04):** This heading previously said 399. Both frozen JSONL files contain 400 objects and 400 unique ids, and the archived report/generations score all 400. The reported `369/400 = 92.25%` result is unchanged.
 
 | candidate | overall | name_ok | args_ok | json_valid | delta vs SFT |
 |---|---|---|---|---|---|
@@ -30,7 +32,21 @@ By every training-time signal, DPO v2 fixed the ADR-006 failure mode. The v2 hyp
 | dpo-100 | 363/400 (90.75%) | 400/400 | 363/400 | 400/400 | −6 |
 | dpo-150 | 359/400 (89.75%) | 400/400 | 359/400 | 400/400 | **−10** |
 
-All candidates: perfect `name_ok` (function selection) and `json_valid` (structural output). Every failure is an `args_ok` failure. **DPO v2 monotonically degrades argument correctness with training steps.** Absolute single-checkpoint deltas are near the 95% CI noise band (±~2.7% on n=400), but the monotonic trend across three checkpoints is inconsistent with random noise and consistent with a small real effect.
+All candidates: perfect `name_ok` (function selection) and `json_valid` (structural output). Every failure is an `args_ok` failure. **Held-out tool-use was lower than SFT at every evaluated DPO checkpoint; no paired contrast was significant after Holm correction.** Absolute single-checkpoint deltas are near the 95% CI noise band (±~2.7% on n=400), and the direction is consistent across all three checkpoints — a consistent direction, not three measured regressions. See the statistical correction below.
+
+> **Statistical correction (2026-08-04).** The paragraph above compares *marginal* accuracies. Every candidate was scored on the same 400 items, so the correct test is paired. Re-analysed with exact two-sided McNemar on the recovered per-item rows (`eval/results/study1_bfcl_simple_generations.jsonl`, SHA-256-verified against the published evidence dataset; reproduce with `eval/paired_analysis.py`):
+>
+> | contrast | marginal | sft-only correct | ckpt-only correct | p (raw) | p (Holm, family=3) |
+> |---|---|---|---|---|---|
+> | sft vs dpo-50 | −5 | 8 | 3 | 0.2266 | 0.2920 |
+> | sft vs dpo-100 | −6 | 9 | 3 | 0.1460 | 0.2920 |
+> | sft vs dpo-150 | −10 | 13 | 3 | 0.0213 | **0.0638** |
+>
+> **No contrast is statistically significant** once corrected for the three comparisons actually made. The marginal counts are genuinely monotonic (369 > 364 > 363 > 359) and that description stands, but the sentence "monotonically degrades" must not be read as three measured regressions — it is a consistent *direction* across three individually indistinguishable contrasts.
+>
+> **The decision is unchanged.** Not shipping DPO v2 never required proving degradation; it required failing to demonstrate improvement, and no checkpoint improved on any endpoint. The honest headline is *"on-policy hard negatives did not improve held-out tool-use, and the point estimates trend against it"* — not *"DPO v2 degraded the model."*
+>
+> An earlier version of this correction claimed dpo-150 differed significantly on its raw p-value of 0.0213. That was the same overclaim one level down: three contrasts were tested, so the raw p-value of the most extreme one is not the familywise error rate.
 
 ### MMLU (14,042 items, 5-shot, next-token log-prob argmax over ' A'/' B'/' C'/' D')
 
@@ -80,7 +96,7 @@ Three independent measurements form a consistent picture:
 
 1. **Training-time preference metrics improved as designed.** ADR-007's design fixed the ADR-006 failure mode: chosen reward stayed positive, margins tripled, easy-data abort was not triggered. On-policy hard pairs *are* harder to rank than rule-perturbed pairs, and the optimizer *did* real ranking work. The training-side hypothesis is validated.
 
-2. **The improved preference-ranking signal did not transfer to held-out generation quality.** BFCL simple_python argument-correctness monotonically dropped across the three checkpoints (−5, −6, −10 vs SFT). The most plausible interpretation is that on-policy DPO taught the model to discriminate *within-pair* on the specific failure modes we sampled, without generalizing to fresh held-out prompts — and the tiny distributional shift required to widen the training margins came at a small but measurable cost to correct outputs on new prompts.
+2. **The improved preference-ranking signal did not transfer to held-out generation quality.** BFCL simple_python argument-correctness was lower than SFT at every evaluated checkpoint (−5, −6, −10 vs SFT), with no paired contrast significant after Holm correction. The most plausible interpretation is that on-policy DPO taught the model to discriminate *within-pair* on the specific failure modes we sampled, without generalizing to fresh held-out prompts — and the tiny distributional shift required to widen the training margins came at a cost to correct outputs on new prompts that the point estimates suggest but this sample cannot resolve.
 
 3. **The MMLU regression check confirmed the damage was isolated to tool-use, not general capability.** SFT alone dropped MMLU by 2.4 pts vs base (0.683 → 0.659) — modest, inside the ~2-3 pt "safe band" for a domain-specialized fine-tune. DPO v2 added essentially zero on top (0.658 vs 0.659, delta 0.001). Neither the DPO reward-margin metrics nor a preference-set held-out could rule out capability regression — only an *independent* general-capability benchmark could. That check ran; it came back clean. This is a design win: **the guardrail was in place and it produced its evidence**, letting us reject DPO v2 on target-task grounds alone without confounding "did we also break something else" ambiguity.
 

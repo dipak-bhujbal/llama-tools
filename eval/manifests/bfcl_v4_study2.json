@@ -1,0 +1,149 @@
+{
+  "schema_version": 2,
+  "benchmark": "Berkeley Function Calling Leaderboard v4",
+  "upstream_repository": "ShishirPatil/gorilla",
+  "upstream_release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
+  "default_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+  "data_revision_reason": "This later upstream data-fix revision exactly matches the answer key used by the 2026-07-20 study-1 run. The original BFCL v4 release commit differs at simple_python_363.",
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://github.com/ShishirPatil/gorilla/blob/9d8416a96d1d69975493f1b6d60ff07d12a1726a/LICENSE"
+  },
+  "canonical_key_criterion": {
+    "criterion_id": "pinned-and-preflight-valid/v1",
+    "criterion_id_note": "Owned by eval/answer_key_comparison.py:CANONICAL_CRITERION. The `rule` and `validity_check` text below must match that constant byte-for-byte or the report refuses to build, so this manifest cannot state one rule while the code applies another.",
+    "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
+    "validity_check": "eval/bfcl_scoring.py:preflight_key_names — every name an answer key expects must be among the tools that item actually presented to the model",
+    "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
+    "adjudicated_by": "Dipak (owner)",
+    "adjudicated_on": "2026-08-05",
+    "adjudication_ref": "#general msg 2063",
+    "selected": "pinned_key",
+    "selected_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+    "measured_outcome": {
+      "pinned_key": "consistent — 400/400 items checked",
+      "release_key": "inconsistent — simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
+    },
+    "scope_of_the_choice": "The two keys differ at exactly one row of 400. Every candidate emits the qualified name at that item, so it is concordant across candidates: all paired contrasts, every McNemar input, and the DPO kill decision are byte-identical under either key. The choice moves one headline number (369/400 vs 368/400) and nothing else.",
+    "verified_by": "eval/answer_key_comparison.py re-derives this selection from the measured preflight outcomes and fails if the recorded selection is not what the rule produces"
+  },
+  "categories": {
+    "simple_python": {
+      "answer_key_policy": "required",
+      "note": "Study-1 primary. Answer key carries ground_truth per item."
+    },
+    "multiple": {
+      "answer_key_policy": "required",
+      "note": "Study-2 co-primary. Several tools per prompt, so the qualified-name class of defect that produced simple_python_363 is most likely here; the standing preflight covers it."
+    },
+    "live_simple": {
+      "answer_key_policy": "required",
+      "note": "Exposure/secondary set. Answer key carries ground_truth per item."
+    },
+    "irrelevance": {
+      "answer_key_policy": "none_by_schema",
+      "note": "Irrelevance items are scored on whether the model declines to call any function, so upstream ships no possible_answer file for this category. Declared here so the standing preflight records it as deliberately keyless rather than silently skipping a category that merely happens to be absent from the manifest."
+    }
+  },
+  "files": [
+    {
+      "category": "simple_python",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "356a0db61e54eb1d92d8e10d014463cf2eb513cc",
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
+    },
+    {
+      "category": "simple_python",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+      "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
+    },
+    {
+      "category": "multiple",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_multiple.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_multiple.json",
+      "git_blob_sha1": "83643fa853e7a29a50e7303b0279284c37dd63c8",
+      "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+      "row_count": 200,
+      "unique_id_count": 200,
+      "sorted_id_sha256": "ce186ec8ff77e1e97325d7243bbc66b175185bcf473f05b752f969fe8d3c5241"
+    },
+    {
+      "category": "multiple",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_multiple.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_multiple.json",
+      "git_blob_sha1": "1f2f1fbfd9b7c8859ef5a92d6c18b0a6b2bc2663",
+      "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047",
+      "row_count": 200,
+      "unique_id_count": 200,
+      "sorted_id_sha256": "ce186ec8ff77e1e97325d7243bbc66b175185bcf473f05b752f969fe8d3c5241"
+    },
+    {
+      "category": "irrelevance",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_irrelevance.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_irrelevance.json",
+      "git_blob_sha1": "0077629949f2d52734cef2f110b0d040d8c47554",
+      "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6",
+      "row_count": 240,
+      "unique_id_count": 240,
+      "sorted_id_sha256": "6ba30826a466875e1ae6502537e1425886c8777f9269f1d8e04410b1506fe1e3"
+    },
+    {
+      "category": "live_simple",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_simple.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_live_simple.json",
+      "git_blob_sha1": "e8f4b8d33c07753affc77bfc4a646f94109de5af",
+      "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4",
+      "row_count": 258,
+      "unique_id_count": 258,
+      "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    },
+    {
+      "category": "live_simple",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_simple.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_live_simple.json",
+      "git_blob_sha1": "2c4778cee08e5ce7b236861de9a927d3ea7cde1f",
+      "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce",
+      "row_count": 258,
+      "unique_id_count": 258,
+      "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    },
+    {
+      "category": "simple_python",
+      "role": "answer_key_release_commit",
+      "role_note": "The BFCL v4 release commit's answer key for this category, pinned as a comparison input only. It is NOT the key study 1 scored against and is not used by eval/bfcl_simple.py. eval/answer_key_comparison.py verifies it against these hashes and re-scores the committed generations under both keys, so the release-key figures rest on bytes rather than on a stated value.",
+      "preflight_expectation": "defective",
+      "preflight_expectation_note": "This key is the losing side of the canonical adjudication and is retained precisely because it fails the answer-name preflight at simple_python_363. The standing check asserts it still fails: if upstream semantics ever made it pass, the adjudication that selected the data-fix key would need revisiting rather than silently standing.",
+      "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
+      "local_path": "eval/bfcl_data/release_commit/possible_answer/BFCL_v4_simple_python.json",
+      "git_blob_sha1": "455e9c4df114782ca187ded9665819e7ef912846",
+      "sha256": "38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb",
+      "row_count": 400,
+      "unique_id_count": 400,
+      "sorted_id_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "artifacts": [
+    {
+      "benchmark": "BFCL v4 simple_python",
+      "kind": "report",
+      "local_copy": "eval/results/study1_bfcl_simple_report.md",
+      "sha256": "174342981032711a94957f2ddc8933df7bdfbad13396f01a50f689ce7bf16464",
+      "source_path": "eval/bfcl_simple/report.md"
+    },
+    {
+      "benchmark": "BFCL v4 simple_python",
+      "kind": "per-item generations",
+      "local_copy": "eval/results/study1_bfcl_simple_generations.jsonl",
+      "local_copy_sha256": "26ef5e870ef0c328893520bc2ea4350d7d88e515272a201a7e2b1b5a08533d02",
+      "local_copy_verified_against_source_sha256": true,
+      "row_count": 1600,
+      "sha256": "26ef5e870ef0c328893520bc2ea4350d7d88e515272a201a7e2b1b5a08533d02",
+      "source_path": "eval/bfcl_simple/generations.jsonl"
+    },
+    {
+      "benchmark": "MMLU 5-shot smoke",
+      "kind": "report",
+      "local_copy": "eval/results/study1_mmlu_smoke_report.md",
+      "sha256": "a8ceb0eee85a15e00779aae0d729b134f55679feeea00b8c084ba6826dc1a557",
+      "source_path": "eval/mmlu_regression/report.md"
+    },
+    {
+      "benchmark": "MMLU 5-shot smoke",
+      "kind": "per-item predictions",
+      "local_copy": null,
+      "row_count": 1000,
+      "sha256": "498f54879012c0e335d98676692c6cf086046df902aa65be8e5130ad129d986d",
+      "source_path": "eval/mmlu_regression/predictions.jsonl"
+    }
+  ],
+  "known_gap": {
+    "benchmark": "MMLU 5-shot full 14,042-item run",
+    "reported_in": "docs/decisions/ADR-008-dpo-v2-negative-result.md",
+    "reported_values": {
+      "base": 0.683,
+      "dpo_50": 0.658,
+      "sft": 0.659
+    },
+    "status": "The accepted ADR records these values, but the raw full-run report and predictions are absent from this repository and from the pinned public evidence snapshot. Do not describe them as independently re-scoreable until the original run artifact is recovered."
+  },
+  "schema_version": 1,
+  "source_repository": "centuriandip/llama-3.1-8b-tools-dpo-v2-evidence",
+  "source_revision": "a3905a7381fd8bcbb16a04081cad595da6c7e616"
+}

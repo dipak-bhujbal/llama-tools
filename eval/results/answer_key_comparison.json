@@ -1,0 +1,312 @@
+{
+  "adjudication": {
+    "adjudicated_by": "Dipak (owner)",
+    "adjudicated_on": "2026-08-05",
+    "adjudication_ref": "#general msg 2063",
+    "candidate_keys": {
+      "pinned_key": {
+        "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+        "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+        "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a"
+      },
+      "release_key": {
+        "git_blob_sha1": "455e9c4df114782ca187ded9665819e7ef912846",
+        "sha256": "38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb",
+        "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae"
+      }
+    },
+    "criterion_id": "pinned-and-preflight-valid/v1",
+    "criterion_id_note": "Owned by eval/answer_key_comparison.py:CANONICAL_CRITERION. The `rule` and `validity_check` text below must match that constant byte-for-byte or the report refuses to build, so this manifest cannot state one rule while the code applies another.",
+    "derived_from_measurement": {
+      "criterion_id": "pinned-and-preflight-valid/v1",
+      "decided": true,
+      "reason": "pinned_key is the only candidate whose every expected name appears among the tools its item presented",
+      "selected": "pinned_key",
+      "validity": {
+        "pinned_key": true,
+        "release_key": false
+      }
+    },
+    "measured_outcome": {
+      "pinned_key": "consistent \u2014 400/400 items checked",
+      "release_key": "inconsistent \u2014 simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
+    },
+    "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
+    "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
+    "scope_of_the_choice": "The two keys differ at exactly one row of 400. Every candidate emits the qualified name at that item, so it is concordant across candidates: all paired contrasts, every McNemar input, and the DPO kill decision are byte-identical under either key. The choice moves one headline number (369/400 vs 368/400) and nothing else.",
+    "selected": "pinned_key",
+    "selected_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+    "validity_check": "eval/bfcl_scoring.py:preflight_key_names \u2014 every name an answer key expects must be among the tools that item actually presented to the model",
+    "verified_by": "eval/answer_key_comparison.py re-derives this selection from the measured preflight outcomes and fails if the recorded selection is not what the rule produces"
+  },
+  "contrasts": {
+    "invariance": {
+      "contrasts_compared": [
+        "sft_vs_dpo-100",
+        "sft_vs_dpo-150",
+        "sft_vs_dpo-50"
+      ],
+      "differences": {},
+      "identical": true
+    },
+    "pinned_key": {
+      "sft_vs_dpo-100": {
+        "candidate_only_correct": 3,
+        "discordant": 12,
+        "discordant_id_sha256": "e8fbe4dca05464f6d8ff87d54e81f2fa3231bd3c80d246d92d73713662818d81",
+        "reference_only_correct": 9
+      },
+      "sft_vs_dpo-150": {
+        "candidate_only_correct": 3,
+        "discordant": 16,
+        "discordant_id_sha256": "6b4afa839f9626ba04d06b9201e721a6a0b65a2966d25db84474e1b62e5db2c8",
+        "reference_only_correct": 13
+      },
+      "sft_vs_dpo-50": {
+        "candidate_only_correct": 3,
+        "discordant": 11,
+        "discordant_id_sha256": "831735297812db8f3f6757eaada65bb31cb025cb718ee51604b56b63c59611e8",
+        "reference_only_correct": 8
+      }
+    },
+    "reference": "sft",
+    "release_key": {
+      "sft_vs_dpo-100": {
+        "candidate_only_correct": 3,
+        "discordant": 12,
+        "discordant_id_sha256": "e8fbe4dca05464f6d8ff87d54e81f2fa3231bd3c80d246d92d73713662818d81",
+        "reference_only_correct": 9
+      },
+      "sft_vs_dpo-150": {
+        "candidate_only_correct": 3,
+        "discordant": 16,
+        "discordant_id_sha256": "6b4afa839f9626ba04d06b9201e721a6a0b65a2966d25db84474e1b62e5db2c8",
+        "reference_only_correct": 13
+      },
+      "sft_vs_dpo-50": {
+        "candidate_only_correct": 3,
+        "discordant": 11,
+        "discordant_id_sha256": "831735297812db8f3f6757eaada65bb31cb025cb718ee51604b56b63c59611e8",
+        "reference_only_correct": 8
+      }
+    }
+  },
+  "datafix_commit": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+  "disputed_item_emitted": {
+    "dpo-100": "restaurant_search.find_closest",
+    "dpo-150": "restaurant_search.find_closest",
+    "dpo-50": "restaurant_search.find_closest",
+    "sft": "restaurant_search.find_closest"
+  },
+  "disputed_items": {
+    "simple_python_363": {
+      "concordant_under_pinned_key": true,
+      "concordant_under_release_key": true,
+      "emitted_by_candidate": {
+        "dpo-100": "restaurant_search.find_closest",
+        "dpo-150": "restaurant_search.find_closest",
+        "dpo-50": "restaurant_search.find_closest",
+        "sft": "restaurant_search.find_closest"
+      },
+      "pinned_key_outcome": {
+        "dpo-100": true,
+        "dpo-150": true,
+        "dpo-50": true,
+        "sft": true
+      },
+      "release_key_outcome": {
+        "dpo-100": false,
+        "dpo-150": false,
+        "dpo-50": false,
+        "sft": false
+      }
+    }
+  },
+  "inputs": {
+    "evidence_index": {
+      "bytes": 2035,
+      "git_blob_sha1": "342f36e7ac038bd5e8c0fb7a0dbb66238a4f7187",
+      "path": "eval/results/evidence.json",
+      "pinned_row_count": 1600,
+      "sha256": "113196736e4cfaef4a2cb9d27ba6560c6a5cdf50b081690784756806afd2d43d",
+      "source_repository": "centuriandip/llama-3.1-8b-tools-dpo-v2-evidence",
+      "source_revision": "a3905a7381fd8bcbb16a04081cad595da6c7e616"
+    },
+    "exposure": {
+      "live_simple": {
+        "answer_key": {
+          "bytes": 46972,
+          "git_blob_sha1": "2c4778cee08e5ce7b236861de9a927d3ea7cde1f",
+          "path": "eval/bfcl_data/possible_answer/BFCL_v4_live_simple.json",
+          "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_simple.json"
+        },
+        "questions": {
+          "bytes": 260140,
+          "git_blob_sha1": "e8f4b8d33c07753affc77bfc4a646f94109de5af",
+          "path": "eval/bfcl_data/BFCL_v4_live_simple.json",
+          "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_simple.json"
+        }
+      },
+      "multiple": {
+        "answer_key": {
+          "bytes": 32254,
+          "git_blob_sha1": "1f2f1fbfd9b7c8859ef5a92d6c18b0a6b2bc2663",
+          "path": "eval/bfcl_data/possible_answer/BFCL_v4_multiple.json",
+          "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_multiple.json"
+        },
+        "questions": {
+          "bytes": 316583,
+          "git_blob_sha1": "83643fa853e7a29a50e7303b0279284c37dd63c8",
+          "path": "eval/bfcl_data/BFCL_v4_multiple.json",
+          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_multiple.json"
+        }
+      },
+      "simple_python": {
+        "answer_key": {
+          "bytes": 63627,
+          "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+          "path": "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json",
+          "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json"
+        },
+        "questions": {
+          "bytes": 283274,
+          "git_blob_sha1": "356a0db61e54eb1d92d8e10d014463cf2eb513cc",
+          "path": "eval/bfcl_data/BFCL_v4_simple_python.json",
+          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+          "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+          "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json"
+        }
+      }
+    },
+    "generations": {
+      "bytes": 639700,
+      "candidates": [
+        "dpo-100",
+        "dpo-150",
+        "dpo-50",
+        "sft"
+      ],
+      "git_blob_sha1": "2b64e5480098d5a139614bb7d2ef0dc530820cb7",
+      "path": "eval/results/study1_bfcl_simple_generations.jsonl",
+      "rows": 1600,
+      "sha256": "26ef5e870ef0c328893520bc2ea4350d7d88e515272a201a7e2b1b5a08533d02",
+      "verified_against": "eval/results/evidence.json"
+    },
+    "manifest": {
+      "bytes": 9288,
+      "git_blob_sha1": "864c4939f2cec7a2f36008f186e758bf9b91a00c",
+      "path": "eval/manifests/bfcl_v4_study2.json",
+      "sha256": "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
+    },
+    "pinned_key": {
+      "bytes": 63627,
+      "git_blob_sha1": "268c55641a21b51fc15730ce39ce906444a935a1",
+      "path": "eval/bfcl_data/possible_answer/BFCL_v4_simple_python.json",
+      "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json"
+    },
+    "questions": {
+      "bytes": 283274,
+      "git_blob_sha1": "356a0db61e54eb1d92d8e10d014463cf2eb513cc",
+      "path": "eval/bfcl_data/BFCL_v4_simple_python.json",
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json"
+    },
+    "release_key": {
+      "bytes": 63609,
+      "git_blob_sha1": "455e9c4df114782ca187ded9665819e7ef912846",
+      "path": "eval/bfcl_data/release_commit/possible_answer/BFCL_v4_simple_python.json",
+      "sha256": "38b1bc7469d1de73a812ffce9e2b10a1d8812425fd090ed314066ccec76d0ceb",
+      "source_revision": "58f57e9124ea981403792dd51e00a6577e621fae",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json"
+    }
+  },
+  "key_difference": {
+    "detail": {
+      "simple_python_363": {
+        "pinned_key_expects": [
+          "restaurant_search.find_closest"
+        ],
+        "release_key_expects": [
+          "find_closest"
+        ]
+      }
+    },
+    "differing_ids": [
+      "simple_python_363"
+    ],
+    "differing_row_count": 1,
+    "id_set_sha256": "6fdb83fd14aca7d46d09ce098ca7d9ef2611d279cd10fe62b1f0392cba7a6b38",
+    "row_count": 400
+  },
+  "key_internal_consistency": {
+    "pinned_key": {
+      "consistent": true,
+      "defect": null,
+      "items_checked": 400
+    },
+    "release_key": {
+      "consistent": false,
+      "defect": "1 item(s) expect a function name that was never presented to the model. Under the exact-match rule these are unscoreable and must be reported as key defects, not graded:\n  simple_python_363: key expects ['find_closest'], presented tools are ['restaurant_search.find_closest']",
+      "items_checked": 400
+    }
+  },
+  "qualified_name_exposure": {
+    "live_simple": {
+      "rows": 258,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 0,
+      "rows_with_module_qualified_key": 77
+    },
+    "multiple": {
+      "rows": 200,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 29,
+      "rows_with_module_qualified_key": 123
+    },
+    "simple_python": {
+      "rows": 400,
+      "rows_where_key_name_not_among_presented_tools": 0,
+      "rows_where_tools_share_an_unqualified_tail": 0,
+      "rows_with_module_qualified_key": 167
+    }
+  },
+  "recomputation_check": {
+    "disagreements": 0,
+    "rows_rechecked": 1600
+  },
+  "release_commit": "58f57e9124ea981403792dd51e00a6577e621fae",
+  "schema_version": 3,
+  "scores": {
+    "n": {
+      "dpo-100": 400,
+      "dpo-150": 400,
+      "dpo-50": 400,
+      "sft": 400
+    },
+    "pinned_key": {
+      "dpo-100": 363,
+      "dpo-150": 359,
+      "dpo-50": 364,
+      "sft": 369
+    },
+    "release_key": {
+      "dpo-100": 362,
+      "dpo-150": 358,
+      "dpo-50": 363,
+      "sft": 368
+    }
+  }
+}

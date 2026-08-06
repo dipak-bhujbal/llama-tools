@@ -1,0 +1,26 @@
+# Exact dependency spec for the study-2 qualification probe.
+#
+# THIS IS A NEW PROBE ENVIRONMENT. It is not study-1 provenance.
+#
+# The environment that produced study 1 ran on a RunPod pod that was terminated
+# on 2026-07-21. No dependency manifest was captured from it, so it is
+# unrecoverable. Any file claiming to be "the study-1 environment" would be
+# fabricated. The reviewer laptop's .venv is macOS/arm64 with CUDA unavailable;
+# freezing it would produce a lock that is both false as provenance and likely
+# uninstallable on a Linux CUDA pod.
+#
+# torch is deliberately NOT pinned here. It comes from the RunPod PyTorch
+# template's CUDA build, which is matched to the pod's driver. Installing a
+# different torch over it is the most common way to break a working CUDA setup.
+# The actual torch/CUDA/driver versions are asserted and recorded as run
+# evidence by scripts/bootstrap_pod.sh.
+#
+# These pins are asserted at preflight (exact version tuple + import + CUDA)
+# before any inference. If the template's torch is incompatible with them, the
+# preflight fails closed on the pod rather than mid-run after money is spent.
+
+transformers==5.14.1
+peft==0.19.1
+accelerate==1.14.0
+huggingface-hub==1.24.0
+python-dotenv==1.2.2

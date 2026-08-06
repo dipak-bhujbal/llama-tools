@@ -1,13 +1,16 @@
 # eval/
 
-Evaluation harness. Populated in **Week 7** (with the BFCL v3 harness as the first serious component; will also be reused inside `release-kit`).
+Evaluation harness and evidence index used for the study-1 ship decision and study-2 preparation.
 
-## What lands here
+## Current components
 
-- **`bfcl_v3.py`** — Berkeley Function Calling Leaderboard v3 harness. Runs base, SFT, and SFT+DPO models across all four BFCL categories (simple, parallel, multiple, multi-turn). Produces a structured eval report.
-- **`mmlu_regression.py`** — MMLU regression check. Guardrail to confirm SFT+DPO did not collapse general capability (target: within 2 points of base).
-- **`compare.py`** — produces the model-vs-model comparison tables that go into the model card and technical report.
-- **`results/`** — committed evaluation results (JSON reports + Markdown summaries), one file per model×benchmark×date.
+- **`bfcl_simple.py`** — the study-1 BFCL v4 `simple_python` SFT/DPO sweep. It uses strict function-name and accepted-argument matching; it is not the official BFCL AST scorer.
+- **`mmlu_regression.py`** — 5-shot MMLU capability-retention check.
+- **`bfcl_leakage_check.py`** — exact and MinHash overlap checks between training prompts and cached BFCL questions.
+- **`fetch_pinned_bfcl.py`** + **`manifests/bfcl_v4_study2.json`** — content-addressed acquisition and verification for the exact held-out inputs/keys used going forward.
+- **`results/`** — small committed reports plus hashes and locations for larger public evidence.
+
+Raw BFCL data stays under the gitignored `eval/bfcl_data/` cache. Training code must not consume it. Mining may use a frozen list of those files only for deterministic decontamination; evaluation uses them only as held-out inputs/keys.
 
 ## Reused by release-kit
 
@@ -22,4 +25,4 @@ The BFCL harness here is the first concrete input to release-kit's eval-harness 
 ## Related
 
 - `../train/` — where checkpoints are produced
-- `../docs/decisions/ADR-002-training-method-sft-dpo.md` — success criteria specified here
+- `../docs/decisions/ADR-008-dpo-v2-negative-result.md` — accepted study-1 decision and result interpretation

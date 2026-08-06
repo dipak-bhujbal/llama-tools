@@ -62,7 +62,7 @@ data/cache/
 .cache/
 huggingface_cache/
 
-# BFCL v3 eval data cache (downloaded by eval/bfcl_leakage_check.py)
+# BFCL eval data cache (reproducible through eval/fetch_pinned_bfcl.py)
 eval/bfcl_data/
 
 # Logs
