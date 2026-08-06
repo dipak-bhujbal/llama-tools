@@ -107,12 +107,13 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[ADOPTION CANDIDATE — awaiting codex review and owner adoption]`
+## 2. Mining `[ADOPTION CANDIDATE — codex signed off the full candidate content at 6110545 (#general msg 2173); awaiting owner adoption]`
 
 Drafting authorized by the owner, #general msg 2095. The **decontamination artifact
 package** was signed off at `0dccddd` (#general msg 2169); that sign-off covered the
-implementation and artifact, and explicitly left §2 as a draft. The full §§2.1–2.11 package
-is under review separately. This section does **not** govern anything:
+implementation and artifact, and explicitly left §2 as a draft. **Codex signed off the full
+candidate content at `6110545` (#general msg 2173); awaiting owner adoption.** This section
+does **not** govern anything:
 it becomes `[FROZEN]` when @dipak explicitly adopts it, at which point the adoption line
 below is completed and the amendments-table row loses its *pending* marker — the same bar
 Amendment 2 cleared.
