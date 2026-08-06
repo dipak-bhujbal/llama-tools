@@ -107,10 +107,12 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[ADOPTION CANDIDATE — codex signed off; awaiting owner adoption]`
+## 2. Mining `[ADOPTION CANDIDATE — awaiting codex review and owner adoption]`
 
-Drafting authorized by the owner, #general msg 2095. **Codex signed off the complete
-package at `0dccddd` (#general msg 2169).** This section still does **not** govern anything:
+Drafting authorized by the owner, #general msg 2095. The **decontamination artifact
+package** was signed off at `0dccddd` (#general msg 2169); that sign-off covered the
+implementation and artifact, and explicitly left §2 as a draft. The full §§2.1–2.11 package
+is under review separately. This section does **not** govern anything:
 it becomes `[FROZEN]` when @dipak explicitly adopts it, at which point the adoption line
 below is completed and the amendments-table row loses its *pending* marker — the same bar
 Amendment 2 cleared.
@@ -141,7 +143,7 @@ had been observed.
 The adapter revision is the one already pinned in §0.2; the same string governs both, so the
 probe and the mining run cannot silently diverge.
 
-### 2.2 Strata `[proposed]`
+### 2.2 Strata `[adoption candidate]`
 
 Every mined prompt is assigned to exactly one stratum by the count of tools its prompt
 presents:
@@ -176,7 +178,7 @@ one silently reclassifies the other. That is not hypothetical — see the note i
 Every ledger record carries its `stratum` label, so `y_multi` and `y_single` are recomputable
 from the artifact rather than reconstructed from a run log.
 
-### 2.3 Allocation `[proposed]`
+### 2.3 Allocation `[adoption candidate]`
 
 **Proportional.** Each stratum is sampled in proportion to its target weight `w_s` (§2.5).
 Both strata receive a **nonzero** allocation in the pilot and in the calibration run, so
@@ -186,7 +188,7 @@ Allocation is planned proportionally but **realized** allocation is what gets re
 gate arithmetic in §2.6 standardizes to the target weights regardless, so integer rounding
 or a failed prompt cannot move the gate.
 
-### 2.4 Sampling parameters `[proposed]`
+### 2.4 Sampling parameters `[adoption candidate]`
 
 | | |
 |---|---|
@@ -198,7 +200,7 @@ or a failed prompt cannot move the gate.
 | pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
 | calibration | `--n-prompts 1000`, `--out-dir mining_out` |
 
-### 2.5 Target weights `[decided — artifact-derived, exact counts]`
+### 2.5 Target weights `[adoption candidate — artifact-derived, exact counts]`
 
 Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weights are not
 the literal 65/35 of the earlier instruction — that figure descends from a composition count
@@ -232,7 +234,7 @@ If fixed design weights are ever preferred to natural composition, they may be u
 if labelled a design choice rather than measured composition, and recorded here before the
 run.
 
-### 2.6 Yield gate arithmetic `[proposed]`
+### 2.6 Yield gate arithmetic `[adoption candidate]`
 
 > `y_s` = (active pairs materialized from stratum `s`) / (active post-screen prompts mined
 > in stratum `s`), both terms as defined by Amendment 2 A2.1.
@@ -289,7 +291,7 @@ of 12,155 classifiable rows, not 66.8%**. The post-screen figure, and therefore
 never edited in place. The figures above are reproducible from the committed parser and the
 recorded digest rather than being a second uncommitted count.
 
-### 2.7 Mining population `[decided — curated SFT pool, cleaned revision]`
+### 2.7 Mining population `[adoption candidate — curated SFT pool, cleaned revision]`
 
 Owner decision, #general msg 2108: **the curated SFT pool at the cleaned revision**, with
 decontamination and weights re-run over it.
@@ -319,7 +321,7 @@ population. §1's decontamination figures do **not** carry over — they were co
 pre-screen counts; §2.5's weights come from the post-screen artifact once decontamination is
 re-run here, and that artifact governs.
 
-### 2.8 The pool's own targets are preflighted `[proposed]`
+### 2.8 The pool's own targets are preflighted `[adoption candidate]`
 
 Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
 pool's own targets.
@@ -329,10 +331,12 @@ pool's own targets.
 > failing this is a training-side `simple_python_363`: it teaches the model to invent a tool
 > name, and no downstream eval attributes that habit back to the pool.
 >
-> **This fails closed.** A defect, or an eligible target the parser cannot read, is a
-> **stop condition** for the freeze and for mining — not a row to drop. Excluding such rows
-> would repair the denominator by discarding the evidence that something is wrong, which is
-> the opposite of what A2.3 does with a defective answer key.
+> **Fail-closed rule, as adopted.** A **retained name mismatch always stops** the freeze and
+> mining: it is a claim about a row we can read, and dropping it would repair the denominator
+> by discarding evidence, which is the opposite of what A2.3 does with a defective answer
+> key. An **unreadable target is excluded only under the owner-adopted, versioned criterion
+> `pool-target-structural-eligibility/v1`**, which names it, counts it, and commits its
+> identity; **absent that criterion it stops the run.**
 
 Targets are classified three ways, because "not a tool call" and "a tool call we cannot
 read" are different facts:
@@ -419,7 +423,7 @@ invalid: the parser fell back to a regex search for `"name"`, which matched the 
 argument key and reported these 56 malformed targets as valid calls. A check that
 invents the value it is checking is worse than no check, and the fallback has been removed.
 
-### 2.9 The decontamination artifact `[built; awaiting codex review]`
+### 2.9 The decontamination artifact `[adoption candidate — artifact signed off at 0dccddd]`
 
 Spec settled in #general msgs 2143 and 2150, recorded here so the implementer works from the
 preregistration rather than from chat. **Exclusion precedes screening**, so the screen input
@@ -468,7 +472,7 @@ failure**, not a new exclusion bucket.
 §1's 12,160-row figures are **explicitly non-comparable**: different source revision and
 different denominator.
 
-### 2.10 Expected: near-zero spurious-call pairs `[owner-directed; pending §2 freeze]`
+### 2.10 Expected: near-zero spurious-call pairs `[adoption candidate; owner-directed]`
 
 Recorded in advance so it is never mistaken for a miner defect. The retained population
 carries only **10 genuine `no_call` rows in 12,082**, so mined **spurious-call preference
@@ -479,7 +483,7 @@ endpoint: this pool barely exercises no-call behaviour at all.
 An implementation that produced *many* spurious-call pairs from this pool would be the
 anomaly worth investigating.
 
-### 2.11 The miner re-asserts eligibility at load `[owner-directed; pending §2 freeze]`
+### 2.11 The miner re-asserts eligibility at load `[adoption candidate; owner-directed]`
 
 The pool arrives pre-screened, and the miner **re-asserts that every row it receives parses
 under `pool-target-structural-eligibility/v1`, refusing the run otherwise.** Checked twice,
@@ -521,8 +525,8 @@ the superseded language verbatim and supersedes it by reference.
 | # | Date | Section | Change | Authorized by |
 |---|---|---|---|---|
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
-| 3 | *pending* | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | *awaiting owner adoption* |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
+| 3 | *pending* | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | *awaiting owner adoption* |
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
 Argument-level matching semantics stay as `eval/bfcl_scoring.py` implements them
