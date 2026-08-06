@@ -3,7 +3,7 @@
   "gate": "every fixture chosen accepted, every fixture rejected rejected for its labelled reason",
   "implementation": {
     "path": "mining/verifier.py",
-    "sha256": "2bd1d654449b1be18bb52c43cd55474101e087977e16ed83bea0b607852044f0"
+    "sha256": "dbbb48ef00d1dee281ac60ca066cfa51259f113e0d341fd1fb622f1571f99333"
   },
   "fixtures": [
     {

@@ -203,7 +203,18 @@ def extract_calls(text: str) -> tuple[str, list[tuple[str, Any]]]:
         except ValueError:
             return UNREADABLE, []
         candidates = parsed if isinstance(parsed, list) else [parsed]
-        calls = [call for call in map(_as_call, candidates) if call is not None]
+        calls = []
+        for candidate in candidates:
+            call = _as_call(candidate)
+            # Every member must be a well-formed call. Filtering the bad ones out
+            # would let `[{valid}, {"arguments": {...}}]` be scored as the valid
+            # call alone and accepted — a generation that emitted garbage beside a
+            # correct call, marked correct. Same fail-closed rule the
+            # `<tool_call>` branch above applies, and the same rule
+            # `pool_strata._json_call_names` already applies to targets.
+            if call is None:
+                return UNREADABLE, []
+            calls.append(call)
         return (CALL, calls) if calls else (UNREADABLE, [])
 
     return NO_CALL, []

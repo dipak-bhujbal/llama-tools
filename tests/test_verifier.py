@@ -23,6 +23,7 @@ from mining.verifier import (
     WRONG_TOOL,
     ParserDisagreementError,
     TargetUnreadableError,
+    _receipt,
     extract_calls,
     run_selftest,
     verify,
@@ -128,6 +129,27 @@ def test_a_nested_name_never_manufactures_a_call() -> None:
     assert (kind, calls) == ("unreadable", [])
 
 
+@pytest.mark.parametrize(
+    "malformed_member",
+    ['{"arguments": {"x": 2}}', "7", '"loose string"', "null", '["nested"]'],
+)
+def test_one_bad_array_member_makes_the_whole_generation_unreadable(
+    malformed_member: str,
+) -> None:
+    """A generation that emits garbage beside a correct call is not correct.
+
+    Filtering the bad members out and scoring what is left would accept
+    `[{valid}, {"arguments": {...}}]` against a one-call target — the model gets
+    credit for the part that parsed. `pool_strata._json_call_names` already
+    fails closed this way for targets; generations get the same rule.
+    """
+    good = '{"name": "get_weather", "arguments": {"location": "Porto", "units": "celsius"}}'
+    generation = f"[{good}, {malformed_member}]"
+
+    assert extract_calls(generation) == ("unreadable", [])
+    assert verify(generation, CALL).reason == INVALID_JSON
+
+
 # --- the gate itself --------------------------------------------------------
 
 
@@ -206,11 +228,16 @@ def test_the_gate_reports_a_refusal_rather_than_scoring_around_it(tmp_path) -> N
 def test_the_committed_selftest_receipt_reproduces() -> None:
     """The receipt is the run artifact behind the 1,600/1,600 figure. Without
     this, the number is exactly the unbacked claim §A of HANDOFF.md flags."""
-    receipt = json.loads((REPO_ROOT / "mining" / "receipts" / "verifier_selftest.json").read_text())
-    report = run_selftest(FIXTURES)
+    receipt_path = REPO_ROOT / "mining" / "receipts" / "verifier_selftest.json"
+    committed = json.loads(receipt_path.read_text())
+    regenerated = _receipt(run_selftest(FIXTURES), FIXTURES)
 
-    assert receipt["verifier_version"] == "onpolicy_verifier_v1"
-    assert receipt["pairs"] == report.pairs == 1600
-    assert receipt["pairs_passed"] == report.pairs_passed == 1600
-    assert receipt["passed"] is True
-    assert all(fixture["synthetic"] is True for fixture in receipt["fixtures"])
+    # Whole-object comparison, not a field sample. Checking only version, counts
+    # and the pass flag would let a verifier edit ship with a stale
+    # implementation SHA in the receipt — the digest is the whole point of it.
+    assert committed == regenerated
+
+    assert committed["verifier_version"] == "onpolicy_verifier_v1"
+    assert committed["pairs"] == committed["pairs_passed"] == 1600
+    assert committed["passed"] is True
+    assert all(fixture["synthetic"] is True for fixture in committed["fixtures"])
