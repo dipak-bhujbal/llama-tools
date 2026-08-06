@@ -526,9 +526,12 @@ section only says what each track is allowed to do:
 | `>= 300` and `< 1000` | 3A-cautious | **A0 only.** No exploratory arm may run on this branch |
 | `< 300` | 3B | **B0 only** |
 
-A0's configuration already satisfies the cautious branch's constraints (1 epoch, dev looks
-every 25 steps), so the cautious branch is not a different arm — it is the same arm with the
-exploratory arms withdrawn.
+**The cadence comes from frozen §2.6, not from this section.** §2.6 states the cautious
+branch as *"1 epoch max, eval callback every ~50 steps"*. An earlier draft of §3.8 set looks
+every 25 steps and asserted that this satisfied §2.6; it does not, and a candidate section
+does not get to reinterpret a frozen one. **Every arm on every track looks every 50 optimizer
+steps** (§3.8), which satisfies §2.6 as written and needs no amendment to frozen text. The
+cautious branch is then the same arm with the exploratory arms withdrawn.
 
 **An arm not listed in §3.5 or §3.6 requires an amendment before it runs.** That includes
 the KTO arm sketched at roadmap Phase 4, an IPO arm, and any additional seed of an arm
@@ -586,30 +589,67 @@ study's conclusions from the endpoint, not from `D`.
 
 ### 3.3 The frozen SFT development baseline `[candidate]`
 
-Before arm 1, shipped SFT is scored **once** on `D` — greedy, `max_new_tokens = 512`, scored
-by `eval/bfcl_scoring.py` — and its **per-item outcome rows** are committed as
-`eval/results/study2_dev_baseline_live_simple.jsonl`, with the sha256 recorded here on
-adoption.
+**What adoption freezes is the acquisition rule, not a digest.** An earlier draft said the
+baseline's sha256 would be "recorded here on adoption", which is impossible in that order:
+producing the baseline is a model call, and a model call needs an estimate and the owner's
+explicit approval, which come *after* adoption. The corrected ordering, which is also the
+order the gates already require:
+
+1. **Adoption** freezes the rule below and nothing else.
+2. Under **separately approved spend**, shipped SFT is scored **once** on `D` — greedy,
+   `max_new_tokens = 512`, scored by `eval/bfcl_scoring.py`.
+3. Its **per-item outcome rows** are committed as
+   `eval/results/study2_dev_baseline_live_simple.jsonl` together with a completion record
+   naming the run's digest, and that record is **reviewed** before any arm starts.
+4. Only then may arm 1 start.
 
 Every kill-line and selection comparison in §3.7 and §3.9 is paired against **those committed
-rows**, never against a baseline re-derived at comparison time. If the file is missing, or
-its digest does not match, **the arm refuses to start** — the same refuse-never-reclassify
-shape as §2.11.
+rows**, never against a baseline re-derived at comparison time. The trainer reads the digest
+from the reviewed completion record; if the file is missing, or its digest does not match,
+**the arm refuses to start** — the same refuse-never-reclassify shape as §2.11. The baseline
+is scored once and never re-scored to "refresh" it: a second baseline would silently move
+every kill line and every selection that referenced the first.
 
 This baseline is one candidate × 258 greedy generations and is counted in §3.11.
 
-### 3.4 Fixed across every arm `[candidate]`
+### 3.4 Configuration — common settings, per-track schedules, and overrides `[candidate]`
+
+An earlier draft put every setting in one "fixed across every arm" table, which then
+contradicted itself: B0 trains at LR `1e-4` and effective batch 32, not the `5e-6`/16 that
+table declared universal. The three tables below say which is which, so nothing has to be
+read past.
+
+**(a) Common to every arm, both tracks:**
 
 | | |
 |---|---|
 | Base | `meta-llama/Llama-3.1-8B-Instruct`, revision `0e9e39f249a16976918f6564b8830bc894c89659` |
 | Init | shipped SFT adapter, revision `b6f4da479f8c6fc044ee8b802a92f47780f970c5`, **trained in place** (`is_trainable=True`) |
 | LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj", "k_proj", "v_proj", "o_proj"]` — identical to study-1 SFT (`train/sft_full.py`). No new modules, no rank change |
-| Schedule | 1 epoch, per-device batch 2 × grad-accum 8 (**effective 16**), peak LR `5e-6`, cosine, `warmup_ratio = 0.03` |
+| Epochs | 1 |
 | Precision | bf16, gradient checkpointing on, `max_length = 2048` |
-| Split | 90/10 train/eval on the mined pairs, **stratified by `error_type`**, split seed `42` |
+| Split | 90/10 train/eval, **stratified by `error_type`**, split seed `42` |
 | Seeds | training seed `42`, split seed `42` |
+| Look cadence | every **50** optimizer steps, `L_max = 20` (§3.8) |
 | Decoding | **greedy** for every dev look and every final score — no sampling seed enters any measurement |
+
+**(b) Track 3A only (DPO arms A0–A3):**
+
+| | |
+|---|---|
+| Schedule | per-device batch 2 × grad-accum 8 (**effective 16**), peak LR `5e-6`, cosine, `warmup_ratio = 0.03` |
+| Reference | the SFT policy, via the frozen `ref` adapter — asserted, not assumed (below) |
+
+**(c) Track 3B override (B0 only):**
+
+| | |
+|---|---|
+| Schedule | per-device batch 8 × grad-accum 4 (**effective 32**), peak LR `1e-4`, cosine, `warmup_ratio = 0.03` |
+| Objective | LoRA-SFT continuation — no preference objective, so no reference model, and 3A's preference-metric kill lines do not apply (§3.7) |
+
+Where §3.6 says B0 shares "everything else" with 3A, it means table (a), the development set,
+the frozen baseline, the dev-health kill lines, the selection rule, and the analysis — not
+table (b).
 
 **One seed per arm. No seed replication.** Recorded as a limitation now rather than
 discovered later: differences *between* arms cannot be separated from seed variance. That is
@@ -640,23 +680,40 @@ Study 2 pins, and the trainer asserts at start, refusing on mismatch:
 | `accelerate` | 1.14.0 |
 
 The trainer additionally asserts that a `ref` adapter exists on the policy — i.e. that the
-reference **is** the SFT policy — rather than inferring it from the version string. The
-versions above are this workstation's; the pod image is built to match, and a pod that does
-not match is a stop-and-record, never a silent proceed.
+reference **is** the SFT policy — rather than inferring it from the version string.
+
+The versions above are **this workstation's**, captured 2026-08-06. **No pod image artifact
+exists yet**, so "the pod matches" is a *precondition to be established*, not a fact: before
+arm 1, the pod's resolved versions are captured into the run manifest and asserted against
+this table, and a mismatch is a stop-and-record, never a silent proceed. Writing it as though
+a matching image already existed would be the same class of claim — a check described rather
+than performed — that this document exists to prevent.
 
 ### 3.5 Arms — track 3A `[candidate]`
 
 | id | role | `loss_type` | `beta` | other |
 |---|---|---|---|---|
-| **A0-anchor** | **confirmatory (primary)** | `sigmoid` | 0.1 | study-1 v2 hyperparameters unchanged |
+| **A0-anchor** | **confirmatory (primary)** | `sigmoid` | 0.1 | study-1 v2's *recorded explicit* settings, unchanged |
 | A1-beta30 | exploratory | `sigmoid` | 0.3 | tighter anchor to the reference |
 | A2-beta05 | exploratory | `sigmoid` | 0.05 | looser anchor |
 | A3-sftmix | exploratory | `["sigmoid", "sft"]`, `loss_weights = [1.0, 1.0]` | 0.1 | adds an SFT term on `chosen` |
 
 **Why A0 is the primary and not the cleverest arm.** Study 2 asks one question: does the
-answer change when the task has a selection dimension? That question is only answered by
-holding the recipe fixed and changing the endpoint and the data. A0 is that arm. A1–A3 ask
-*different* questions and cannot answer this one.
+answer change when the task has a selection dimension? Of the four arms, A0 is the only one
+that changes nothing else on purpose. A1–A3 ask *different* questions and cannot answer this
+one.
+
+**What A0 does not license, stated here so no later sentence can borrow the stronger
+version.** A0 matches study-1 v2's **recorded explicit settings** — the constants in
+`train/dpo_v2_full.py`. It does **not** match a verified study-1 environment, because none
+exists: the DPO reference model is part of the objective, TRL's choice of it changed across
+versions (§3.4), and study 1's TRL version is recorded nowhere in this repository. **A0
+therefore cannot be described as isolating endpoint-and-data as a controlled causal change
+relative to ADR-008**, and the write-up may not say "same recipe", "recipe held fixed", or
+"only the endpoint changed". The comparison A0 *does* support is the one this document
+registers: shipped SFT versus A0's selected checkpoint, on `multiple`, measured within study 2
+under one pinned environment. If a traceable study-1 environment artifact is ever recovered,
+the stronger claim becomes available by amendment — not by rewording.
 
 **A3 is the "anchored arm" roadmap 3A.1 asked us to pick and state.** Roadmap 3A.1 offered
 DPOP or a DPO + SFT-loss mix on `chosen`; we state the SFT-loss mix, because `rpo_alpha` no
@@ -678,14 +735,31 @@ finished and its result is recorded.
 Roadmap 3B.2 permitted `1e-4`–`2e-4` and required the value be stated: **`1e-4`**, the
 conservative end, because B0 continues an already-converged adapter.
 
-Data: `data/rsft_train.jsonl`, built from the **verifier-accepted** on-policy completions in
-the mined bucket, **one completion per prompt, chosen by lowest sample index**. The selection
-is deterministic and quality-blind beyond the verifier's binary verdict — no "best of 8" by
-any score, which would be selection on an unregistered metric. Composition (counts by
-stratum and by source) is reported before training starts.
+**Data — the 0/8 bucket is the point of this track, not an optional extra.** An earlier draft
+built B0 from accepted self-generations alone, which drops exactly the prompts the track
+exists for: 3B fires when yield is *low*, and a low-yield pool is one where the model rarely
+succeeds. Restored to roadmap 3B.1, stated deterministically so nothing is decided later:
 
-Everything else is shared with 3A: same `D`, same frozen baseline, same kill lines, same
-selection rule, same analysis.
+`data/rsft_train.jsonl` = **both** of the following, one row per prompt, no prompt appearing
+twice:
+
+| source | rows | completion used |
+|---|---|---|
+| **0/8 prompts** (`mining_out/sft_bucket.jsonl`) — the model failed all 8 samples | all of them | the pool's **ground-truth** answer |
+| **1–7 zone prompts** — at least one sample passed the verifier | all of them | the **verifier-accepted sample with the lowest sample index** |
+
+The 1–7 rows are **included**, not optional: roadmap 3B.1 left that open and required the
+composition be stated, and stating it as a rule beats stating it as a count discovered later.
+Selection within a prompt is deterministic and quality-blind beyond the verifier's binary
+verdict — **no "best of 8" by any score**, which would be selection on an unregistered
+metric. Composition (row counts by source and by stratum) is reported before training starts,
+and a prompt appearing in both buckets is impossible by construction — 0/8 means no sample
+passed.
+
+Everything else is shared with 3A per §3.4(a): same `D`, same frozen baseline, same
+**dev-health** kill lines, same selection rule, same analysis. The preference-metric kill
+lines (§3.7 rules 2 and 3) do not apply — B0 has no preference objective and no reference
+model.
 
 ### 3.7 Kill lines — mechanical, in code, per arm `[candidate]`
 
@@ -698,57 +772,112 @@ control** (ADR-007's lesson, retained).
    unchanged. *(3A only.)*
 3. **Easy data** — first-eval `eval_rewards/accuracies >= 0.99` → stop; the pairs are
    trivial and the arm cannot be informative. *(3A only.)*
-4. **Dev health — the McNemar kill rule.** At each look, the current policy is scored on `D`
-   and its per-item outcomes are tested against the frozen SFT baseline rows (§3.3) by exact
-   two-sided McNemar. **Stop when damage is significant at `α_look` (§3.8) on two
-   consecutive looks, or immediately at any look where dev accuracy is at least 10
-   percentage points (≥ 26 of 258 items) below baseline.** Two consecutive looks, because a
-   single look on a small discordant count is noisy; the absolute floor, because a collapse
-   should not have to wait for a second look.
-5. **Direction guard** — a look that is significant in the *policy's favour* stops nothing
-   and promotes nothing. `D` is not an endpoint (§3.2), and a dev win is not a result.
+4. **Dev health — absolute, and stricter than the roadmap's line.** Let `n_base` be the
+   number of items the frozen SFT baseline (§3.3) gets right on `D`, and `n_look` the number
+   the current policy gets right at this look, both out of 258.
+
+   > **Stop when `n_base - n_look >= 3` at two consecutive looks** (3 of 258 = **1.16
+   > points**, so this triggers no later than roadmap 3A.1's "below SFT baseline −1.0 pt on
+   > two consecutive evals"),
+   > **or immediately at any single look where `n_base - n_look >= 26`** (10.0 points).
+
+   Two consecutive looks for the ordinary rule, because a single look moves on noise; the
+   collapse floor at one look, because a collapse should not have to wait for a second.
+
+   **This replaced a significance-based trigger, and that was a real defect.** The earlier
+   draft stopped only when the damage reached `α_look = 0.0025` on exact McNemar. On n = 258
+   that threshold needs a large lopsided discordant split, so an arm could sit several points
+   below the baseline indefinitely without ever tripping a rule the roadmap had already set
+   at 1.0 point. **A kill line must be an absolute floor**; a significance test is not one,
+   because its trigger point moves with the discordance the run happens to produce.
+5. **Direction guard** — a look where the policy is *ahead* of baseline stops nothing and
+   promotes nothing. `D` is not an endpoint (§3.2), and a dev win is not a result.
+
+**Exact McNemar is still computed at every look and recorded** — `b`, `c`, and the p-value
+against `α_look` (§3.8) — as a **reported diagnostic**. It triggers nothing. Keeping the
+number without giving it authority is the point: a reviewer sees how the dev comparison
+moved, and no stop or selection depends on a quantity whose threshold drifts with the data.
 
 A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
 silently replaced by another arm or another seed.
 
 ### 3.8 Repeated looks have a stated multiplicity rule `[candidate]`
 
-Looks run every **25 optimizer steps**, capped at **`L_max = 20` looks per arm**. If one
-epoch would exceed 20 looks, the cadence stretches to `ceil(total_steps / 20)` so `L <= 20`
-always; the realized cadence is recorded in the run artifact.
+Looks run every **50 optimizer steps** — the cadence frozen §2.6 states for the cautious
+branch, applied to every arm on both tracks so no candidate section ever reinterprets a
+frozen one — capped at **`L_max = 20` looks per arm**. If one epoch would exceed 20 looks,
+the cadence stretches to `ceil(total_steps / 20)` so `L <= 20` always; the realized cadence
+and look count are recorded in the run artifact.
 
 > **`α_look` = 0.05 / `L_max` = 0.0025**, Bonferroni over the **maximum** look count, fixed
 > in advance and **not** recomputed from the realized number of looks.
 
 Recomputing `α_look` after seeing how many looks actually happened would be the same defect
 one level down from the one Amendment 2 fixed: a threshold that moves with the data it
-judges. The cap is deliberately conservative — it protects against stopping a healthy arm on
-noise, at the price of being slow to stop a mildly damaged one, which is the right direction
-for a rule whose false positive destroys the study's only confirmatory arm.
+judges.
 
-**These p-values are a stopping rule, not inference.** They never appear in §4's families and
-are never reported as evidence of an effect.
+**What `α_look` is now for, and what it is not.** No stop and no selection depends on it —
+kill lines are absolute counts (§3.7 rule 4) and selection is an absolute margin (§3.9). It
+exists so that the McNemar diagnostic recorded at each look is reported against a
+multiplicity-aware threshold rather than a bare `p < 0.05` that would look significant twenty
+times per arm by construction. **These p-values are never inference:** they enter none of §4's
+families and are never reported as evidence of an effect.
 
 ### 3.9 Checkpoint selection `[candidate]`
 
 Checkpoints are saved at the look cadence. Per arm:
 
-> **Selected = the checkpoint with the most optimizer steps among those whose dev accuracy
-> is not significantly worse than the frozen SFT dev baseline (exact two-sided McNemar on
-> `D`, α = 0.05, direction against the policy). If no checkpoint qualifies, the arm has no
-> candidate.**
+> **Eligible** = a checkpoint whose dev correct-count satisfies `n_ckpt >= n_base - 3` — a
+> fixed **non-inferiority margin of 3 items (1.16 points)** against the frozen SFT baseline,
+> the same margin the kill line uses (§3.7 rule 4).
+>
+> **Selected** = the **eligible** checkpoint with the most optimizer steps. **If no
+> checkpoint is eligible, the arm has no candidate** (§4.7).
 
 Not best `eval_loss`. Not best reward margins. Not any number from `multiple` or
 `simple_python` — **the final scoring sets are not opened until the checkpoint is already
 selected.**
 
-**This deviates from roadmap 3A.1 ("best callback-BFCL checkpoint per arm"), deliberately.**
-`D` is structurally blind to the skill under test (§3.2). Ranking checkpoints on `D` would
-therefore select on a metric orthogonal to the hypothesis — and because DPO's known failure
-mode is degrading exactly the single-tool call correctness `D` measures, ranking on `D`
-systematically prefers the least-trained checkpoint and biases every arm toward the null by
-construction. So `D` gates health, step count breaks the tie, and the endpoint decides the
-result. A dev set that cannot see the skill gets a veto, not a vote.
+**Why an absolute margin and not a significance test.** An earlier draft made eligibility
+"not significantly worse at α = 0.05". That was wrong twice over: failing to reject harm is
+not evidence of health, and applying it across up to 20 saved checkpoints tests the same
+baseline twenty times at an unadjusted threshold. A fixed margin has neither problem — it
+makes no test, so it has no multiplicity, and it states in advance exactly how much dev
+degradation the study is willing to carry into a candidate.
+
+**This deviates from roadmap 3A.1 ("best callback-BFCL checkpoint per arm"), deliberately,
+and it needs an owner decision — see the box below.** `D` is structurally blind to the skill
+under test (§3.2): every one of its 258 items presents exactly one function. Ranking
+checkpoints on `D` would select on a metric orthogonal to the hypothesis, and because DPO's
+known failure mode is degrading exactly the single-tool call correctness `D` measures,
+ranking on `D` systematically prefers the least-trained checkpoint and biases every arm
+toward the null by construction. So `D` gates health, step count breaks the tie, and the
+endpoint decides the result. A dev set that cannot see the skill gets a veto, not a vote.
+
+> **Owner decision required before adoption — this rule and WORKING-AGREEMENT §6 disagree.**
+>
+> §6 says: *"Checkpoint selection is by held-out task metric, never by preference metrics and
+> never by training loss."* The rule above uses the held-out task metric as a **gate** and
+> orders by step count, which is not selection *by* that metric. The disagreement is real and
+> is not resolved by wording.
+>
+> **Option A — comply with §6 as written.** Select the eligible checkpoint with the **highest
+> dev accuracy**. *Consequence:* selection runs on a metric that cannot see the trained skill
+> and that DPO is known to degrade, so it systematically favours the least-trained checkpoint
+> and biases every arm toward the null. A null result would then be partly manufactured by
+> the selection rule, and the write-up would have to say so.
+>
+> **Option B (recommended) — amend §6 for study 2, in writing, before adoption.** Keep the
+> rule above, and record in WORKING-AGREEMENT §6 that where the development set is
+> structurally blind to the skill under test, it gates on a pre-stated non-inferiority margin
+> and does not rank. *Consequence:* selection stops being outcome-blind in the §6 sense and
+> starts being *design*-blind — step count is fixed before any data exist and cannot be
+> chosen to favour a result. §6's purpose (never select on the thing you are about to claim)
+> is preserved; its literal text is not.
+>
+> Both options keep the final scoring sets closed until after selection. **§3 is not adoptable
+> until this is answered**, because adopting it silently would mean a prereg section
+> overriding a ratified working agreement without anyone deciding to.
 
 ### 3.10 Before arm 1 `[candidate]`
 
@@ -757,9 +886,13 @@ Every item is a precondition; any failure is a stop, not a warning.
 - **Fixtures dry-run:** 5 steps, `learning_rate = 0.0`, throwaway output directory, asserting
   parameter-hash equality before and after (WORKING-AGREEMENT §5). The directory is deleted
   and no dry-run artifact enters evidence or selection.
-- **Library pins assert clean**, and the `ref` adapter is present (§3.4).
-- **Frozen dev baseline committed and digest-matched** (§3.3).
+- **Library pins assert clean** against the pod's resolved versions, and the `ref` adapter is
+  present on 3A arms (§3.4).
+- **Dev baseline run, committed, reviewed, and digest-matched** (§3.3) — a separately
+  approved spend that completes *before* arm 1, not alongside it.
 - **`D`'s pinned counts and digests re-verified** from the files (§3.2).
+- **The WORKING-AGREEMENT §6 selection question answered by the owner** (§3.9), and §6
+  amended in writing if Option B is chosen.
 - **§3 and §4 adopted by the owner and public** before any arm starts.
 
 ### 3.11 Spend `[candidate]`
@@ -771,16 +904,21 @@ guess:
 
 | stage | countable work |
 |---|---|
-| dev baseline (§3.3) | 258 greedy generations × 1 candidate |
-| one 3A arm | 1 epoch of DPO at effective batch 16, plus **up to 20 dev looks × 258 greedy generations = up to 5,160 generations** |
+| dev baseline (§3.3) | 258 greedy generations × 1 candidate — **owner-approved spend, and it must land and be reviewed before arm 1** |
+| one 3A arm | 1 epoch of DPO at effective batch 16, plus `L` dev looks × 258 greedy generations, `L = min(20, floor(total_steps / 50))` |
 | one 3B arm | 1 epoch of LoRA-SFT at effective batch 32, plus the same dev-look budget |
 | final scoring (§4) | per candidate: 200 (`multiple`) + 400 (`simple_python`) greedy generations |
 
+`L` is not knowable before the mining yield exists, so the arithmetic is stated as a bound
+rather than a number: at the `L_max = 20` ceiling an arm costs **5,160 dev generations**, more
+than four times the entire endpoint probe (1,200). At the 50-step cadence that ceiling is only
+reached by a run of 1,000+ optimizer steps, i.e. ~16,000 mined pairs; a 2,500-pair run gives
+`L = 3` and 774 generations.
+
 **Flagged before anyone is surprised by it:** the dev looks, not the training, dominate an
-arm's inference cost — up to 5,160 generations per arm against the endpoint probe's 1,200
-total. The look cadence is the knob if the written estimate comes back higher than the owner
-wants to spend; changing it is an amendment to §3.8, made **before** the arm runs, never
-after seeing a curve.
+arm's inference cost. The cadence is the knob if the written estimate comes back higher than
+the owner wants to spend — changed by amendment to §3.8 **before** the arm runs, never after
+seeing a curve.
 
 ## 4. Final analysis `[PENDING — candidate content drafted 2026-08-06, not adopted]`
 
@@ -809,18 +947,43 @@ mischaracterised as underpowered by accident.
 multiplicity adjustment applies to it, and **no other contrast may be reported as "the
 result"**.
 
-**Secondary — pre-specified, Holm-corrected within its own family, never promoted:**
+**Secondary — exactly two tested contrasts, Holm-corrected within this family (family size
+2), never promoted:**
 
-1. retention on `simple_python`, n = 400 (A1.6);
+1. **retention** on `simple_python`, n = 400 (A1.6) — a **non-inferiority** claim, not a
+   failure to reject; see §4.1a;
 2. the structural stratum `len(function) in {3, 4}`, n = 121 (A1.5), with both id-set digests
-   re-verified at analysis time;
-3. the MMLU capability band (§4.5).
+   re-verified at analysis time.
 
-**Exploratory — every contrast from A1, A2, A3.** Holm-corrected within the exploratory
-family, always reported with both raw and adjusted p-values, and never described as a study
-result. **An exploratory arm cannot be promoted to confirmatory after the fact.** Designating
-the primary before any data exist is the only thing that makes that promotion detectable, and
-this is the sentence that forbids it.
+**The MMLU band is not in this family.** It is a **threshold guardrail** (§4.5) with no
+hypothesis and no p-value, so Holm-correcting it would be a category error — a family is a
+set of tests, and a band is not one. It gates shipping and is reported as a measured number
+against a fixed line.
+
+**Exploratory — one contrast per exploratory arm actually launched:** the arm's selected
+checkpoint versus shipped SFT, on `multiple`, n = 200 — the same endpoint as the confirmatory
+contrast. **Family size = the number of exploratory arms launched (0 to 3), recorded before
+the analysis runs**, and Holm-corrected over exactly that count. Always reported with both raw
+and adjusted p-values. **An exploratory arm cannot be promoted to confirmatory after the
+fact.** Designating the primary before any data exist is the only thing that makes that
+promotion detectable, and this is the sentence that forbids it.
+
+### 4.1a Retention is a non-inferiority claim, with a stated margin `[candidate]`
+
+"No significant loss" is not evidence of retention — it is the absence of evidence of loss,
+and on any set it can be bought by a small sample or a noisy one. The retention claim is
+therefore stated as a margin, fixed here:
+
+> **`simple_python` retention passes if the lower bound of the 95% Tango interval for the
+> paired difference (candidate − SFT) is greater than −2.0 percentage points** (8 items of
+> 400). Otherwise retention **fails**, and the outcome table (§4.6) reads it as a loss
+> whatever the p-value says.
+
+Why −2.0 points: study 1's worst DPO checkpoint lost 10 of 400 items (−2.5 points, ADR-008),
+so this margin would have failed that checkpoint, which is the behaviour a retention rule
+should have. It is also wider than the n = 400 binomial standard error at p ≈ 0.9 (~1.5
+points), so it is not a margin that noise alone can breach. Fixed before any candidate exists,
+in the same paragraph as its justification, so it cannot be re-derived later to fit a result.
 
 ### 4.2 Method `[candidate — carried from the frozen A1.4]`
 
@@ -846,10 +1009,12 @@ excused as underpowered after the fact or overread as evidence of equivalence.
 Every dev-set number from §3.7–§3.9 is a selection or stopping diagnostic, labelled as such,
 and enters none of the three families. `D` is never reported as an endpoint (§3.2).
 
-### 4.5 MMLU capability band — pre-registered before Phase 5 `[candidate]`
+### 4.5 MMLU capability band — a shipping guardrail, not a test `[candidate]`
 
-Study 1's protocol, unchanged: 14,042 items, 5-shot, next-token log-prob argmax over
-`' A'/' B'/' C'/' D'`.
+**Not a member of any Holm family (§4.1).** There is no hypothesis here and no p-value: a
+measured number is compared to a fixed line, and the line decides whether a candidate may be
+recommended for shipping. Study 1's protocol, unchanged: 14,042 items, 5-shot, next-token
+log-prob argmax over `' A'/' B'/' C'/' D'`.
 
 > **A candidate whose MMLU is more than 2.0 points below the shipped SFT model is a
 > capability regression: it may not be recommended for shipping, whatever its BFCL result.**
@@ -867,12 +1032,17 @@ clears, MMLU does not run — a stated design consequence, not a missing result.
 
 ### 4.6 What each outcome means, fixed before the data `[candidate]`
 
-| primary contrast | retention (`simple_python`) | MMLU | outcome |
+| primary contrast | retention (§4.1a margin) | MMLU (§4.5 band) | outcome |
 |---|---|---|---|
-| significant for the candidate | no significant loss | within band | **Positive result.** Recommended to the owner for shipping; publication remains an owner action |
-| significant for the candidate | significant loss | any | **Mixed.** Reported as a trade with both numbers, never as a win; the shipping decision returns to the owner |
-| significant against the candidate | any | not run | **Negative result.** Ship SFT; ADR in the ADR-006 / ADR-008 line |
-| not significant | any | not run | **No detectable difference** at the pre-stated MDE, reported with its A1.3 row and its Tango interval. A result, not a failure |
+| significant for the candidate | **passes** (CI lower bound > −2.0 pts) | within band | **Positive result.** Recommended to the owner for shipping; publication remains an owner action |
+| significant for the candidate | **fails** | measured either way | **Mixed.** Reported as a trade with both numbers, never as a win; the shipping decision returns to the owner |
+| significant for the candidate | passes | outside band | **Blocked on capability.** Not recommended for shipping whatever the BFCL result (§4.5); reported in full |
+| significant against the candidate | reported | not run | **Negative result.** Ship SFT; ADR in the ADR-006 / ADR-008 line |
+| not significant | reported | not run | **No detectable difference** at the pre-stated MDE, reported with its A1.3 row and its Tango interval. A result, not a failure |
+
+Retention and the stratified contrast are computed and reported in **every** row, including
+the rows where they change nothing. A secondary number that only appears when it is
+convenient is not a secondary analysis.
 
 ### 4.7 Killed arms and empty families `[candidate]`
 

@@ -26,7 +26,10 @@ MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
 DECON_RECEIPT = REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_decontamination.json"
 
 DEV_CATEGORY = "live_simple"
-FINAL_CATEGORIES = ("multiple", "simple_python")
+# The final scoring sets, with the row counts §3.2 and §4 both quote. n = 200 and
+# n = 400 are load-bearing: they are the denominators of the confirmatory and
+# retention contrasts and of A1.3's minimum-detectable-effect grid.
+FINAL_CATEGORIES = {"multiple": 200, "simple_python": 400}
 
 # Quoted from prereg §3.2. Changing either side without the other is the defect
 # this file exists to catch.
@@ -34,6 +37,7 @@ DEV_ROW_COUNT = 258
 DEV_QUESTIONS_SHA256 = "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4"
 DEV_ANSWER_KEY_SHA256 = "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce"
 DEV_SORTED_ID_SHA256 = "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+MANIFEST_SHA256 = "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
 DISCLOSED_SHARED_FUNCTION_NAMES = {
     "multiple": {"send_email"},
     "simple_python": {"get_current_weather", "send_email"},
@@ -66,6 +70,31 @@ def _manifest_entry(category: str, role: str) -> dict:
     ]
     assert len(matches) == 1, f"expected exactly one {category}/{role} manifest entry"
     return matches[0]
+
+
+def test_manifest_itself_is_the_one_the_prereg_pins() -> None:
+    """§3.2 quotes the manifest's own sha256, and the decontamination receipt
+    records the same value. Every other pin in this file is read *through* the
+    manifest, so an unnoticed manifest edit would move them all at once."""
+    assert _sha256(MANIFEST) == MANIFEST_SHA256
+
+    receipt = json.loads(DECON_RECEIPT.read_text())
+    assert receipt["manifest"]["sha256"] == MANIFEST_SHA256, (
+        "the frozen decontamination artifact screened against a different "
+        "manifest revision than §3.2 pins"
+    )
+
+
+def test_final_scoring_sets_have_the_row_counts_the_analysis_assumes() -> None:
+    """n = 200 and n = 400 are the denominators §4's contrasts are sized on."""
+    for category, expected_rows in FINAL_CATEGORIES.items():
+        entry = _manifest_entry(category, "questions")
+        path = REPO_ROOT / entry["local_path"]
+
+        assert entry["row_count"] == expected_rows
+        assert entry["unique_id_count"] == expected_rows
+        assert len(_rows(path)) == expected_rows
+        verify_payload(path.read_bytes(), entry)
 
 
 def test_dev_files_match_their_manifest_pins() -> None:
