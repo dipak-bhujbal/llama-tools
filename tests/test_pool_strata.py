@@ -246,3 +246,35 @@ def test_a_prompt_ineligible_row_is_not_applicable_rather_than_a_pass(tmp_path: 
     assert report["call_targets"] == 0
     assert report["eligible_rows"] == 0
     assert report["passed"] is True
+
+
+def test_one_valid_call_beside_one_malformed_call_is_unreadable() -> None:
+    """612 rows in the pinned pool carry more than one tool-call block. A parser
+    that accepts the first and ignores the rest checks a fraction of them and
+    reports the whole row as clean."""
+    turn = (
+        '<tool_call>\n{"name": "ok", "arguments": {}}\n</tool_call>\n'
+        "<tool_call>\nGARBAGE\n</tool_call>"
+    )
+    assert classify_target(turn)[0] == UNREADABLE
+
+
+def test_a_block_without_a_top_level_name_is_unreadable() -> None:
+    """The defect that invalidated the first receipt: these blocks carry only
+    `arguments`, and a regex search for `"name"` finds an ordinary argument key
+    nested inside it. Harvesting that manufactures a function name."""
+    block = "{'arguments': {'queries': ['q'], 'name': 'ExpertQAExtractor'}}"
+    turn = f"<tool_call>\n{block}\n</tool_call>"
+    assert classify_target(turn)[0] == UNREADABLE
+
+
+def test_a_python_repr_block_with_a_top_level_name_is_read() -> None:
+    """The literal fallback is legitimate where the call is well-formed: a repr
+    rather than JSON, but with a real top-level name."""
+    turn = "<tool_call>\n{'name': 'search', 'arguments': {'q': 'hi'}}\n</tool_call>"
+    assert classify_target(turn) == (CALL, {"search"})
+
+
+def test_an_argument_literally_named_name_is_not_the_function_name() -> None:
+    turn = '<tool_call>\n{"name": "real_fn", "arguments": {"name": "decoy"}}\n</tool_call>'
+    assert classify_target(turn) == (CALL, {"real_fn"})

@@ -333,16 +333,35 @@ receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
 |---|---:|
 | raw rows | 12,143 |
 | eligible rows | 12,138 |
-| ├ call targets | 12,128 |
-| └ no-call targets | 10 |
+| ├ call targets | 12,072 |
+| ├ no-call targets | 10 |
+| └ **unreadable** | **56** |
 | prompt-ineligible (n/a) | 5 |
-| **unreadable** | **0** |
-| **defects** | **0** |
-| passed | True |
+| name defects | 0 |
+| **passed** | **False** |
 
-The eligible population is classified completely — 12,128 + 10 = 12,138,
-with nothing in an unchecked bucket. That completeness is the claim; "0 defects" over a
-partial scan would not have been one.
+**The preflight does not pass, and §2 cannot freeze until it does.** 56 eligible
+targets are `<tool_call>` blocks carrying no top-level `name` — their only top-level key is
+`arguments`, with the call's name nested inside it. They are not well-formed
+`{name, arguments}` calls, so this study cannot check what tool they teach.
+
+No name defects were found among the 12,072 targets that *are* well-formed.
+
+> **@dipak: repairing these 56 rows is a material data change and neither agent should
+> make it silently.** Two options, both requiring your decision:
+>
+> **(a) Documented deterministic repair** — lift the nested `arguments.name` to top level
+> under a committed, tested transform, producing a new cleaned revision with its own sha256.
+> Recovers 56 rows; changes training data.
+>
+> **(b) Preregistered exclusion** — declare these rows out of the mining population here,
+> before any generation, with the count and the reason recorded. Loses 56 rows of
+> 12,138 (0.5%); changes nothing else.
+
+An earlier version of this section reported `unreadable: 0, passed: true`. That receipt was
+invalid: the parser fell back to a regex search for `"name"`, which matched the *nested*
+argument key and reported these 56 malformed targets as valid calls. A check that
+invents the value it is checking is worse than no check, and the fallback has been removed.
 
 ## 3. Training arms `[PENDING]`
 

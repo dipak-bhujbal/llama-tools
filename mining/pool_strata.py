@@ -23,6 +23,7 @@ denominator.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -49,7 +50,7 @@ _XLAM_MARKER = "Tools:"
 # rather than a newline, so a plain `\s*` misses 61 rows in the current pool.
 _TOOL_CALL = re.compile(r"<tool_call>(?:\s|\\[nrt])*(\{.*?\})(?:\s|\\[nrt])*</tool_call>", re.S)
 _TOOL_CALL_MARKER = "<tool_call>"
-_CALL_NAME = re.compile(r'"name"\s*:\s*"([^"]+)"')
+_TOOL_CALL_OPEN = re.compile(r"<tool_call>")
 
 
 def tool_count(system_prompt: str) -> int | None:
@@ -150,21 +151,18 @@ def classify_target(assistant_turn: str) -> tuple[str, set[str]]:
 
     if _TOOL_CALL_MARKER in text:
         blocks = _TOOL_CALL.findall(text)
-        if not blocks:
+        # Every opening marker must have produced a parsed block. One valid call
+        # beside one malformed call is a malformed target, not a valid one --
+        # 612 rows in the pinned pool carry more than one block, so accepting a
+        # partial parse would silently check a fraction of them.
+        if len(blocks) != len(_TOOL_CALL_OPEN.findall(text)):
             return UNREADABLE, set()
         names: set[str] = set()
         for block in blocks:
-            try:
-                call = json.loads(block)
-                if isinstance(call, dict) and isinstance(call.get("name"), str):
-                    names.add(call["name"])
-                    continue
-            except (json.JSONDecodeError, ValueError):
-                pass
-            found = _CALL_NAME.search(block)
-            if found is None:
+            call = _parse_call_block(block)
+            if call is None:
                 return UNREADABLE, set()
-            names.add(found.group(1))
+            names.add(call)
         return (CALL, names) if names else (UNREADABLE, set())
 
     if text[0] in "[{":
@@ -173,6 +171,32 @@ def classify_target(assistant_turn: str) -> tuple[str, set[str]]:
 
     # Prose. Not a call, and not a failure to read one.
     return NO_CALL, set()
+
+
+def _parse_call_block(block: str) -> str | None:
+    """The function name this `<tool_call>` block declares, or `None`.
+
+    JSON first, then a safe Python-literal parse, because some targets embed a
+    repr rather than JSON. Either way a **top-level string `name`** is required.
+
+    There is deliberately no regex fallback. The previous one searched the block
+    for `"name": "..."` and found it inside `arguments` on blocks that have no
+    top-level name at all -- manufacturing a function name out of an ordinary
+    argument key, and reporting 56 malformed targets as valid calls. A check that
+    invents the value it is checking is worse than no check.
+    """
+    parsed: Any = None
+    try:
+        parsed = json.loads(block)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            parsed = ast.literal_eval(block)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    return name if isinstance(name, str) and name else None
 
 
 def _json_call_names(text: str) -> set[str]:
