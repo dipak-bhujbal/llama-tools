@@ -197,7 +197,8 @@ Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weigh
 the literal 65/35 of the earlier instruction — that figure descends from a composition count
 that could read only one of the pool's two prompt formats (§2.6). The rule:
 
-**Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, criterion
+**Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, sha256
+`003c5cbecd663303ea9594c405f4eac4b5a7654923e1f228388b4d041dc2c760`, criterion
 `bfcl-pool-decontamination/v1`):
 
 > **`(n_multi, n_single, N)` = (8,173, 2,997, 11,170)**

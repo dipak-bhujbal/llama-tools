@@ -9,6 +9,7 @@ becoming a third bucket.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -37,6 +38,22 @@ def _pool(tmp_path: Path, rows: list[dict]) -> Path:
     return path
 
 
+def _preflight(tmp_path: Path, pool: Path, **overrides) -> Path:
+    """A matching eligibility receipt. The producer refuses to screen without
+    one that is about this pool and passed, so fixtures must supply it."""
+    receipt = {
+        "sha256": hashlib.sha256(pool.read_bytes()).hexdigest(),
+        "criterion_id": "pool-target-structural-eligibility/v1",
+        "passed": True,
+        "raw_rows": 0, "prompt_ineligible": 0,
+        "structurally_excluded": 0, "retained_rows": 0,
+    }
+    receipt.update(overrides)
+    path = tmp_path / "preflight.json"
+    path.write_text(json.dumps(receipt))
+    return path
+
+
 def test_the_screen_input_is_the_retained_population_not_the_raw_file(tmp_path: Path) -> None:
     """Eligibility precedes screening, so an ineligible prompt and a structurally
     excluded target must never reach the screen or its denominator."""
@@ -48,7 +65,8 @@ def test_the_screen_input_is_the_retained_population_not_the_raw_file(tmp_path: 
             {"role": "assistant", "content": '[{"name": "x", "arguments": {}}]'}]},
         _row("bad_target", ["pkg.a"], "hi", "<tool_call>\n{'arguments': {}}\n</tool_call>"),
     ]
-    art = build_artifact(_pool(tmp_path, rows), MANIFEST)
+    pool = _pool(tmp_path, rows)
+    art = build_artifact(pool, MANIFEST, _preflight(tmp_path, pool))
 
     assert art["prompt_ineligible"] == 1
     assert art["structurally_excluded"] == 1
@@ -62,7 +80,8 @@ def test_weights_are_an_exact_integer_triple(tmp_path: Path) -> None:
         _row("m", ["zz.one", "zz.two"], "alpha beta", '[{"name": "zz.one", "arguments": {}}]'),
         _row("s", ["zz.solo"], "gamma delta", '[{"name": "zz.solo", "arguments": {}}]'),
     ]
-    art = build_artifact(_pool(tmp_path, rows), MANIFEST)
+    pool = _pool(tmp_path, rows)
+    art = build_artifact(pool, MANIFEST, _preflight(tmp_path, pool))
 
     weights = art["weights"]
     assert set(weights) == {"n_multi", "n_single", "N"}
@@ -75,7 +94,8 @@ def test_the_artifact_binds_the_screened_question_files(tmp_path: Path) -> None:
     """A future BFCL re-pin must detectably invalidate this artifact rather than
     silently coexisting with it."""
     rows = [_row("a", ["qq.x"], "some text", '[{"name": "qq.x", "arguments": {}}]')]
-    art = build_artifact(_pool(tmp_path, rows), MANIFEST)
+    pool = _pool(tmp_path, rows)
+    art = build_artifact(pool, MANIFEST, _preflight(tmp_path, pool))
 
     screened = art["screened_question_files"]
     assert len(screened) == 4
@@ -91,6 +111,7 @@ def test_a_retained_row_that_cannot_be_screened_is_a_hard_failure(tmp_path: Path
     """Not a new exclusion bucket -- the whole point of failing closed."""
     rows = [_row("a", ["qq.x"], "text", '[{"name": "qq.x", "arguments": {}}]')]
     pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool)
 
     import mining.decontaminate_pool as module
 
@@ -105,9 +126,54 @@ def test_a_retained_row_that_cannot_be_screened_is_a_hard_failure(tmp_path: Path
     module.Decontaminator = lambda *_a, **_k: Exploding()
     try:
         with pytest.raises(DecontaminationError, match="could not be screened"):
-            build_artifact(pool, MANIFEST)
+            build_artifact(pool, MANIFEST, preflight)
     finally:
         module.Decontaminator = original
+
+
+def test_a_retained_name_defect_stops_the_build(tmp_path: Path) -> None:
+    """Discarding the parsed call names let a row calling a tool its prompt never
+    presented pass straight into the survivor set. A name defect is a defect."""
+    rows = [_row("bad", ["offered.tool"], "hi",
+                 '[{"name": "invented.tool", "arguments": {}}]')]
+    pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool)
+
+    with pytest.raises(DecontaminationError, match="not present"):
+        build_artifact(pool, MANIFEST, preflight)
+
+
+def test_a_preflight_receipt_about_another_pool_is_refused(tmp_path: Path) -> None:
+    """Binding only the criterion id would let the artifact cite an eligibility
+    rule whose receipt was computed against different bytes."""
+    rows = [_row("a", ["qq.x"], "text", '[{"name": "qq.x", "arguments": {}}]')]
+    pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool, sha256="0" * 64)
+
+    with pytest.raises(DecontaminationError, match="not this pool"):
+        build_artifact(pool, MANIFEST, preflight)
+
+
+def test_a_failed_preflight_refuses_to_screen(tmp_path: Path) -> None:
+    rows = [_row("a", ["qq.x"], "text", '[{"name": "qq.x", "arguments": {}}]')]
+    pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool, passed=False)
+
+    with pytest.raises(DecontaminationError, match="passed=false"):
+        build_artifact(pool, MANIFEST, preflight)
+
+
+def test_the_committed_artifact_regenerates_exactly() -> None:
+    """Arithmetic self-consistency is not enough: a hand-edited but coherent
+    receipt would pass. Regenerate from the pinned inputs and compare."""
+    path = REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_decontamination.json"
+    committed = json.loads(path.read_text())
+    regenerated = build_artifact(
+        REPO_ROOT / "data" / "processed" / "sft_dedup_v2.jsonl",
+        MANIFEST,
+        REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_target_preflight.json",
+    )
+    assert regenerated == committed
 
 
 def test_the_committed_artifact_reconciles(tmp_path: Path) -> None:

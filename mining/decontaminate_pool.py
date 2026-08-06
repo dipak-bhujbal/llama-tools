@@ -55,7 +55,19 @@ CRITERION = (
 
 
 class DecontaminationError(RuntimeError):
-    """A row survived eligibility but could not be screened."""
+    """A retained row could not be screened, or carries a name defect."""
+
+
+DEFAULT_PREFLIGHT = REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_target_preflight.json"
+
+
+def _relative(path: Path) -> str:
+    """Repo-relative, whether the caller passed an absolute or relative path."""
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _digest(payload: bytes) -> str:
@@ -66,8 +78,41 @@ def _id_digest(ids: list[str]) -> str:
     return _digest(("\n".join(sorted(ids)) + "\n").encode())
 
 
-def build_artifact(pool_path: Path, manifest_path: Path) -> dict[str, Any]:
+def _verify_preflight(preflight_path: Path, pool_sha: str) -> dict[str, Any]:
+    """The eligibility receipt must be about *this* pool, and must have passed.
+
+    Binding only the criterion id would let an artifact cite an eligibility rule
+    whose receipt was computed against different bytes, or that failed.
+    """
+    raw = preflight_path.read_bytes()
+    receipt = json.loads(raw)
+    if receipt.get("sha256") != pool_sha:
+        raise DecontaminationError(
+            f"preflight receipt is about {receipt.get('sha256')}, not this pool {pool_sha}"
+        )
+    if receipt.get("criterion_id") != ELIGIBILITY_CRITERION_ID:
+        raise DecontaminationError(
+            f"preflight criterion {receipt.get('criterion_id')!r} != {ELIGIBILITY_CRITERION_ID!r}"
+        )
+    if not receipt.get("passed"):
+        raise DecontaminationError("preflight receipt records passed=false; refusing to screen")
+    return {
+        "path": _relative(preflight_path),
+        "sha256": _digest(raw),
+        "criterion_id": receipt["criterion_id"],
+        "counts": {k: receipt[k] for k in
+                   ("raw_rows", "prompt_ineligible", "structurally_excluded", "retained_rows")},
+    }
+
+
+def build_artifact(
+    pool_path: Path,
+    manifest_path: Path,
+    preflight_path: Path = DEFAULT_PREFLIGHT,
+) -> dict[str, Any]:
     payload = pool_path.read_bytes()
+    pool_sha = _digest(payload)
+    preflight = _verify_preflight(preflight_path, pool_sha)
     screener = Decontaminator([manifest_path])
 
     eligible: list[tuple[str, str, str, list[str]]] = []
@@ -86,15 +131,25 @@ def build_artifact(pool_path: Path, manifest_path: Path) -> dict[str, Any]:
             (m.get("content", "") for m in row.get("messages", []) if m.get("role") == "assistant"),
             "",
         )
-        kind, _names = classify_target(assistant)
+        kind, called = classify_target(assistant)
         if kind == "unreadable":
             structurally_excluded += 1
             continue
+        presented = presented_names(system)
+        # A name defect is never an exclusion. Discarding the parsed names here
+        # let a retained row calling a tool its prompt never presented pass
+        # straight through into the survivor set.
+        missing = sorted(called - presented)
+        if missing:
+            raise DecontaminationError(
+                f"{row.get('source_id')}: retained row calls {missing}, which its prompt does "
+                f"not present; a name defect is a defect, not an exclusion"
+            )
         user_text = " ".join(
             m.get("content", "") for m in row.get("messages", []) if m.get("role") == "user"
         )
         row_id = str(row.get("source_id") or f"line:{index + 1}")
-        eligible.append((row_id, stratum, user_text, sorted(presented_names(system))))
+        eligible.append((row_id, stratum, user_text, sorted(presented)))
 
     survivors: dict[str, int] = {MULTI: 0, SINGLE: 0}
     dropped: dict[str, int] = {MULTI: 0, SINGLE: 0}
@@ -122,13 +177,24 @@ def build_artifact(pool_path: Path, manifest_path: Path) -> dict[str, Any]:
     total = n_multi + n_single
     screen_input = len(eligible)
 
+    pre = {MULTI: 0, SINGLE: 0}
+    for _rid, stratum, _t, _n in eligible:
+        pre[stratum] += 1
+
     return {
+        # Ordered deliberately: the reconciliation is stated before any drop or
+        # survival count, per §2.9. Written with sort_keys=False for that reason.
         "criterion_id": CRITERION_ID,
         "criterion": CRITERION,
-        "implementation": "mining/decontaminate_pool.py + mining/decontaminate.py",
+        "implementation": [
+            {"path": rel, "sha256": _digest((REPO_ROOT / rel).read_bytes())}
+            for rel in ("mining/decontaminate_pool.py", "mining/decontaminate.py",
+                        "mining/pool_strata.py")
+        ],
         "eligibility_criterion_id": ELIGIBILITY_CRITERION_ID,
-        "source": {"path": pool_path.name, "sha256": _digest(payload)},
-        "manifest": {"path": str(manifest_path.relative_to(REPO_ROOT)),
+        "eligibility_receipt": preflight,
+        "source": {"path": _relative(pool_path), "sha256": pool_sha},
+        "manifest": {"path": _relative(manifest_path),
                      "sha256": _digest(manifest_path.read_bytes())},
         "screened_question_files": screener.screened_manifest(),
         "reconciliation": (
@@ -137,6 +203,7 @@ def build_artifact(pool_path: Path, manifest_path: Path) -> dict[str, Any]:
             f"target-structural exclusions = {screen_input} screen inputs"
         ),
         "screen_input_rows": screen_input,
+        "pre_screen": {"multi": pre[MULTI], "single": pre[SINGLE], "total": screen_input},
         "screen_input_id_sha256": _id_digest(input_ids),
         "prompt_ineligible": prompt_ineligible,
         "structurally_excluded": structurally_excluded,
@@ -155,9 +222,10 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path,
                         default=REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--preflight", type=Path, default=DEFAULT_PREFLIGHT)
     args = parser.parse_args()
 
-    art = build_artifact(args.pool, args.manifest)
+    art = build_artifact(args.pool, args.manifest, args.preflight)
     print(f"criterion   {art['criterion_id']}")
     print(f"source      {art['source']['path']}  sha256={art['source']['sha256'][:16]}…")
     print(f"screened    {len(art['screened_question_files'])} question files")
@@ -169,7 +237,7 @@ def main() -> None:
     print(f"weights     ({w['n_multi']}, {w['n_single']}, {w['N']})   "
           f"multi share {share * 100:.3f}% (derived, not stored)")
     if args.json:
-        args.json.write_text(json.dumps(art, indent=2, sort_keys=True) + "\n")
+        args.json.write_text(json.dumps(art, indent=2) + "\n")
         print(f"wrote {args.json}")
 
 
