@@ -349,11 +349,13 @@ No name defects were found among the 12,072 targets that *are* well-formed.
 
 **Owner decision, #general msg 2134: (b) preregistered exclusion.**
 
-> **The exclusion is defined by rule, not by list.** A pool row is excluded from the mining
-> population if its assistant target **fails the call-parse preflight** — a target that
-> declares itself a tool call, or JSON, and yields no top-level string `name`. Membership is
-> re-derived from this rule against whatever revision is pinned; it is never inherited from a
-> frozen list of ids.
+> **The exclusion is defined by rule, not by list.** Criterion
+> **`pool-target-structural-eligibility/v1`**, recorded in the receipt:
+>
+> *A prompt-eligible row is structurally excluded when its assistant target announces tool-call or JSON syntax and cannot be parsed completely into the declared call form -- every tool-call marker pair accounted for, every block parsed, and every call carrying a non-empty top-level string `name`. Prose targets are `no_call` and are retained. Name mismatches are defects, not exclusions, and always fail closed.*
+>
+> Membership is re-derived from this criterion against whatever revision is pinned; it is
+> never inherited from a frozen list of ids.
 >
 > The receipt records that rule's **current output**: 56 rows at
 > `sft_dedup_v2.jsonl` sha256 `9e5b7b4f3a5990b5…`, all identities committed. A future
@@ -371,12 +373,14 @@ nested `arguments.name` is a strong hint about intent, not a certainty: a row co
 place is a row whose intent is being guessed at, and 56 guessed ground truths entering the
 pool as *verification keys* is synthesized provenance for a 0.46% gain.
 
-**Inclusion would not have been neutral.** A tool-call block with no top-level `name` fails
-call-parse, and a naive loader classifies a failed call-parse as a **no-call** ground truth —
-"the correct behaviour here is a text answer". Every correct tool-call attempt on those 56
-prompts would then grade as a spurious call, minting preference pairs that teach the model
-*not* to call tools on prompts that wanted them. Inverted training signal, systematically,
-on all 56. This preflight closed a live path to poisoned pairs; it did not find a cosmetic
+**Inclusion would not have been neutral.** The concrete path is in the **quarantined**
+`intake/quarantine/2026-08-04-chat-attachments/mine_pairs.py`, which has never been run and
+must not be promoted unchanged: a target that fails call-parse is assigned
+`gt = {"type": "no_call"}`, the verifier then grades any tool call against it as
+`spurious_tool_call`, and a 1–7-of-8 pass split forms inverted preference pairs while 0/8
+writes the false ground truth into the SFT bucket. Applied to these 56 rows that is
+systematically inverted training signal — teaching the model *not* to call tools on prompts
+that wanted them. This is a quarantined implementation path, not an outcome of any run. This preflight closed a live path to poisoned pairs; it did not find a cosmetic
 defect. That is why §2.8's classifier distinguishes `unreadable` from `no_call` rather than
 collapsing both into "not a call".
 
