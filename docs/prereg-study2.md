@@ -4,6 +4,12 @@
 govern and may not be changed afterwards. Sections marked `[PENDING]` are not yet
 committed and must be filled before the corresponding stage runs.
 
+**As of 2026-08-06 every section is `[FROZEN]`** — §0 and §1 before mining was designed, §2 on
+2026-08-05, §3 and §4 on 2026-08-06 — and all four amendment records are adopted. The document
+was completed **before any study-2 model output, evaluation result, probe score, mined pair,
+or yield number existed**, at $0 of model spend. Everything after this point is execution
+against text that can no longer move without an amendment.
+
 Governing rule: *if a threshold is not in this file before the run, it cannot be used to
 select results after.*
 
@@ -500,22 +506,36 @@ became a `no_call` ground truth. **That fallback is replaced by a refusal, never
 reclassification** — a row the miner cannot read is a stop condition, not a row it gets to
 reinterpret.
 
-## 3. Training arms `[PENDING — candidate content drafted 2026-08-06, not adopted]`
+## 3. Training arms `[FROZEN — adopted by the owner 2026-08-06, #general msg 2297]`
 
-**Status.** This is a drafted candidate awaiting codex review and owner adoption. It is
-`[PENDING]` and **governs nothing** until an adoption line appears below in the form §2
-carries, with a matching row in the amendments table. Nothing in this section authorizes a
-run, a model call, or spend.
+> **Adoption line.** Adopted by the owner on 2026-08-06 (#general msg 2297):
+>
+> *"Confirmed: keep the existing absolute margin unchanged. No McNemar veto is created.
+> Eligibility stays `n_ckpt >= n_base − 2` on the 258-item subset, and McNemar remains a
+> recorded diagnostic that triggers nothing. […] the existing absolute rule, unchanged. K = 3
+> stands as pinned. Nothing else in my Decision A text needs amending. Adopt §3 and §4,
+> publish Amendment 3, unblock the miner, and send me the pilot estimate when it exists."*
+>
+> **No study-2 model output, evaluation result, probe score, mined pair, or yield number had
+> been observed at adoption. No model had been run and model spend was $0.** Adoption
+> authorized no model call and no spend; §3.11 still authorizes none.
+
+This section now governs. Its content reached adoption through the review record: drafted
+2026-08-06, reworked against three rounds of reviewer findings, reshaped by owner Decision C
+(#general msg 2244) and owner Decision A (#general msg 2292), and cleared for adoption by the
+confirmation quoted above. **Frozen text is never edited in place** — any later change is an
+amendment, recorded in the table below with its date, reason, and commit, before the run it
+affects.
 
 **Status of data at drafting: no study-2 model output, evaluation result, probe score,
-mined pair, or yield number had been observed. No model has been run.**
+mined pair, or yield number had been observed. No model had been run.**
 
 **Placeholder this replaces, quoted so the deadline it carried is not lost:**
 
 > Arms, seeds, LoRA config, kill lines, and the callback development slice (drawn from
 > `live_simple`, disjoint from both final scoring sets). **Must be committed before arm 1.**
 
-### 3.1 Which track runs is not a choice made here `[candidate]`
+### 3.1 Which track runs is not a choice made here `[FROZEN]`
 
 §2.6's decision table selects the track from the committed calibration artifact. This
 section only says what each track is allowed to do:
@@ -537,7 +557,7 @@ cautious branch is then the same arm with the exploratory arms withdrawn.
 the KTO arm sketched at roadmap Phase 4, an IPO arm, and any additional seed of an arm
 already listed.
 
-### 3.2 The development set `D` `[candidate]`
+### 3.2 The development set `D` `[FROZEN]`
 
 Owner Decision C (#general msg 2244) makes `D` a deterministic **258-item look subset** of
 the pinned `live_multiple` category, after removing every exact question collision with a
@@ -591,7 +611,7 @@ as a study-2 endpoint.** `tests/test_dev_slice_preflight.py` enforces both role 
 The full parent questions file, not merely the 258 selected rows, is included in Amendment
 3's decontamination screen so the mining pool is clean with respect to any development item.
 
-### 3.3 The frozen SFT development baseline `[candidate]`
+### 3.3 The frozen SFT development baseline `[FROZEN]`
 
 **What adoption freezes is the acquisition rule, not a digest.** An earlier draft said the
 baseline's sha256 would be "recorded here on adoption", which is impossible in that order:
@@ -629,7 +649,7 @@ were applied to — not because seeing it licenses moving them.
 
 This baseline is one candidate × 258 greedy generations and is counted in §3.11.
 
-### 3.4 Configuration — common settings, per-track schedules, and overrides `[candidate]`
+### 3.4 Configuration — common settings, per-track schedules, and overrides `[FROZEN]`
 
 An earlier draft put every setting in one "fixed across every arm" table, which then
 contradicted itself: B0 trains at LR `1e-4` and effective batch 32, not the `5e-6`/16 that
@@ -732,7 +752,7 @@ this table, and a mismatch is a stop-and-record, never a silent proceed. Writing
 a matching image already existed would be the same class of claim — a check described rather
 than performed — that this document exists to prevent.
 
-### 3.5 Arms — track 3A `[candidate]`
+### 3.5 Arms — track 3A `[FROZEN]`
 
 | id | role | `loss_type` | `beta` | other |
 |---|---|---|---|---|
@@ -769,7 +789,7 @@ the primary result.
 **Run order: A0 first, alone, to completion or kill.** No exploratory arm runs before A0 has
 finished and its result is recorded.
 
-### 3.6 Arm — track 3B `[candidate]`
+### 3.6 Arm — track 3B `[FROZEN]`
 
 | id | role | method | LR | epochs | effective batch |
 |---|---|---|---|---|---|
@@ -804,7 +824,7 @@ Everything else is shared with 3A per §3.4(a): same `D`, same frozen baseline, 
 lines (§3.7 rules 2 and 3) do not apply — B0 has no preference objective and no reference
 model.
 
-### 3.7 Kill lines — mechanical, in code, per arm `[candidate]`
+### 3.7 Kill lines — mechanical, in code, per arm `[FROZEN]`
 
 Each is a `TrainerCallback` that stops the arm and writes `kill_report.json` naming the rule,
 the look index, the metric values, and the optimizer step. **A human watching is not a
@@ -857,7 +877,7 @@ now a recorded number that governs nothing.
 A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
 silently replaced by another arm or another seed.
 
-### 3.8 Repeated looks have a stated multiplicity rule `[candidate]`
+### 3.8 Repeated looks have a stated multiplicity rule `[FROZEN]`
 
 Looks run every **50 optimizer steps** — the cadence frozen §2.6 states for the cautious
 branch, applied to every arm on both tracks so no candidate section ever reinterprets a
@@ -896,7 +916,7 @@ opportunities to over-read. Bonferroni over `L_max` fixes it before the realized
 known. **These p-values are never endpoint inference:** they enter none of §4's families and
 are never reported as evidence of a study effect.
 
-### 3.9 Checkpoint selection `[candidate]`
+### 3.9 Checkpoint selection `[FROZEN]`
 
 A checkpoint is saved at **every look**, including the mandatory final-step look (§3.8), so
 the set of selectable checkpoints and the set of dev measurements are the same set. Per arm:
@@ -988,7 +1008,7 @@ skill-visible `live_multiple` development design in §3.2 while no study-2 gener
 The choice amends frozen counts and inputs through Amendment 3; it does not amend §6 or weaken
 the rule against selecting on training/preference metrics.
 
-### 3.10 Before arm 1 `[candidate]`
+### 3.10 Before arm 1 `[FROZEN]`
 
 Every item is a precondition; any failure is a stop, not a warning.
 
@@ -1008,7 +1028,7 @@ Every item is a precondition; any failure is a stop, not a warning.
   superseded artifact.
 - **§3 and §4 adopted by the owner and public** before any arm starts.
 
-### 3.11 Spend `[candidate]`
+### 3.11 Spend `[FROZEN]`
 
 **Adoption of this section authorizes no spend.** Every stage below needs its own written
 estimate agreed by the agents and explicitly approved by the owner (WORKING-AGREEMENT §3).
@@ -1048,11 +1068,19 @@ arm's inference cost. The cadence is the knob if the written estimate comes back
 the owner wants to spend — changed by amendment to §3.8 **before** the arm runs, never after
 seeing a curve.
 
-## 4. Final analysis `[PENDING — candidate content drafted 2026-08-06, not adopted]`
+## 4. Final analysis `[FROZEN — adopted by the owner 2026-08-06, #general msg 2297]`
 
-**Status.** Candidate awaiting codex review and owner adoption, on the same terms as §3. The
-text of the original placeholder is retained below unaltered as §4.0, because its power note
-is already the pre-registered MDE statement and nothing here supersedes it.
+> **Adoption line.** Adopted by the owner on 2026-08-06 (#general msg 2297), in the same
+> instruction that adopted §3: *"Adopt §3 and §4, publish Amendment 3, unblock the miner, and
+> send me the pilot estimate when it exists."*
+>
+> **No study-2 model output, evaluation result, probe score, mined pair, or yield number had
+> been observed at adoption. No model had been run and model spend was $0.**
+
+This matters more here than anywhere else in the document: **every family, margin, band, and
+decision rule below was fixed before a single number existed to fit them to.** The text of the
+original placeholder is retained unaltered as §4.0, because its power note is already the
+pre-registered MDE statement and nothing here supersedes it.
 
 ### 4.0 Carried forward unaltered from the `[PENDING]` placeholder
 
@@ -1068,7 +1096,7 @@ discordant items**. Smaller or noisier effects will correctly read as *no detect
 difference* — a measured outcome, stated here in advance so it cannot later be
 mischaracterised as underpowered by accident.
 
-### 4.1 Three families, fixed before the data exist `[candidate]`
+### 4.1 Three families, fixed before the data exist `[FROZEN]`
 
 **Confirmatory — exactly one contrast.** Shipped SFT versus the selected checkpoint of
 **A0** (track 3A) or **B0** (track 3B), on `multiple`, n = 200. One contrast, so no
@@ -1096,7 +1124,7 @@ and adjusted p-values. **An exploratory arm cannot be promoted to confirmatory a
 fact.** Designating the primary before any data exist is the only thing that makes that
 promotion detectable, and this is the sentence that forbids it.
 
-### 4.1a Retention is a band on the measured difference `[candidate]`
+### 4.1a Retention is a band on the measured difference `[FROZEN]`
 
 "No significant loss" is not evidence of retention — it is the absence of evidence of loss,
 which a small or noisy sample buys for free. Retention is therefore a **guardrail on the
@@ -1147,7 +1175,7 @@ we have actually observed. 2.0 points fails it with room and holds chance failur
 the discordance regime study 1 exhibited. Fixed before any candidate exists, with its
 justification in the same paragraph, so it cannot be re-derived later to fit a result.
 
-### 4.2 Method `[candidate — carried from the frozen A1.4]`
+### 4.2 Method `[FROZEN — carried from A1.4]`
 
 Exact two-sided McNemar on discordant pairs, plus **Tango's score interval** for the paired
 difference of proportions, 95%, reported regardless of direction or significance. Marginal
@@ -1169,19 +1197,19 @@ data**, and neither R nor PropCIs is a runtime or CI dependency. Tango (1998) it
 paywalled and no accessible worked table was found, so nothing here claims to reproduce a
 primary-source table.
 
-### 4.3 Discordance is reported, not just the p-value `[candidate]`
+### 4.3 Discordance is reported, not just the p-value `[FROZEN]`
 
 Every contrast reports `b`, `c`, the discordant total, and **which row of A1.3's grid the
 observed discordance lands in** — i.e. what the study could and could not have detected at
 that discordance. A null is reported with its detectable effect attached, so it can never be
 excused as underpowered after the fact or overread as evidence of equivalence.
 
-### 4.4 Callback looks are not results `[candidate]`
+### 4.4 Callback looks are not results `[FROZEN]`
 
 Every dev-set number from §3.7–§3.9 is a selection or stopping diagnostic, labelled as such,
 and enters none of the three families. `D` is never reported as an endpoint (§3.2).
 
-### 4.5 MMLU capability band — a shipping guardrail, not a test `[candidate]`
+### 4.5 MMLU capability band — a shipping guardrail, not a test `[FROZEN]`
 
 **Not a member of any Holm family (§4.1).** There is no hypothesis here and no p-value: a
 measured number is compared to a fixed line, and the line decides whether a candidate may be
@@ -1202,7 +1230,7 @@ exists.
 ~90 minutes per candidate it is a shipping check, not a research measurement. If no candidate
 clears, MMLU does not run — a stated design consequence, not a missing result.
 
-### 4.6 What each outcome means, fixed before the data `[candidate]`
+### 4.6 What each outcome means, fixed before the data `[FROZEN]`
 
 | primary contrast | retention (§4.1a band) | MMLU (§4.5 band) | outcome |
 |---|---|---|---|
@@ -1216,7 +1244,7 @@ Retention and the stratified contrast are computed and reported in **every** row
 the rows where they change nothing. A secondary number that only appears when it is
 convenient is not a secondary analysis.
 
-### 4.7 Killed arms and empty families `[candidate]`
+### 4.7 Killed arms and empty families `[FROZEN]`
 
 If A0 (or B0) is killed under §3.7, or has no qualifying checkpoint under §3.9, **the
 confirmatory family is empty.** The study then reports the kill — rule, look index, metric
@@ -1226,7 +1254,7 @@ values, step — together with the yield-gate outcome and the null.
 a survivor.** Either would convert a pre-registered stop into a search, which is the exact
 failure this document exists to prevent.
 
-### 4.8 Completeness of the report `[candidate]`
+### 4.8 Completeness of the report `[FROZEN]`
 
 - Every arm launched is reported, killed or not.
 - Every contrast computed is listed with raw and adjusted p-values, including unfavourable
@@ -1250,7 +1278,7 @@ the superseded language verbatim and supersedes it by reference.
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
-| 4 | 2026-08-06 | §2.5, §2.9 | **Candidate Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C, #general msg 2244; exact content pending review, publication, and adoption |
+| 4 | 2026-08-06 | §2.5, §2.9 | **Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C (#general msg 2244) and adopted the reviewed content (#general msg 2297); publication to the public remote still pending |
 
 **Note on this table's first column.** It is a chronological **record** number, not an
 amendment number, and the two do not line up. Records 1 and 2 carry numbered Amendments 1 and
@@ -1580,13 +1608,14 @@ preregistration amendment, not a scoring detail.
 
 ---
 
-### Amendment 3 — skill-visible development set and re-screened mining pool (2026-08-06) `[PENDING REVIEW / PUBLICATION / ADOPTION]`
+### Amendment 3 — skill-visible development set and re-screened mining pool (2026-08-06) `[ADOPTED by the owner 2026-08-06, #general msg 2297 — publication pending]`
 
 **Owner authorization.** The owner selected Decision C in #general msg 2244: pin a seeded
 `live_multiple` look subset, make checkpoint selection rank by its held-out task accuracy,
 permanently disqualify the parent category from endpoint reporting, and re-screen the mining
-pool before mining. The owner authorized this design and its private-backup work; **this exact
-text and artifact package remain a candidate until reviewed, public, and adopted.**
+pool before mining. The owner authorized this design and its private-backup work; **this exact text and artifact package were reviewed and then adopted by the owner in
+#general msg 2297. Publication to the public remote remains an owner action (WORKING-AGREEMENT
+§7) and had not happened when this line was written.**
 
 **Status of data at authorization and drafting: no study-2 model output, development score,
 probe score, mined pair, or yield number had been observed. No model had been run and model
