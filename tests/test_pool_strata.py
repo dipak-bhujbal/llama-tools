@@ -20,7 +20,10 @@ from mining.pool_strata import (
     SINGLE,
     ZERO_TOOLS,
     composition,
+    presented_names,
     stratum_of,
+    target_defects,
+    target_names,
     tool_count,
 )
 
@@ -128,3 +131,53 @@ def test_the_receipt_separates_why_a_prompt_was_ineligible(tmp_path: Path) -> No
     assert receipt["counts"][INELIGIBLE] == 2
     assert receipt["ineligible_reasons"] == {NO_TOOL_LIST: 1, ZERO_TOOLS: 1}
     assert receipt["classifiable"] == 1
+
+
+# ------------------------------------------------ the pool's own target preflight ----
+#
+# The answer-key preflight rule, turned on our own training data: an example
+# whose assistant turn calls a tool its prompt never presented teaches the model
+# to invent a tool name, and no eval attributes that habit back here.
+
+
+def test_presented_names_reads_both_formats() -> None:
+    assert presented_names(XLAM_TWO) == {"a", "b"}
+    assert presented_names(HERMES_THREE) == {"a", "b", "c"}
+
+
+def test_target_names_reads_a_json_call_list() -> None:
+    assert target_names('[{"name": "a", "arguments": {}}]') == {"a"}
+    assert target_names('{"name": "solo", "arguments": {}}') == {"solo"}
+
+
+def test_target_names_reads_hermes_tool_call_blocks() -> None:
+    turn = '<tool_call>\n{"name": "a", "arguments": {"x": 1}}\n</tool_call>'
+    assert target_names(turn) == {"a"}
+
+
+def test_a_hermes_target_with_python_repr_arguments_still_yields_its_name() -> None:
+    """These are not valid JSON -- single-quoted argument strings -- but the
+    name is well-formed and the name is all this check needs. Reporting them
+    unreadable would repeat the presented-side blind spot on the target side."""
+    turn = "<tool_call>\n{\"name\": \"search\", \"arguments\": {'q': 'hi'}}\n</tool_call>"
+    assert target_names(turn) == {"search"}
+
+
+def test_target_defects_flags_a_call_to_an_unpresented_tool(tmp_path: Path) -> None:
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {"source_id": "ok", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": '[{"name": "a", "arguments": {}}]'}]},
+        {"source_id": "bad", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": '[{"name": "invented", "arguments": {}}]'}]},
+    ]
+    pool.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["rows_checked"] == 2
+    assert report["defect_count"] == 1
+    assert report["defects"][0]["source_id"] == "bad"
+    assert report["defects"][0]["called_but_not_presented"] == ["invented"]

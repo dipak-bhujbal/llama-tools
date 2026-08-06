@@ -114,8 +114,10 @@ does not yet govern anything.** It becomes `[FROZEN]` only when codex has signed
 gate arithmetic and @dipak has explicitly adopted it, at which point it gets an adoption
 line and a row in the amendments table — the same bar Amendment 2 had to clear.
 
-Two clauses below (§2.5 weights, §2.7 mining population) carry open owner decisions and are
-marked as such. They are not agent choices to make.
+Both owner decisions are now made (#general msg 2108): §2.5 weights are artifact-derived on
+exact counts, and §2.7 fixes the mining population as the curated SFT pool at its cleaned
+revision. What remains before freezing is mechanical: re-run decontamination over that
+revision, derive the weights from the resulting artifact, and record both here.
 
 No mining run had produced a single pair when this was drafted; no yield number of any kind
 had been observed.
@@ -126,7 +128,7 @@ had been observed.
 |---|---|
 | `SFT_ADAPTER` | `centuriandip/llama-3.1-8b-tools-sft`, subfolder `adapter/`, revision `b6f4da479f8c6fc044ee8b802a92f47780f970c5` |
 | `BFCL_LOCAL` | the pinned fetch outputs of `eval/manifests/bfcl_v4_study2.json`, verified by `python eval/fetch_pinned_bfcl.py --verify-only` |
-| Prompt pool | `NousResearch/hermes-function-calling-v1`, config `func_calling_singleturn`, split `train` |
+| Prompt pool | `data/processed/sft_dedup_v2.jsonl` — the curated SFT pool at the cleaned revision, pinned by sha256 in §2.7 |
 | Verifier | `onpolicy_verifier_v1`, gated by the fixture self-test (1,600/1,600) before any prompt is mined |
 
 The adapter revision is the one already pinned in §0.2; the same string governs both, so the
@@ -189,20 +191,11 @@ or a failed prompt cannot move the gate.
 | pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
 | calibration | `--n-prompts 1000`, `--out-dir mining_out` |
 
-### 2.5 Target weights `[OPEN — owner decision required]`
+### 2.5 Target weights `[decided — artifact-derived, exact counts]`
 
-> **@dipak: msg 2095 chose "final-sweep composition = natural 65/35". That instruction was
-> given before the parser defect in §2.6 was known, and 65/35 descends from it. This clause
-> therefore records the choice as open rather than resolving it, because amending your
-> decision is not an agent's call. Two options, and codex and I both recommend (a):**
->
-> **(a) Artifact-derived natural composition** — the rule below. Weights are whatever the
-> committed pre-generation artifact measures over the chosen mining population. Robust to
-> the defect; the value is not known until the artifact exists.
->
-> **(b) Fixed design weights** — retain literal 65/35, labelled explicitly as a *design
-> choice* and not as measured natural composition, since the measurement behind it is now
-> known to be wrong.
+Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weights are not
+the literal 65/35 of the earlier instruction — that figure descends from a composition count
+that could read only one of the pool's two prompt formats (§2.6). The rule:
 
 The rule referred to by option (a):
 
@@ -275,21 +268,52 @@ of 12,155 classifiable rows, not 66.8%**. The post-screen figure, and therefore
 never edited in place. The figures above are reproducible from the committed parser and the
 recorded digest rather than being a second uncommitted count.
 
-### 2.7 Mining population `[OPEN — owner decision required]`
+### 2.7 Mining population `[decided — curated SFT pool, cleaned revision]`
 
-§1 decontaminates `data/processed/sft_dedup.jsonl` — the SFT *training* pool — while §2.1
-mines `NousResearch/hermes-function-calling-v1`. **These are different populations, and §1's
-composition cannot supply §2's weights across them.**
+Owner decision, #general msg 2108: **the curated SFT pool at the cleaned revision**, with
+decontamination and weights re-run over it.
 
-> **@dipak: one population must be chosen explicitly.** Whichever is chosen, decontamination
-> and the weights artifact must both be run over *that* population before generation, and the
-> dataset revision pinned — a bare dataset name is not a pin, and the run must fail closed if
-> the resolved revision differs from the recorded one.
+| | |
+|---|---|
+| Pool | `data/processed/sft_dedup_v2.jsonl` |
+| sha256 | `9e5b7b4f3a5990b5c92e1d5f1b84d8664a9cce006f88087db7cc7219ffe76b2b` |
+| Rows | 12,143 |
+| Provenance | `data/clean_sft.py` over `sft_dedup.jsonl`, dropping assistant turns carrying the xLAM Python-expression annotation bug |
 
-The distinction is not academic: the Hermes pool is entirely the format §1's counter could
-not read. Among `hermes` rows in the SFT pool the multi-tool share is
-76.3%, against 73.8% for `xlam` — so a weight taken from the
-wrong population is wrong twice over, once for the parse defect and once for the population.
+This supersedes §2.1's earlier `NousResearch/hermes-function-calling-v1` line: the mining
+pool is the curated SFT pool, so decontamination, weights, and mining all read one
+population. §1's decontamination figures do **not** carry over — they were computed over the
+*uncleaned* `sft_dedup.jsonl`, and must be re-run over this revision before generation.
+
+**Composition at this revision** (`mining/pool_strata.py`, receipt at
+`mining/receipts/sft_dedup_v2_strata.json`):
+
+| | multi | single | ineligible |
+|---|---:|---:|---:|
+| `xlam` | 8,102 | 2,880 | 0 |
+| `hermes` | 882 | 274 | 5 |
+| **total** | **8,984** | **3,154** | **5** |
+
+**74.0% multi-tool of 12,138 classifiable.** These are
+pre-screen counts; §2.5's weights come from the post-screen artifact once decontamination is
+re-run here, and that artifact governs.
+
+### 2.8 The pool's own targets are preflighted `[proposed]`
+
+Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
+pool's own targets.
+
+> Before mining, every pool example is checked so that **every tool name its assistant turn
+> calls appears among the tools its own system prompt presents.** A row failing this is a
+> training-side `simple_python_363`: it teaches the model to invent a tool name, and no
+> downstream eval attributes that habit back to the pool. Such rows are reported and
+> excluded, never mined.
+
+Result at this revision (receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
+**12,072 rows checked, 0 defects.** 71
+rows have an assistant turn this parser cannot read and are reported as unchecked rather
+than as passing — the count is stated so the coverage claim is 12,072 of
+12,143, not "the pool is clean".
 
 ## 3. Training arms `[PENDING]`
 
