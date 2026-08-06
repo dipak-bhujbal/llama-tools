@@ -157,9 +157,9 @@ presents:
 > (`mining/pool_strata.py`), never as a mining-ledger record.
 
 Recording it in the ledger would do the opposite of what is intended: `mining/ledger.py`
-treats every active non-control record as one unit of completed work, so an
-`unparseable` record would land in A2.1's denominator and depress yield by exactly the rows
-that were never mined.
+treats every active non-control record as one unit of completed work, so an `ineligible`
+record would land in A2.1's denominator and depress yield by exactly the prompts that were
+never mined.
 
 Both parses are required because the pool carries both formats, and a rule that reads only
 one silently reclassifies the other. That is not hypothetical — see the note in §2.6.
