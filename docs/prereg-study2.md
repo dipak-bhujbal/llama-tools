@@ -500,12 +500,295 @@ became a `no_call` ground truth. **That fallback is replaced by a refusal, never
 reclassification** — a row the miner cannot read is a stop condition, not a row it gets to
 reinterpret.
 
-## 3. Training arms `[PENDING]`
+## 3. Training arms `[PENDING — candidate content drafted 2026-08-06, not adopted]`
 
-Arms, seeds, LoRA config, kill lines, and the callback development slice (drawn from
-`live_simple`, disjoint from both final scoring sets). **Must be committed before arm 1.**
+**Status.** This is a drafted candidate awaiting codex review and owner adoption. It is
+`[PENDING]` and **governs nothing** until an adoption line appears below in the form §2
+carries, with a matching row in the amendments table. Nothing in this section authorizes a
+run, a model call, or spend.
 
-## 4. Final analysis `[PENDING]`
+**Status of data at drafting: no study-2 model output, evaluation result, probe score,
+mined pair, or yield number had been observed. No model has been run.**
+
+**Placeholder this replaces, quoted so the deadline it carried is not lost:**
+
+> Arms, seeds, LoRA config, kill lines, and the callback development slice (drawn from
+> `live_simple`, disjoint from both final scoring sets). **Must be committed before arm 1.**
+
+### 3.1 Which track runs is not a choice made here `[candidate]`
+
+§2.6's decision table selects the track from the committed calibration artifact. This
+section only says what each track is allowed to do:
+
+| `P_std` (§2.6) | Track | Arms permitted |
+|---|---|---|
+| `>= 1000` | 3A | **A0** confirmatory; A1–A3 exploratory, each under its own written estimate and owner approval |
+| `>= 300` and `< 1000` | 3A-cautious | **A0 only.** No exploratory arm may run on this branch |
+| `< 300` | 3B | **B0 only** |
+
+A0's configuration already satisfies the cautious branch's constraints (1 epoch, dev looks
+every 25 steps), so the cautious branch is not a different arm — it is the same arm with the
+exploratory arms withdrawn.
+
+**An arm not listed in §3.5 or §3.6 requires an amendment before it runs.** That includes
+the KTO arm sketched at roadmap Phase 4, an IPO arm, and any additional seed of an arm
+already listed.
+
+### 3.2 The development set `D` `[candidate]`
+
+`D` is the **entire pinned `live_simple` category** — not a sampled slice, so there is no
+sampling seed to defend and no subset that could have been chosen differently.
+
+| | |
+|---|---|
+| questions | `eval/bfcl_data/BFCL_v4_live_simple.json`, sha256 `1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4`, blob `e8f4b8d33c07753affc77bfc4a646f94109de5af` |
+| answer key | `eval/bfcl_data/possible_answer/BFCL_v4_live_simple.json`, sha256 `fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce`, blob `2c4778cee08e5ce7b236861de9a927d3ea7cde1f` |
+| rows / unique ids | 258 / 258 |
+| sorted-id sha256 | `aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3` (both files) |
+| manifest | `eval/manifests/bfcl_v4_study2.json`, sha256 `7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64` |
+
+**Disjointness from the final scoring sets, measured from the pinned files:**
+
+| | vs `multiple` (200) | vs `simple_python` (400) |
+|---|---:|---:|
+| shared ids | 0 | 0 |
+| shared question objects (exact) | 0 | 0 |
+| shared presented function names | 1 (`send_email`) | 2 (`get_current_weather`, `send_email`) |
+
+The name overlaps are **disclosed, not removed.** A shared function name is not a shared
+item, and the screen that matters ran the other direction: `live_simple` is one of the four
+categories screened in the frozen decontamination artifact (§2.9), so the mining pool is
+already clean with respect to `D`. Every count above is re-verified from the pinned files at
+run time; a mismatch is a stop condition, not a note.
+
+**What `D` can and cannot measure.** All 258 items present **exactly one** candidate
+function (`len(function) == 1`, verified for all 258). By A1.1's own argument — the argument
+that removed `simple_python` from primary contention — a one-candidate item cannot exercise
+ranking. **`D` therefore measures retention and health (can the policy still emit the
+correct call), and is structurally blind to the skill under test.** That is why `D` is used
+as a health gate and a stop condition and **never as a ranking metric** (§3.9). Stating the
+blind spot is what makes the selection rule defensible; hiding it would make `D` look like a
+task metric it cannot be.
+
+**The cost of adopting `D`, recorded as a cost.** `live_simple` is spent: a set that selects
+checkpoints can never also be a final scoring set (WORKING-AGREEMENT §6). Any number derived
+from `D` is a selection diagnostic and may never be reported as a study-2 endpoint.
+
+**Why not a dev set that can see the skill.** `BFCL_v4_live_multiple.json` is present
+locally (1,053 items, 2–37 tools) and would exercise ranking. It is rejected, for reasons in
+increasing order of decisiveness: it is not in the pinned manifest; its answer key was never
+fetched; it shares one question object verbatim with `multiple`; and it was **not** among the
+four categories screened in the frozen decontamination artifact. Adopting it would either
+accept a dev set contaminated against the mining pool, or force the screen to be re-run —
+which would move the frozen weights `(8173, 2997, 11170)` and require amending frozen text.
+**We take the stated blind spot over an amendment to a frozen section**, and §4 reports the
+study's conclusions from the endpoint, not from `D`.
+
+### 3.3 The frozen SFT development baseline `[candidate]`
+
+Before arm 1, shipped SFT is scored **once** on `D` — greedy, `max_new_tokens = 512`, scored
+by `eval/bfcl_scoring.py` — and its **per-item outcome rows** are committed as
+`eval/results/study2_dev_baseline_live_simple.jsonl`, with the sha256 recorded here on
+adoption.
+
+Every kill-line and selection comparison in §3.7 and §3.9 is paired against **those committed
+rows**, never against a baseline re-derived at comparison time. If the file is missing, or
+its digest does not match, **the arm refuses to start** — the same refuse-never-reclassify
+shape as §2.11.
+
+This baseline is one candidate × 258 greedy generations and is counted in §3.11.
+
+### 3.4 Fixed across every arm `[candidate]`
+
+| | |
+|---|---|
+| Base | `meta-llama/Llama-3.1-8B-Instruct`, revision `0e9e39f249a16976918f6564b8830bc894c89659` |
+| Init | shipped SFT adapter, revision `b6f4da479f8c6fc044ee8b802a92f47780f970c5`, **trained in place** (`is_trainable=True`) |
+| LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj", "k_proj", "v_proj", "o_proj"]` — identical to study-1 SFT (`train/sft_full.py`). No new modules, no rank change |
+| Schedule | 1 epoch, per-device batch 2 × grad-accum 8 (**effective 16**), peak LR `5e-6`, cosine, `warmup_ratio = 0.03` |
+| Precision | bf16, gradient checkpointing on, `max_length = 2048` |
+| Split | 90/10 train/eval on the mined pairs, **stratified by `error_type`**, split seed `42` |
+| Seeds | training seed `42`, split seed `42` |
+| Decoding | **greedy** for every dev look and every final score — no sampling seed enters any measurement |
+
+**One seed per arm. No seed replication.** Recorded as a limitation now rather than
+discovered later: differences *between* arms cannot be separated from seed variance. That is
+precisely why exactly one arm is confirmatory (§4.1) and the rest are labelled exploratory.
+
+**Library pins, and the reference-model semantics they decide.** TRL's reference model for a
+**re-trained** PEFT adapter is version-dependent:
+
+- **TRL 1.8.0** (installed here) copies the pretrained adapter into a frozen `ref` adapter
+  and computes reference log-probs from it → the reference is **the SFT policy**.
+- **Older TRL** computed reference log-probs with adapters disabled → the reference is **the
+  base model**.
+
+These are different experiments. `pyproject.toml` pins only `trl>=0.10`, and the study-1
+DPO v2 run's TRL version is **not recorded anywhere in this repository** (searched `docs/`,
+`eval/`, `train/`, `eval/results/`). **Study 2 therefore does not claim library-level recipe
+identity with ADR-008**, and no wording in the write-up may imply it.
+
+Study 2 pins, and the trainer asserts at start, refusing on mismatch:
+
+| | |
+|---|---|
+| `trl` | 1.8.0 |
+| `peft` | 0.19.1 |
+| `transformers` | 5.14.1 |
+| `torch` | 2.13.0 |
+| `datasets` | 5.0.0 |
+| `accelerate` | 1.14.0 |
+
+The trainer additionally asserts that a `ref` adapter exists on the policy — i.e. that the
+reference **is** the SFT policy — rather than inferring it from the version string. The
+versions above are this workstation's; the pod image is built to match, and a pod that does
+not match is a stop-and-record, never a silent proceed.
+
+### 3.5 Arms — track 3A `[candidate]`
+
+| id | role | `loss_type` | `beta` | other |
+|---|---|---|---|---|
+| **A0-anchor** | **confirmatory (primary)** | `sigmoid` | 0.1 | study-1 v2 hyperparameters unchanged |
+| A1-beta30 | exploratory | `sigmoid` | 0.3 | tighter anchor to the reference |
+| A2-beta05 | exploratory | `sigmoid` | 0.05 | looser anchor |
+| A3-sftmix | exploratory | `["sigmoid", "sft"]`, `loss_weights = [1.0, 1.0]` | 0.1 | adds an SFT term on `chosen` |
+
+**Why A0 is the primary and not the cleverest arm.** Study 2 asks one question: does the
+answer change when the task has a selection dimension? That question is only answered by
+holding the recipe fixed and changing the endpoint and the data. A0 is that arm. A1–A3 ask
+*different* questions and cannot answer this one.
+
+**A3 is the "anchored arm" roadmap 3A.1 asked us to pick and state.** Roadmap 3A.1 offered
+DPOP or a DPO + SFT-loss mix on `chosen`; we state the SFT-loss mix, because `rpo_alpha` no
+longer exists in TRL 1.8 and the supported equivalent is multi-loss `["sigmoid", "sft"]` with
+explicit `loss_weights`. It is the theory-driven arm: ADR-008's failure mode was correct
+outputs degrading on held-out prompts, and an SFT term on `chosen` targets exactly that. It
+is nonetheless **exploratory**, because a study cannot both fix a recipe and claim its fix as
+the primary result.
+
+**Run order: A0 first, alone, to completion or kill.** No exploratory arm runs before A0 has
+finished and its result is recorded.
+
+### 3.6 Arm — track 3B `[candidate]`
+
+| id | role | method | LR | epochs | effective batch |
+|---|---|---|---|---|---|
+| **B0-rsft** | **confirmatory** when §2.6 routes to 3B | LoRA-SFT continuation of the shipped adapter | `1e-4` | 1 | 32 (8 × 4) |
+
+Roadmap 3B.2 permitted `1e-4`–`2e-4` and required the value be stated: **`1e-4`**, the
+conservative end, because B0 continues an already-converged adapter.
+
+Data: `data/rsft_train.jsonl`, built from the **verifier-accepted** on-policy completions in
+the mined bucket, **one completion per prompt, chosen by lowest sample index**. The selection
+is deterministic and quality-blind beyond the verifier's binary verdict — no "best of 8" by
+any score, which would be selection on an unregistered metric. Composition (counts by
+stratum and by source) is reported before training starts.
+
+Everything else is shared with 3A: same `D`, same frozen baseline, same kill lines, same
+selection rule, same analysis.
+
+### 3.7 Kill lines — mechanical, in code, per arm `[candidate]`
+
+Each is a `TrainerCallback` that stops the arm and writes `kill_report.json` naming the rule,
+the look index, the metric values, and the optimizer step. **A human watching is not a
+control** (ADR-007's lesson, retained).
+
+1. **Non-finite** — NaN or inf in the loss or any logged metric → stop immediately.
+2. **Preference-metric damage** — `eval_rewards/chosen < -0.25` → stop. ADR-007's line,
+   unchanged. *(3A only.)*
+3. **Easy data** — first-eval `eval_rewards/accuracies >= 0.99` → stop; the pairs are
+   trivial and the arm cannot be informative. *(3A only.)*
+4. **Dev health — the McNemar kill rule.** At each look, the current policy is scored on `D`
+   and its per-item outcomes are tested against the frozen SFT baseline rows (§3.3) by exact
+   two-sided McNemar. **Stop when damage is significant at `α_look` (§3.8) on two
+   consecutive looks, or immediately at any look where dev accuracy is at least 10
+   percentage points (≥ 26 of 258 items) below baseline.** Two consecutive looks, because a
+   single look on a small discordant count is noisy; the absolute floor, because a collapse
+   should not have to wait for a second look.
+5. **Direction guard** — a look that is significant in the *policy's favour* stops nothing
+   and promotes nothing. `D` is not an endpoint (§3.2), and a dev win is not a result.
+
+A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
+silently replaced by another arm or another seed.
+
+### 3.8 Repeated looks have a stated multiplicity rule `[candidate]`
+
+Looks run every **25 optimizer steps**, capped at **`L_max = 20` looks per arm**. If one
+epoch would exceed 20 looks, the cadence stretches to `ceil(total_steps / 20)` so `L <= 20`
+always; the realized cadence is recorded in the run artifact.
+
+> **`α_look` = 0.05 / `L_max` = 0.0025**, Bonferroni over the **maximum** look count, fixed
+> in advance and **not** recomputed from the realized number of looks.
+
+Recomputing `α_look` after seeing how many looks actually happened would be the same defect
+one level down from the one Amendment 2 fixed: a threshold that moves with the data it
+judges. The cap is deliberately conservative — it protects against stopping a healthy arm on
+noise, at the price of being slow to stop a mildly damaged one, which is the right direction
+for a rule whose false positive destroys the study's only confirmatory arm.
+
+**These p-values are a stopping rule, not inference.** They never appear in §4's families and
+are never reported as evidence of an effect.
+
+### 3.9 Checkpoint selection `[candidate]`
+
+Checkpoints are saved at the look cadence. Per arm:
+
+> **Selected = the checkpoint with the most optimizer steps among those whose dev accuracy
+> is not significantly worse than the frozen SFT dev baseline (exact two-sided McNemar on
+> `D`, α = 0.05, direction against the policy). If no checkpoint qualifies, the arm has no
+> candidate.**
+
+Not best `eval_loss`. Not best reward margins. Not any number from `multiple` or
+`simple_python` — **the final scoring sets are not opened until the checkpoint is already
+selected.**
+
+**This deviates from roadmap 3A.1 ("best callback-BFCL checkpoint per arm"), deliberately.**
+`D` is structurally blind to the skill under test (§3.2). Ranking checkpoints on `D` would
+therefore select on a metric orthogonal to the hypothesis — and because DPO's known failure
+mode is degrading exactly the single-tool call correctness `D` measures, ranking on `D`
+systematically prefers the least-trained checkpoint and biases every arm toward the null by
+construction. So `D` gates health, step count breaks the tie, and the endpoint decides the
+result. A dev set that cannot see the skill gets a veto, not a vote.
+
+### 3.10 Before arm 1 `[candidate]`
+
+Every item is a precondition; any failure is a stop, not a warning.
+
+- **Fixtures dry-run:** 5 steps, `learning_rate = 0.0`, throwaway output directory, asserting
+  parameter-hash equality before and after (WORKING-AGREEMENT §5). The directory is deleted
+  and no dry-run artifact enters evidence or selection.
+- **Library pins assert clean**, and the `ref` adapter is present (§3.4).
+- **Frozen dev baseline committed and digest-matched** (§3.3).
+- **`D`'s pinned counts and digests re-verified** from the files (§3.2).
+- **§3 and §4 adopted by the owner and public** before any arm starts.
+
+### 3.11 Spend `[candidate]`
+
+**Adoption of this section authorizes no spend.** Every stage below needs its own written
+estimate agreed by the agents and explicitly approved by the owner (WORKING-AGREEMENT §3).
+What is stated here is the *countable work*, so the estimate is arithmetic rather than a
+guess:
+
+| stage | countable work |
+|---|---|
+| dev baseline (§3.3) | 258 greedy generations × 1 candidate |
+| one 3A arm | 1 epoch of DPO at effective batch 16, plus **up to 20 dev looks × 258 greedy generations = up to 5,160 generations** |
+| one 3B arm | 1 epoch of LoRA-SFT at effective batch 32, plus the same dev-look budget |
+| final scoring (§4) | per candidate: 200 (`multiple`) + 400 (`simple_python`) greedy generations |
+
+**Flagged before anyone is surprised by it:** the dev looks, not the training, dominate an
+arm's inference cost — up to 5,160 generations per arm against the endpoint probe's 1,200
+total. The look cadence is the knob if the written estimate comes back higher than the owner
+wants to spend; changing it is an amendment to §3.8, made **before** the arm runs, never
+after seeing a curve.
+
+## 4. Final analysis `[PENDING — candidate content drafted 2026-08-06, not adopted]`
+
+**Status.** Candidate awaiting codex review and owner adoption, on the same terms as §3. The
+text of the original placeholder is retained below unaltered as §4.0, because its power note
+is already the pre-registered MDE statement and nothing here supersedes it.
+
+### 4.0 Carried forward unaltered from the `[PENDING]` placeholder
 
 Paired comparison via exact McNemar on discordant items, with the pre-registered
 multiplicity rule for repeated callback looks. Marginal binomial CIs are reported but do
@@ -518,6 +801,98 @@ in one direction**; a 15/4 split gives p=0.019, while 12/5 (p=0.14), 14/7 (p=0.1
 discordant items**. Smaller or noisier effects will correctly read as *no detectable
 difference* — a measured outcome, stated here in advance so it cannot later be
 mischaracterised as underpowered by accident.
+
+### 4.1 Three families, fixed before the data exist `[candidate]`
+
+**Confirmatory — exactly one contrast.** Shipped SFT versus the selected checkpoint of
+**A0** (track 3A) or **B0** (track 3B), on `multiple`, n = 200. One contrast, so no
+multiplicity adjustment applies to it, and **no other contrast may be reported as "the
+result"**.
+
+**Secondary — pre-specified, Holm-corrected within its own family, never promoted:**
+
+1. retention on `simple_python`, n = 400 (A1.6);
+2. the structural stratum `len(function) in {3, 4}`, n = 121 (A1.5), with both id-set digests
+   re-verified at analysis time;
+3. the MMLU capability band (§4.5).
+
+**Exploratory — every contrast from A1, A2, A3.** Holm-corrected within the exploratory
+family, always reported with both raw and adjusted p-values, and never described as a study
+result. **An exploratory arm cannot be promoted to confirmatory after the fact.** Designating
+the primary before any data exist is the only thing that makes that promotion detectable, and
+this is the sentence that forbids it.
+
+### 4.2 Method `[candidate — carried from the frozen A1.4]`
+
+Exact two-sided McNemar on discordant pairs, plus **Tango's score interval** for the paired
+difference of proportions, 95%, reported regardless of direction or significance. Marginal
+binomial CIs are reported and decide nothing.
+
+**Recorded as missing rather than assumed present:** `eval/paired_analysis.py` already
+computes exact McNemar and Holm adjustment, but **the Tango interval is not implemented
+yet**. It is a build item before any analysis runs, with a unit test against published worked
+values. A1.4 is frozen and names the interval; the code has to catch up to the document, not
+the reverse.
+
+### 4.3 Discordance is reported, not just the p-value `[candidate]`
+
+Every contrast reports `b`, `c`, the discordant total, and **which row of A1.3's grid the
+observed discordance lands in** — i.e. what the study could and could not have detected at
+that discordance. A null is reported with its detectable effect attached, so it can never be
+excused as underpowered after the fact or overread as evidence of equivalence.
+
+### 4.4 Callback looks are not results `[candidate]`
+
+Every dev-set number from §3.7–§3.9 is a selection or stopping diagnostic, labelled as such,
+and enters none of the three families. `D` is never reported as an endpoint (§3.2).
+
+### 4.5 MMLU capability band — pre-registered before Phase 5 `[candidate]`
+
+Study 1's protocol, unchanged: 14,042 items, 5-shot, next-token log-prob argmax over
+`' A'/' B'/' C'/' D'`.
+
+> **A candidate whose MMLU is more than 2.0 points below the shipped SFT model is a
+> capability regression: it may not be recommended for shipping, whatever its BFCL result.**
+
+The band is set against **shipped SFT**, not base, because the study-2 question is what DPO
+adds on top of SFT — study 1 already measured and disclosed the SFT specialization cost
+(0.659 vs base 0.683, −2.4 points), and roadmap 5.2 forbids retroactively inventing a tighter
+band than the accepted study-1 result. 2.0 points is far looser than DPO v2's observed
+0.1-point effect and tighter than the SFT cost, and is fixed here before any candidate
+exists.
+
+**When it runs:** MMLU is run **only for a candidate that clears the primary contrast**. At
+~90 minutes per candidate it is a shipping check, not a research measurement. If no candidate
+clears, MMLU does not run — a stated design consequence, not a missing result.
+
+### 4.6 What each outcome means, fixed before the data `[candidate]`
+
+| primary contrast | retention (`simple_python`) | MMLU | outcome |
+|---|---|---|---|
+| significant for the candidate | no significant loss | within band | **Positive result.** Recommended to the owner for shipping; publication remains an owner action |
+| significant for the candidate | significant loss | any | **Mixed.** Reported as a trade with both numbers, never as a win; the shipping decision returns to the owner |
+| significant against the candidate | any | not run | **Negative result.** Ship SFT; ADR in the ADR-006 / ADR-008 line |
+| not significant | any | not run | **No detectable difference** at the pre-stated MDE, reported with its A1.3 row and its Tango interval. A result, not a failure |
+
+### 4.7 Killed arms and empty families `[candidate]`
+
+If A0 (or B0) is killed under §3.7, or has no qualifying checkpoint under §3.9, **the
+confirmatory family is empty.** The study then reports the kill — rule, look index, metric
+values, step — together with the yield-gate outcome and the null.
+
+**An exploratory arm is not promoted to fill the gap, and a second seed is not run to obtain
+a survivor.** Either would convert a pre-registered stop into a search, which is the exact
+failure this document exists to prevent.
+
+### 4.8 Completeness of the report `[candidate]`
+
+- Every arm launched is reported, killed or not.
+- Every contrast computed is listed with raw and adjusted p-values, including unfavourable
+  ones.
+- Yield artifacts, kill reports, `trainer_state.json`, generations, and per-item outcome rows
+  are committed, so a reader re-runs the analysis instead of trusting the table.
+- Any number this document cannot trace to a committed artifact does not appear in the
+  write-up, the README, the model card, or the résumé.
 
 ---
 
