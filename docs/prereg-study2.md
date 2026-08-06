@@ -107,17 +107,24 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[DRAFT — awaiting codex review and owner adoption]`
+## 2. Mining `[ADOPTION CANDIDATE — codex signed off; awaiting owner adoption]`
 
-Drafting authorized by the owner, #general msg 2095. **This section is not yet frozen and
-does not yet govern anything.** It becomes `[FROZEN]` only when codex has signed off on the
-gate arithmetic and @dipak has explicitly adopted it, at which point it gets an adoption
-line and a row in the amendments table — the same bar Amendment 2 had to clear.
+Drafting authorized by the owner, #general msg 2095. **Codex signed off the complete
+package at `0dccddd` (#general msg 2169).** This section still does **not** govern anything:
+it becomes `[FROZEN]` when @dipak explicitly adopts it, at which point the adoption line
+below is completed and the amendments-table row loses its *pending* marker — the same bar
+Amendment 2 cleared.
 
-Both owner decisions are now made (#general msg 2108): §2.5 weights are artifact-derived on
-exact counts, and §2.7 fixes the mining population as the curated SFT pool at its cleaned
-revision. What remains before freezing is mechanical: re-run decontamination over that
-revision, derive the weights from the resulting artifact, and record both here.
+> **Adoption line — @dipak:** *pending.* Adopting freezes §§2.1–2.11 as written, including
+> the yield gate arithmetic, the exclusion criterion, and the weights
+> **(8,173, 2,997, 11,170)** derived from the committed
+> decontamination artifact (sha256 `fb7a0200dbeeabb8…`).
+> No study-2 model output has been observed; adoption authorizes **no model call and no
+> spend**.
+
+All owner decisions are made and all mechanical work is done: the decontamination artifact
+is built and committed, the weights are derived from it as an exact integer triple, and
+codex has verified every binding independently. What remains is the owner's adoption.
 
 No mining run had produced a single pair when this was drafted; no yield number of any kind
 had been observed.
@@ -514,6 +521,7 @@ the superseded language verbatim and supersedes it by reference.
 | # | Date | Section | Change | Authorized by |
 |---|---|---|---|---|
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
+| 3 | *pending* | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | *awaiting owner adoption* |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
