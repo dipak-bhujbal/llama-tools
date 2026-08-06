@@ -1,21 +1,25 @@
 {
   "by_source": {
     "hermes": {
+      "ineligible": 5,
       "multi": 882,
-      "single": 274,
-      "unparseable": 5
+      "single": 274
     },
     "xlam": {
+      "ineligible": 0,
       "multi": 8117,
-      "single": 2882,
-      "unparseable": 0
+      "single": 2882
     }
   },
   "classifiable": 12155,
   "counts": {
+    "ineligible": 5,
     "multi": 8999,
-    "single": 3156,
-    "unparseable": 5
+    "single": 3156
+  },
+  "ineligible_reasons": {
+    "no_tool_list": 5,
+    "zero_tools": 0
   },
   "multi_share": 0.7403537638831756,
   "pool_path": "sft_dedup.jsonl",

@@ -13,9 +13,10 @@ Two formats are recognised because the pool carries two:
     xlam-style     "Tools:\\n[ {...}, {...} ]"
     hermes-style   "<tools>\\n[ {...}, {...} ]\\n</tools>"
 
-A prompt that parses under neither is `unparseable`. It is *not* mined and does
-not enter the yield numerator or denominator; it is recorded here, in the
-pre-mining eligibility artifact, rather than as a mining-ledger record — an
+A prompt is `ineligible` if its tool list parses under neither format, or if it
+parses to zero tools — readable, but with nothing for the model to call. Either
+way it is *not* mined and enters neither yield term; it is recorded here, in the
+pre-mining eligibility artifact, rather than as a mining-ledger record, since an
 active ledger record means one unit of completed work and would land in A2.1's
 denominator.
 """
@@ -30,7 +31,14 @@ from typing import Any
 
 MULTI = "multi"
 SINGLE = "single"
-UNPARSEABLE = "unparseable"
+INELIGIBLE = "ineligible"
+
+# Why a prompt is ineligible. Both are excluded from the yield terms, but they
+# are different facts and a receipt that merged them would hide one: a prompt
+# whose tool list we cannot read is a parser gap, while a prompt offering no
+# tools is readable and simply cannot produce a tool-call pair.
+NO_TOOL_LIST = "no_tool_list"
+ZERO_TOOLS = "zero_tools"
 
 # Non-greedy, and requires a bracketed array: the hermes system prompt names the
 # empty literal `<tools></tools>` in its own instructions, and a laxer pattern
@@ -42,9 +50,9 @@ _XLAM_MARKER = "Tools:"
 def tool_count(system_prompt: str) -> int | None:
     """How many tools does this prompt present? `None` if neither format parses.
 
-    Where both formats appear, the largest well-formed list wins: a prompt that
-    embeds an example tool block alongside its real one must not be scored on
-    the example.
+    Where more than one well-formed list is present, the one with the **most
+    tools** wins: a prompt that embeds a small example block alongside its real
+    tool list must not be scored on the example.
     """
     counts: list[int] = []
 
@@ -68,11 +76,20 @@ def tool_count(system_prompt: str) -> int | None:
     return max(counts) if counts else None
 
 
-def stratum_of(system_prompt: str) -> str:
+def stratum_of(system_prompt: str) -> tuple[str, str | None]:
+    """Return `(stratum, ineligibility_reason)`.
+
+    A prompt presenting zero tools is parseable and still ineligible: there is
+    no tool for the model to call, so it can never contribute a pair. Letting a
+    successfully parsed empty list fall through to `single` would put it in the
+    yield denominator and in the weight for a stratum it is not in.
+    """
     count = tool_count(system_prompt)
     if count is None:
-        return UNPARSEABLE
-    return MULTI if count >= 2 else SINGLE
+        return INELIGIBLE, NO_TOOL_LIST
+    if count < 1:
+        return INELIGIBLE, ZERO_TOOLS
+    return (MULTI if count >= 2 else SINGLE), None
 
 
 def _system_prompt(row: dict[str, Any]) -> str:
@@ -90,17 +107,20 @@ def composition(pool_path: Path) -> dict[str, Any]:
     provisional kind this module was written to replace.
     """
     payload = pool_path.read_bytes()
-    counts = {MULTI: 0, SINGLE: 0, UNPARSEABLE: 0}
+    counts = {MULTI: 0, SINGLE: 0, INELIGIBLE: 0}
+    reasons = {NO_TOOL_LIST: 0, ZERO_TOOLS: 0}
     by_source: dict[str, dict[str, int]] = {}
 
     for line in payload.decode("utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        stratum = stratum_of(_system_prompt(row))
+        stratum, reason = stratum_of(_system_prompt(row))
         counts[stratum] += 1
+        if reason is not None:
+            reasons[reason] += 1
         source = str(row.get("source", "unknown"))
-        by_source.setdefault(source, {MULTI: 0, SINGLE: 0, UNPARSEABLE: 0})[stratum] += 1
+        by_source.setdefault(source, {MULTI: 0, SINGLE: 0, INELIGIBLE: 0})[stratum] += 1
 
     classifiable = counts[MULTI] + counts[SINGLE]
     return {
@@ -108,6 +128,7 @@ def composition(pool_path: Path) -> dict[str, Any]:
         "sha256": hashlib.sha256(payload).hexdigest(),
         "rows": sum(counts.values()),
         "counts": counts,
+        "ineligible_reasons": reasons,
         "classifiable": classifiable,
         "multi_share": (counts[MULTI] / classifiable) if classifiable else None,
         "by_source": by_source,
@@ -128,7 +149,7 @@ def main() -> None:
     print(f"  rows          {receipt['rows']}")
     print(f"  multi         {counts[MULTI]}")
     print(f"  single        {counts[SINGLE]}")
-    print(f"  unparseable   {counts[UNPARSEABLE]}")
+    print(f"  ineligible    {counts[INELIGIBLE]}  {receipt['ineligible_reasons']}")
     if receipt["multi_share"] is not None:
         print(f"  multi share   {receipt['multi_share'] * 100:.1f}% of classifiable")
     for source, breakdown in sorted(receipt["by_source"].items()):

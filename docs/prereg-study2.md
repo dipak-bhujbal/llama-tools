@@ -140,10 +140,21 @@ presents:
 > **`multi` = 2 or more tools presented. `single` = exactly 1.**
 >
 > The tool list is parsed from the prompt's system message under **both** pinned formats:
-> the `Tools:` JSON array, and the longest well-formed JSON array inside `<tools>…</tools>`.
-> A prompt whose tool list parses under neither is **not mined**, and is recorded in the
-> **pre-mining eligibility artifact** (`mining/pool_strata.py`), never as a mining-ledger
-> record. It enters neither numerator nor denominator.
+> the `Tools:` JSON array, and any well-formed JSON array inside `<tools>…</tools>`. Where
+> more than one well-formed list is present, **the one with the most tools wins**, so a
+> prompt carrying a small example block alongside its real tool list is scored on the real
+> one.
+>
+> A prompt is **`ineligible`** — not mined, and in neither yield term — if its tool list
+> parses under neither format (`no_tool_list`), **or if it parses to zero tools**
+> (`zero_tools`). A zero-tool prompt is readable and still has nothing for the model to
+> call; letting it fall through to `single` would place a prompt that can never yield a
+> pair into the denominator, and into the weight for a stratum it is not in. The two
+> reasons are counted separately, because one is a parser gap worth fixing and the other is
+> the data being what it is.
+>
+> Ineligible prompts are recorded in the **pre-mining eligibility artifact**
+> (`mining/pool_strata.py`), never as a mining-ledger record.
 
 Recording it in the ledger would do the opposite of what is intended: `mining/ledger.py`
 treats every active non-control record as one unit of completed work, so an
@@ -245,11 +256,15 @@ Measured by `mining/pool_strata.py` over `data/processed/sft_dedup.jsonl` (sha25
 `e6f4b16a606aa7846f5563d889a1d6b42bb817b7ea973c47a0f895bb5f9cbc11`), receipt committed at
 `mining/receipts/sft_dedup_strata.json`:
 
-| source | multi | single | unparseable |
+| source | multi | single | ineligible |
 |---|---:|---:|---:|
 | `xlam` | 8,117 | 2,882 | 0 |
 | `hermes` | 882 | 274 | 5 |
 | **total** | **8,999** | **3,156** | **5** |
+
+All 5 ineligible rows are `no_tool_list`; the pool contains **no** zero-tool
+prompts (`zero_tools: 0`). The distinction is recorded because the rule must be right before
+a pool that does contain them is mined, not after.
 
 `xlam` multi-tool reproduces §1's 8,117 exactly, which is what identifies the defect rather
 than merely disagreeing with it. Across both formats the share is **74.0%
