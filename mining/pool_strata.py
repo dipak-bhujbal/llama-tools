@@ -321,6 +321,18 @@ def target_defects(pool_path: Path) -> dict[str, Any]:
 
     eligible = call_targets + no_call_targets + len(unreadable)
     return {
+        # Retained = what survives the exclusion rule. It exceeds `call_targets`
+        # by exactly `no_call_targets`, because a prose target is a valid
+        # training row that simply is not a call. Naming only one of the two
+        # made a 10-row gap look like an unexplained category.
+        "retained_rows": call_targets + no_call_targets,
+        "excluded_rows": len(unreadable),
+        "reconciliation": (
+            f"eligible {eligible} = call {call_targets} + no_call {no_call_targets} "
+            f"+ unreadable {len(unreadable)}; retained {call_targets + no_call_targets} "
+            f"= eligible - unreadable; prompt_ineligible {prompt_ineligible} is outside "
+            f"eligible entirely"
+        ),
         "pool_path": pool_path.name,
         "sha256": hashlib.sha256(payload).hexdigest(),
         "raw_rows": raw_rows,

@@ -347,16 +347,42 @@ targets are `<tool_call>` blocks carrying no top-level `name` — their only top
 
 No name defects were found among the 12,072 targets that *are* well-formed.
 
-> **@dipak: repairing these 56 rows is a material data change and neither agent should
-> make it silently.** Two options, both requiring your decision:
+**Owner decision, #general msg 2134: (b) preregistered exclusion.**
+
+> **The exclusion is defined by rule, not by list.** A pool row is excluded from the mining
+> population if its assistant target **fails the call-parse preflight** — a target that
+> declares itself a tool call, or JSON, and yields no top-level string `name`. Membership is
+> re-derived from this rule against whatever revision is pinned; it is never inherited from a
+> frozen list of ids.
 >
-> **(a) Documented deterministic repair** — lift the nested `arguments.name` to top level
-> under a committed, tested transform, producing a new cleaned revision with its own sha256.
-> Recovers 56 rows; changes training data.
+> The receipt records that rule's **current output**: 56 rows at
+> `sft_dedup_v2.jsonl` sha256 `9e5b7b4f3a5990b5…`, all identities committed. A future
+> revision recomputes membership rather than carrying these ids forward, so the list can
+> never silently diverge from the rule that produced it.
 >
-> **(b) Preregistered exclusion** — declare these rows out of the mining population here,
-> before any generation, with the count and the reason recorded. Loses 56 rows of
-> 12,138 (0.5%); changes nothing else.
+> **The population is defined post-exclusion.** The exclusion is part of the population's
+> definition, not a deletion from it — fixed before any generation, by a deterministic
+> structural rule that no model output touches. §2.5's weights are derived over this
+> post-exclusion, post-decontamination population, so the exclusion's systematic single-tool
+> skew is *described* by the weights rather than hidden beneath them.
+
+**Why exclusion rather than repair, recorded so the reasoning survives the decision.** The
+nested `arguments.name` is a strong hint about intent, not a certainty: a row corrupt in one
+place is a row whose intent is being guessed at, and 56 guessed ground truths entering the
+pool as *verification keys* is synthesized provenance for a 0.46% gain.
+
+**Inclusion would not have been neutral.** A tool-call block with no top-level `name` fails
+call-parse, and a naive loader classifies a failed call-parse as a **no-call** ground truth —
+"the correct behaviour here is a text answer". Every correct tool-call attempt on those 56
+prompts would then grade as a spurious call, minting preference pairs that teach the model
+*not* to call tools on prompts that wanted them. Inverted training signal, systematically,
+on all 56. This preflight closed a live path to poisoned pairs; it did not find a cosmetic
+defect. That is why §2.8's classifier distinguishes `unreadable` from `no_call` rather than
+collapsing both into "not a call".
+
+**Count reconciliation** (eligible 12138 = call 12072 + no_call 10 + unreadable 56; retained 12082 = eligible - unreadable; prompt_ineligible 5 is outside eligible entirely). Retained (12,082) exceeds
+well-formed call targets (12,072) by exactly the 10
+`no_call` rows, which are legitimate training data and are kept.
 
 An earlier version of this section reported `unreadable: 0, passed: true`. That receipt was
 invalid: the parser fell back to a regex search for `"name"`, which matched the *nested*
