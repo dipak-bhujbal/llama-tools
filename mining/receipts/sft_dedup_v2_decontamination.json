@@ -4,7 +4,7 @@
   "implementation": [
     {
       "path": "mining/decontaminate_pool.py",
-      "sha256": "028798411955f162c9047ee3508413b20559bcf554a8c18994ea4951003c14a6"
+      "sha256": "af3f41485b11a321754f6db4e6205c38fbc607dfe19eb52997d390e7b288df1e"
     },
     {
       "path": "mining/decontaminate.py",

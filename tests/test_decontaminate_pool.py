@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from mining.decontaminate_pool import CRITERION_ID, DecontaminationError, build_artifact
+from mining.pool_strata import target_defects
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
@@ -39,14 +40,21 @@ def _pool(tmp_path: Path, rows: list[dict]) -> Path:
 
 
 def _preflight(tmp_path: Path, pool: Path, **overrides) -> Path:
-    """A matching eligibility receipt. The producer refuses to screen without
-    one that is about this pool and passed, so fixtures must supply it."""
+    """A matching eligibility receipt, carrying this pool's *real* counts.
+
+    An earlier version wrote zeros and was accepted, which is exactly the gap it
+    should have been proving does not exist: the producer re-derives these and
+    now refuses a receipt that describes a different population.
+    """
+    report = target_defects(pool)
     receipt = {
         "sha256": hashlib.sha256(pool.read_bytes()).hexdigest(),
         "criterion_id": "pool-target-structural-eligibility/v1",
         "passed": True,
-        "raw_rows": 0, "prompt_ineligible": 0,
-        "structurally_excluded": 0, "retained_rows": 0,
+        "raw_rows": report["raw_rows"],
+        "prompt_ineligible": report["prompt_ineligible"],
+        "structurally_excluded": report["structurally_excluded"],
+        "retained_rows": report["retained_rows"],
     }
     receipt.update(overrides)
     path = tmp_path / "preflight.json"
@@ -159,7 +167,7 @@ def test_a_failed_preflight_refuses_to_screen(tmp_path: Path) -> None:
     pool = _pool(tmp_path, rows)
     preflight = _preflight(tmp_path, pool, passed=False)
 
-    with pytest.raises(DecontaminationError, match="passed=false"):
+    with pytest.raises(DecontaminationError, match="which is not True"):
         build_artifact(pool, MANIFEST, preflight)
 
 
@@ -190,3 +198,25 @@ def test_the_committed_artifact_reconciles(tmp_path: Path) -> None:
     assert (w["n_multi"], w["n_single"], w["N"]) == (
         art["survivors"]["multi"], art["survivors"]["single"], art["survivors"]["total"],
     )
+
+
+def test_a_receipt_whose_counts_disagree_is_refused(tmp_path: Path) -> None:
+    """Embedding the counts without comparing them let the artifact cite a
+    receipt describing a different population."""
+    rows = [_row("a", ["qq.x"], "text", '[{"name": "qq.x", "arguments": {}}]')]
+    pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool, retained_rows=99)
+
+    with pytest.raises(DecontaminationError, match="disagrees with the re-derived population"):
+        build_artifact(pool, MANIFEST, preflight)
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, "yes"])
+def test_a_non_boolean_passed_cannot_open_the_gate(tmp_path: Path, value) -> None:
+    """A fail-closed gate must not be opened by a truthy string or integer."""
+    rows = [_row("a", ["qq.x"], "text", '[{"name": "qq.x", "arguments": {}}]')]
+    pool = _pool(tmp_path, rows)
+    preflight = _preflight(tmp_path, pool, passed=value)
+
+    with pytest.raises(DecontaminationError, match="which is not True"):
+        build_artifact(pool, MANIFEST, preflight)

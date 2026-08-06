@@ -94,8 +94,13 @@ def _verify_preflight(preflight_path: Path, pool_sha: str) -> dict[str, Any]:
         raise DecontaminationError(
             f"preflight criterion {receipt.get('criterion_id')!r} != {ELIGIBILITY_CRITERION_ID!r}"
         )
-    if not receipt.get("passed"):
-        raise DecontaminationError("preflight receipt records passed=false; refusing to screen")
+    # `is True`, not truthiness: a fail-closed gate must not be opened by the
+    # string "false", or by 1, or by any other value that happens to be truthy.
+    if receipt.get("passed") is not True:
+        raise DecontaminationError(
+            f"preflight receipt records passed={receipt.get('passed')!r}, which is not True; "
+            f"refusing to screen"
+        )
     return {
         "path": _relative(preflight_path),
         "sha256": _digest(raw),
@@ -172,6 +177,25 @@ def build_artifact(
         else:
             survivors[stratum] += 1
             survivor_ids.append(row_id)
+
+    # The receipt's headline reconciliation must agree with what we just
+    # re-derived. Embedding the counts without comparing them let an artifact
+    # cite a receipt describing a different population.
+    derived = {
+        "raw_rows": prompt_ineligible + structurally_excluded + len(eligible),
+        "prompt_ineligible": prompt_ineligible,
+        "structurally_excluded": structurally_excluded,
+        "retained_rows": len(eligible),
+    }
+    disagreements = {
+        field: {"receipt": preflight["counts"][field], "derived": value}
+        for field, value in derived.items()
+        if preflight["counts"][field] != value
+    }
+    if disagreements:
+        raise DecontaminationError(
+            f"preflight receipt disagrees with the re-derived population: {disagreements}"
+        )
 
     n_multi, n_single = survivors[MULTI], survivors[SINGLE]
     total = n_multi + n_single

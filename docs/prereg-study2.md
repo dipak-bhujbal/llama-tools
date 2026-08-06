@@ -198,7 +198,7 @@ the literal 65/35 of the earlier instruction — that figure descends from a com
 that could read only one of the pool's two prompt formats (§2.6). The rule:
 
 **Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, sha256
-`003c5cbecd663303ea9594c405f4eac4b5a7654923e1f228388b4d041dc2c760`, criterion
+`fb7a0200dbeeabb831006eeb800a23d3c92d89a468666c61b098ca1277231906`, criterion
 `bfcl-pool-decontamination/v1`):
 
 > **`(n_multi, n_single, N)` = (8,173, 2,997, 11,170)**
