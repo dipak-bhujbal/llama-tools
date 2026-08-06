@@ -1,10 +1,10 @@
 {
   "what_this_is": "Software cross-implementation conformance vectors for Tango's score confidence interval. These are outputs of an independent third-party implementation, recorded so this repository's implementation can be checked against something other than itself.",
-  "what_this_is_not": "NOT a reproduction of a primary-paper worked table: Tango (1998) Stat Med 17:891-908 is paywalled and no accessible worked values were found (searched 2026-08-06). NOT study evidence, NOT a model result, and NOT usable as any number in the write-up.",
+  "what_this_is_not": "NOT a reproduction of a primary-paper worked table: Tango (1998) Stat Med 17:891-908 is paywalled and no accessible worked values were found (searched 2026-08-06). NOT study evidence, NOT a model result, and NOT usable as any number in the write-up. Every input count below is arbitrary and synthetic; none is derived from any study run, generation set, or measured result.",
   "oracle": {
     "package": "PropCIs",
     "version": "0.3-0",
-    "license": "GPL-2 | GPL-3 - incompatible with this repository's Apache-2.0, so the package is used strictly as a black-box oracle; no PropCIs code is copied, translated, or vendored here",
+    "license": "GPL-2 | GPL-3. This repository is Apache-2.0 and stays Apache-only: vendoring or translating PropCIs code would take on GPL distribution obligations for this repo, so the package is used strictly as a black-box oracle and none of its code is copied.",
     "archive_url": "https://CRAN.R-project.org/src/contrib/PropCIs_0.3-0.tar.gz",
     "archive_sha256": "cd35775f4d36e642663e727450c53708f17b3c4340e1bc2c1752fd17118a9ffb",
     "r_version": "R version 4.4.2 (2024-10-31)",
@@ -57,22 +57,6 @@
       "upper": -0.011619749069213856
     },
     {
-      "b": 13,
-      "c": 3,
-      "n": 400,
-      "conf_level": 0.95,
-      "lower": -0.04827690273523331,
-      "upper": -0.006166501343250278
-    },
-    {
-      "b": 3,
-      "c": 13,
-      "n": 400,
-      "conf_level": 0.95,
-      "lower": 0.006166562438011172,
-      "upper": 0.04827690273523331
-    },
-    {
       "b": 0,
       "c": 5,
       "n": 25,
@@ -103,6 +87,22 @@
       "conf_level": 0.95,
       "lower": -1.0,
       "upper": -0.8573047518730164
+    },
+    {
+      "b": 11,
+      "c": 4,
+      "n": 320,
+      "conf_level": 0.95,
+      "lower": -0.04968377873301506,
+      "upper": 0.00209718327969313
+    },
+    {
+      "b": 4,
+      "c": 11,
+      "n": 320,
+      "conf_level": 0.95,
+      "lower": -0.00209718327969313,
+      "upper": 0.049683837033808236
     }
   ]
 }

@@ -70,6 +70,12 @@ def holm_adjust(p_values: list) -> list:
     return adjusted
 
 
+# Bisection tolerance for the interval endpoints. Deliberately not a parameter:
+# a caller passing something coarse would get a confidently-wrong interval back,
+# and no caller has a reason to want a looser one.
+_ENDPOINT_TOLERANCE = 1e-12
+
+
 def _constrained_p21(b: int, c: int, n: int, delta: float) -> float:
     """Constrained ML estimate of `p21` under H0: difference = `delta`.
 
@@ -96,8 +102,7 @@ def tango_score(b: int, c: int, n: int, delta: float) -> float:
     return (c - b - n * delta) / math.sqrt(variance)
 
 
-def tango_interval(b: int, c: int, n: int, conf_level: float = 0.95,
-                   tolerance: float = 1e-12) -> tuple[float, float]:
+def tango_interval(b: int, c: int, n: int, conf_level: float = 0.95) -> tuple[float, float]:
     """Tango's score confidence interval for the paired difference of proportions.
 
     **Direction convention, stated because sign errors here are silent:** `b` is
@@ -114,6 +119,11 @@ def tango_interval(b: int, c: int, n: int, conf_level: float = 0.95,
     discordant item favours the reference, so the lower endpoint is the boundary
     value -1; with `c == n`, the upper endpoint is +1.
     """
+    # Counts, not measurements. A fractional `b` would sail through the algebra
+    # and return a confident-looking number for an input that cannot exist.
+    for label, value in (("b", b), ("c", c), ("n", n)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{label} must be an integer count, got {value!r}")
     if n <= 0:
         raise ValueError(f"n must be positive, got {n}")
     if b < 0 or c < 0:
@@ -134,7 +144,7 @@ def tango_interval(b: int, c: int, n: int, conf_level: float = 0.95,
                 low = mid
             else:
                 high = mid
-            if high - low < tolerance:
+            if high - low < _ENDPOINT_TOLERANCE:
                 break
         return 0.5 * (low + high)
 
@@ -228,9 +238,11 @@ def main() -> None:
         f"verdicts use Holm-adjusted p at alpha={args.alpha}."
     )
     print(
-        "Tango score intervals are 95% and for candidate - reference, in "
-        "percentage points; reported regardless of direction or significance "
-        "(prereg A1.4), and never Holm-adjusted — an interval is not a test."
+        "Tango score intervals are nominal, unadjusted 95% intervals for "
+        "candidate - reference, in percentage points. Prereg A1.4 reports them "
+        "regardless of direction or significance, and they never determine the "
+        "verdict: verdicts use the Holm-adjusted p-values above. An unadjusted "
+        "interval can exclude zero while the adjusted test does not reject."
     )
 
     if args.out:

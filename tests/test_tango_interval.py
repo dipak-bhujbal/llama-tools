@@ -18,7 +18,9 @@ Two independent kinds of check, because either alone leaves a hole:
 
 The oracle is software conformance data. It is **not** a primary-paper
 reproduction (Tango 1998 is paywalled and no accessible worked table was found)
-and **not** study evidence.
+and **not** study evidence. Every input count here is arbitrary and synthetic;
+none is taken from a study run, and no fixture in this file has ever been
+derived from measured outcomes.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def test_matches_the_propcis_oracle(b: int, c: int, n: int, lower: float, upper:
     assert mine_high == pytest.approx(upper, abs=ORACLE_TOLERANCE)
 
 
-@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (13, 3, 400), (2, 2, 30), (1, 7, 50)])
+@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (11, 4, 320), (2, 2, 30), (1, 7, 50)])
 def test_the_endpoints_solve_the_score_equation(b: int, c: int, n: int) -> None:
     """The interval is `{delta : |z(delta)| <= z_crit}`, so its endpoints are
     exactly where the score statistic hits ±z. This is what the oracle cannot
@@ -62,7 +64,7 @@ def test_the_endpoints_solve_the_score_equation(b: int, c: int, n: int) -> None:
     assert tango_score(b, c, n, high) == pytest.approx(-Z_95, abs=1e-9)
 
 
-@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (3, 13, 400), (0, 0, 100), (0, 5, 25)])
+@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (4, 11, 320), (0, 0, 100), (0, 5, 25)])
 def test_the_interval_brackets_its_own_point_estimate(b: int, c: int, n: int) -> None:
     low, high = tango_interval(b, c, n)
     point = (c - b) / n
@@ -70,7 +72,7 @@ def test_the_interval_brackets_its_own_point_estimate(b: int, c: int, n: int) ->
     assert low < point < high
 
 
-@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (13, 3, 400), (1, 7, 50), (0, 5, 25)])
+@pytest.mark.parametrize(("b", "c", "n"), [(40, 20, 160), (11, 4, 320), (1, 7, 50), (0, 5, 25)])
 def test_swapping_b_and_c_mirrors_the_interval(b: int, c: int, n: int) -> None:
     """`b` and `c` name which direction a disagreement went, so swapping them is
     a relabelling and must negate the interval exactly. A sign error that survives
@@ -110,8 +112,8 @@ def test_the_documented_degeneracies_hold(b: int, c: int, n: int) -> None:
 
 
 def test_a_wider_confidence_level_gives_a_wider_interval() -> None:
-    narrow = tango_interval(13, 3, 400, conf_level=0.90)
-    wide = tango_interval(13, 3, 400, conf_level=0.99)
+    narrow = tango_interval(11, 4, 320, conf_level=0.90)
+    wide = tango_interval(11, 4, 320, conf_level=0.99)
 
     assert wide[0] < narrow[0] < narrow[1] < wide[1]
 
@@ -125,6 +127,12 @@ def test_a_wider_confidence_level_gives_a_wider_interval() -> None:
         ({"b": 6, "c": 6, "n": 10}, "exceeds"),
         ({"b": 1, "c": 1, "n": 10, "conf_level": 0.0}, "conf_level"),
         ({"b": 1, "c": 1, "n": 10, "conf_level": 1.0}, "conf_level"),
+        # Counts, not measurements: fractional inputs cannot exist and the
+        # algebra would happily return a confident-looking number for them.
+        ({"b": 1.2, "c": 2, "n": 10}, "integer count"),
+        ({"b": 1, "c": 2.5, "n": 10}, "integer count"),
+        ({"b": 1, "c": 2, "n": 10.5}, "integer count"),
+        ({"b": True, "c": 2, "n": 10}, "integer count"),
     ],
 )
 def test_invalid_inputs_raise_rather_than_returning_a_number(kwargs, message) -> None:
@@ -144,7 +152,9 @@ def test_compare_exposes_the_interval_for_every_contrast() -> None:
         tango_interval(row["reference_only_correct"], row["candidate_only_correct"],
                        row["n_items"])
     )
-    # An interval is not a test and is never multiplicity-adjusted (A1.4).
+    # The interval is nominal and unadjusted; the Holm-adjusted p-value is what
+    # decides the verdict (A1.4). A score CI is dual to a family of score tests,
+    # so "it isn't a test" would be false — the point is which one governs.
     assert "p_holm_adjusted" in row
     assert len(row["tango_ci_95"]) == 2
 
@@ -158,4 +168,5 @@ def test_the_oracle_fixture_states_what_it_is_and_is_not() -> None:
     )
     assert "GPL" in ORACLE["oracle"]["license"]
     assert "NOT a reproduction of a primary-paper worked table" in ORACLE["what_this_is_not"]
+    assert "arbitrary and synthetic" in ORACLE["what_this_is_not"]
     assert len(ORACLE["vectors"]) == 11
