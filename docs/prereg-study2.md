@@ -830,9 +830,10 @@ control** (ADR-007's lesson, retained).
    **Both thresholds are absolute and do not depend on the baseline's level.** A 3-item loss
    is a 3/258 = 1.16-point loss whether shipped SFT scores 240 or 140 on `D`; a 26-item loss
    is 10.0 points on either. Decision C moved `D` from a single-tool set to a multi-tool one,
-   and **neither candidate's baseline has ever been measured** — study 1 scored
-   `simple_python`, not `live_simple` — so the change is one of structure, not of a known
-   difficulty level. **That changes nothing here by design.** Any baseline-dependent replacement — a margin scaled to headroom,
+   and **no committed artifact measures either candidate's baseline** — study 1's committed
+   scores are for `simple_python`, not `live_simple` — so the change is one of structure, not
+   of a known difficulty level. **That changes nothing here by design.** Any
+   baseline-dependent replacement — a margin scaled to headroom,
    to `n_base`, or to anything else — requires an **exact pre-stated function and an owner
    amendment before arm 1**. It may never be introduced as judgement applied after `n_base`
    is observed, which would be a threshold chosen in sight of the data it judges.
