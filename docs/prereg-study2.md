@@ -197,7 +197,20 @@ Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weigh
 the literal 65/35 of the earlier instruction — that figure descends from a composition count
 that could read only one of the pool's two prompt formats (§2.6). The rule:
 
-The rule referred to by option (a):
+**Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, criterion
+`bfcl-pool-decontamination/v1`):
+
+> **`(n_multi, n_single, N)` = (8,173, 2,997, 11,170)**
+>
+> Stored as exact integers. The multi share
+> 8173/11170 = 73.169% is **derived at display time and
+> never stored**, so `P_std` is computed from exact ratios.
+
+12143 cleaned source - 5 prompt-ineligible - 56 target-structural exclusions = 12082 screen inputs; of those, 912 were dropped
+({'fn_name': 911, 'ngram_overlap': 1}) leaving 11,170 survivors. §1's 12,160-row figures remain
+non-comparable: different source revision, different denominator.
+
+The rule this implements:
 
 > `w_s` = (active post-screen prompts in stratum `s`) / (all active post-screen prompts),
 > computed from the **committed, hash-pinned decontamination artifact** over the mining
@@ -398,7 +411,7 @@ invalid: the parser fell back to a regex search for `"name"`, which matched the 
 argument key and reported these 56 malformed targets as valid calls. A check that
 invents the value it is checking is worse than no check, and the fallback has been removed.
 
-### 2.9 The decontamination artifact `[spec pinned; not yet built]`
+### 2.9 The decontamination artifact `[built; awaiting codex review]`
 
 Spec settled in #general msgs 2143 and 2150, recorded here so the implementer works from the
 preregistration rather than from chat. **Exclusion precedes screening**, so the screen input
