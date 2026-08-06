@@ -850,8 +850,9 @@ control** (ADR-007's lesson, retained).
 
 **Exact McNemar against the frozen baseline is still computed at every look and recorded** —
 `b`, `c`, and the p-value against `α_look` (§3.8) — as a **reported diagnostic**. It triggers
-no kill. Checkpoint-to-checkpoint McNemar comparisons have the separate, narrow authority
-stated in §3.9: defining the statistically indistinguishable top set after training.
+no kill, and since Decision A (§3.9) **no McNemar comparison of any kind has authority over
+selection either**: the tie set is an absolute item cap. Every McNemar figure in this study is
+now a recorded number that governs nothing.
 
 A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
 silently replaced by another arm or another seed.
@@ -917,9 +918,9 @@ specified the one above (#general msg 2292), naming the defect in his own rider:
 intent — *"a point apart is noise"* — and then named a mechanism that contradicts it by a
 factor of six. Two things were wrong with borrowing that threshold:
 
-- **`α_look` was calibrated for a different question.** It exists so an arm is rarely killed
-  by chance across up to 20 looks (§3.8). Nothing about that calibration makes it a tie
-  detector.
+- **`α_look` was calibrated for a different question.** It *was originally* set so an arm
+  would rarely be killed by chance across up to 20 looks. Nothing about that calibration makes
+  it a tie detector — and after Decision A nothing mechanical depends on it at all (§3.8).
 - **Failing to reject is not equivalence.** A 6-point gap that misses significance at
   `α = 0.0025` is not a tie; it is a difference the test was underpowered to confirm. Calling
   it a tie is the same error, one level down, that §3.9's eligibility margin already fixed by
@@ -928,21 +929,32 @@ factor of six. Two things were wrong with borrowing that threshold:
 **And the wide reading was not merely conservative — it was directionally biased against the
 candidate.** With everything inside a ~6-point band tying and step count deciding, the rule
 collapses to *final-checkpoint-unless-vetoed*: Option B wearing §6-compliant clothing. Against
-a peak-then-degrade trajectory — the only shape this intervention family has exhibited, where
-study 1's committed per-item rows give 364 / 363 / 359 correct at steps 50 / 100 / 150 — it
-would systematically select **past** the peak. Decision C's entire selection benefit would
-evaporate at the moment of selection.
+a peak-then-degrade trajectory — **the only trajectory study 1 observed**, where its committed
+per-item rows give 364 / 363 / 359 correct at steps 50 / 100 / 150 — it would systematically
+select **past** the peak. Decision C's entire selection benefit would evaporate at the moment
+of selection. One trajectory is not a law, which is why this is an argument about the rule's
+direction of bias rather than a prediction about study 2's curve.
 
 **Why `K = 3` items.** It is unit-exact — items, not points with rounding ambiguity — and
-`3 / 258 = 1.16 points` is the literal calibration of what the rider claimed. It lands against
-measured data rather than intuition: study 1's checkpoint-to-checkpoint spreads, recomputed
-from `eval/results/study1_bfcl_simple_generations.jsonl`, were **0.25 to 1.25 points**, which
-on a 258-item subset is **1 to 3 items**. So past-like noise spreads tie and step count
-protects against an undertrained winner, while **4 items or more (≥1.55 points) wins on
-merit**. `K = 5` (1.94 points, roughly one unpaired standard error at n = 258) was offered as
-an explicitly conservative alternative and is **not** taken: a wider band re-introduces the
-step-count bias this rule exists to remove, and the argument for narrowing does not stop
-halfway. Pinned now, before any curve exists that a choice of `K` could be made to flatter.
+`3 / 258 = 1.16 points` is **the nearest integral calibration to the rider's "a point
+apart"**.
+
+It is also anchored to measured data rather than intuition, with the arithmetic stated
+exactly rather than rounded in our favour. Study 1's checkpoint-to-checkpoint spreads,
+recomputed from `eval/results/study1_bfcl_simple_generations.jsonl`, were **0.25 to 1.25
+points on 400 items**. Carried across to a 258-item subset that is **0.65 to 3.23 items** — so
+`K = 3` covers most of that range but **not all of it**: a 1.25-point analogue lands just
+above the cap and would win on merit rather than tie. That is stated plainly because the
+tempting version of this sentence ("past-like noise spreads all tie") is false by a quarter of
+an item, and a preregistration that rounds in its own favour at the boundary is worth less
+than one that names the boundary. At the cap, **4 items = 1.55 points wins outright**.
+
+`K = 5` was offered as an explicitly conservative alternative and is **not** taken: a wider
+band re-introduces the step-count bias this rule exists to remove, and the argument for
+narrowing does not stop halfway. No standard-error justification is offered for either value —
+shipped SFT's accuracy on `D` is unmeasured until §3.3 runs, so any SE quoted for a 258-item
+subset today would be computed from an accuracy nobody has observed. Pinned now, before any
+curve exists that a choice of `K` could be made to flatter.
 
 **The eligibility margin is strictly tighter than the kill margin, and has to be.** The kill
 line fires at a 3-item loss sustained over two looks (§3.7 rule 4); an earlier draft made
@@ -954,11 +966,11 @@ last-look first strike may go un-killed (one look, no second to confirm), but it
 selected.
 
 This ranks first by the held-out task metric, as WORKING-AGREEMENT §6 requires, while refusing
-to let sub-resolution count noise automatically pick an earlier checkpoint. With at most 20
-saved looks there are at most 20 leader comparisons, so the `0.05 / L_max` threshold is fixed
-before the arm and does not tighten or loosen with its realized length. Not best `eval_loss`.
-Not best reward margins. Not any number from `multiple` or `simple_python` — **the final
-scoring sets are not opened until the checkpoint is already selected.**
+to let sub-resolution count noise automatically pick an earlier checkpoint. No threshold is
+inherited from the look schedule: the cap is `K` items, fixed here, and it neither tightens
+nor loosens with an arm's realized length. Not best `eval_loss`. Not best reward margins. Not
+any number from `multiple` or `simple_python` — **the final scoring sets are not opened until
+the checkpoint is already selected.**
 
 **Why an absolute margin and not a significance test.** An earlier draft made eligibility
 "not significantly worse at α = 0.05". That was wrong twice over: failing to reject harm is
