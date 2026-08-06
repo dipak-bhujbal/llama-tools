@@ -621,7 +621,7 @@ kill line and every eligibility test in §3.7 and §3.9 is denominated in items 
 number, so it is recorded as a first-class quantity, not as a by-product.
 
 Recording it changes no threshold. `D` is now a `live_multiple` subset rather than the
-near-ceiling `live_simple` candidate, so shipped SFT's accuracy on it is genuinely unknown
+single-tool `live_simple` candidate, so shipped SFT's accuracy on it is genuinely unknown
 until this run happens; **the rules do not care.** §3.7's kill margin and §3.9's eligibility
 margin are absolute item counts against `n_base` whatever `n_base` turns out to be (§3.7 rule
 4). `n_base` is reported because a reader should be able to see the baseline the thresholds
@@ -829,9 +829,10 @@ control** (ADR-007's lesson, retained).
 
    **Both thresholds are absolute and do not depend on the baseline's level.** A 3-item loss
    is a 3/258 = 1.16-point loss whether shipped SFT scores 240 or 140 on `D`; a 26-item loss
-   is 10.0 points on either. Decision C moved `D` from a near-ceiling single-tool set to a
-   harder multi-tool one whose baseline is unmeasured until §3.3 runs, and **that changes
-   nothing here by design.** Any baseline-dependent replacement — a margin scaled to headroom,
+   is 10.0 points on either. Decision C moved `D` from a single-tool set to a multi-tool one,
+   and **neither candidate's baseline has ever been measured** — study 1 scored
+   `simple_python`, not `live_simple` — so the change is one of structure, not of a known
+   difficulty level. **That changes nothing here by design.** Any baseline-dependent replacement — a margin scaled to headroom,
    to `n_base`, or to anything else — requires an **exact pre-stated function and an owner
    amendment before arm 1**. It may never be introduced as judgement applied after `n_base`
    is observed, which would be a threshold chosen in sight of the data it judges.
