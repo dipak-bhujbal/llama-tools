@@ -297,20 +297,28 @@ a parallel ablation arm later)
 
 ## 4. Task board (condensed)
 
-- [ ] P0.1-0.6 purge + restructure + guard script   [A]
-- [ ] P0.7 remote-history decision                  [H]
-- [ ] P1 self-test + pilot(100) + report            [A->G]
+- [x] P-1 input freeze: manifest, preflight, canonical key  [A] *(added ahead of P0)*
+- [x] P0.1-0.6 purge + restructure + guard script   [A]
+- [x] P0.7 remote-history decision                  [H] *(moot - never committed)*
+- [x] Paper: prereg Amendments 1 + 2 adopted        [A+H]
+- [x] Paper: §2 decisions taken (weights, population, exclusion)  [H]
+- [ ] **NEXT** exclusion-aware decontamination CLI + artifact  [A]  <- satisfies A2.2
+- [ ] §2.5 weights derived from that artifact; §2 frozen  [A+H]
+- [ ] Mining rewrite: promote mine_pairs around ledger/decontaminate  [A]
+- [ ] P1 self-test + pilot(100) + report            [A->G]  <- **first spend**
 - [ ] P1 full mine(1000) + commit evidence          [A]
 - [ ] P2 gate applied + countersigned               [A+H]
 - [ ] P2 human audit of 50 pairs + ambiguous rows   [H]
-- [ ] P3A prereg doc approved BEFORE runs           [A+H]
 - [ ] P3A train_dpo_v3.py + dry-run + arms          [A->G]
 - [ ] P3B rsft arm (branch or ablation)             [A]
 - [ ] P4 KTO arm                                    [A]
 - [ ] P5 frozen evals + CIs + results.json          [A->G]
-- [ ] P6 ADR-2 draft + staged artifacts             [A]
+- [ ] P6 ADR-009 draft + staged artifacts           [A]
 - [ ] P6 publish                                    [H]
 - [ ] P7 resume bullets from measured numbers       [H]
+
+*P3A's "prereg approved before runs" is folded into the §2 freeze row: the
+preregistration is one document, amended in place, not written per phase.*
 
 ---
 
