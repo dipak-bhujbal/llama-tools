@@ -615,6 +615,18 @@ from the reviewed completion record; if the file is missing, or its digest does 
 is scored once and never re-scored to "refresh" it: a second baseline would silently move
 every kill line and every selection that referenced the first.
 
+**The completion record states `n_base` explicitly** — the raw correct count out of 258 and
+the accuracy it implies — rather than leaving it to be re-derived from the outcome rows. Every
+kill line and every eligibility test in §3.7 and §3.9 is denominated in items against that one
+number, so it is recorded as a first-class quantity, not as a by-product.
+
+Recording it changes no threshold. `D` is now a `live_multiple` subset rather than the
+near-ceiling `live_simple` candidate, so shipped SFT's accuracy on it is genuinely unknown
+until this run happens; **the rules do not care.** §3.7's kill margin and §3.9's eligibility
+margin are absolute item counts against `n_base` whatever `n_base` turns out to be (§3.7 rule
+4). `n_base` is reported because a reader should be able to see the baseline the thresholds
+were applied to — not because seeing it licenses moving them.
+
 This baseline is one candidate × 258 greedy generations and is counted in §3.11.
 
 ### 3.4 Configuration — common settings, per-track schedules, and overrides `[candidate]`
@@ -814,6 +826,15 @@ control** (ADR-007's lesson, retained).
 
    Two consecutive looks for the ordinary rule, because a single look moves on noise; the
    collapse floor at one look, because a collapse should not have to wait for a second.
+
+   **Both thresholds are absolute and do not depend on the baseline's level.** A 3-item loss
+   is a 3/258 = 1.16-point loss whether shipped SFT scores 240 or 140 on `D`; a 26-item loss
+   is 10.0 points on either. Decision C moved `D` from a near-ceiling single-tool set to a
+   harder multi-tool one whose baseline is unmeasured until §3.3 runs, and **that changes
+   nothing here by design.** Any baseline-dependent replacement — a margin scaled to headroom,
+   to `n_base`, or to anything else — requires an **exact pre-stated function and an owner
+   amendment before arm 1**. It may never be introduced as judgement applied after `n_base`
+   is observed, which would be a threshold chosen in sight of the data it judges.
 
    **This replaced a significance-based trigger, and that was a real defect.** The earlier
    draft stopped only when the damage reached `α_look = 0.0025` on exact McNemar. On n = 258
@@ -1176,6 +1197,13 @@ the superseded language verbatim and supersedes it by reference.
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
 | 4 | 2026-08-06 | §2.5, §2.9 | **Candidate Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C, #general msg 2244; exact content pending review, publication, and adoption |
+
+**Note on this table's first column.** It is a chronological **record** number, not an
+amendment number, and the two do not line up. Records 1 and 2 carry numbered Amendments 1 and
+2; **record 3 is the §2 freeze, which is a freeze rather than a numbered amendment**; and
+numbered **Amendment 3 appears in record 4**. A citation of "Amendment 3" therefore means the
+body section of that name, found at record 4. The columns are left as they are rather than
+renumbered, because records already cited elsewhere must keep the numbers they were cited by.
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
 Argument-level matching semantics stay as `eval/bfcl_scoring.py` implements them
