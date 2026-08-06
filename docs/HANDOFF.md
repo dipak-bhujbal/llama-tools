@@ -302,9 +302,9 @@ a parallel ablation arm later)
 - [x] P0.7 remote-history decision                  [H] *(moot - never committed)*
 - [x] Paper: prereg Amendments 1 + 2 adopted        [A+H]
 - [x] Paper: §2 decisions taken (weights, population, exclusion)  [H]
-- [ ] **NEXT** exclusion-aware decontamination CLI + artifact  [A]  <- satisfies A2.2
-- [ ] §2.5 weights derived from that artifact; §2 frozen  [A+H]
-- [ ] Mining rewrite: **build** production `mining/mine_pairs.py` around ledger/
+- [x] exclusion-aware decontamination CLI + artifact  [A] *(A2.2 satisfied)*
+- [x] §2.5 weights (8173, 2997, 11170) derived; **§2 FROZEN** and published  [A+H]
+- [ ] **NEXT** Mining rewrite: **build** production `mining/mine_pairs.py` around ledger/
       decontaminate/pool_strata. The quarantined copy is **reference-only and must
       not be promoted unchanged** — it assigns `no_call` ground truth on parse
       failure, which mints inverted preference pairs.  [A]
