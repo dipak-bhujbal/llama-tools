@@ -326,26 +326,30 @@ Rows whose *prompt* is ineligible (§2.2) are counted as **not applicable** rath
 checked passes: the prompt is outside the mining population, so its target is not a target
 this study will use.
 
-**Result at the pinned revision** (`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`,
-receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
+**Current result at the pinned revision**, under the adopted exclusion rule
+(`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`, receipt at
+`mining/receipts/sft_dedup_v2_target_preflight.json`, criterion `pool-target-structural-eligibility/v1`):
 
 | | |
 |---|---:|
 | raw rows | 12,143 |
-| eligible rows | 12,138 |
+| prompt-ineligible (n/a, §2.2) | 5 |
+| structurally excluded (§2.8 rule) | 56 |
+| **retained** | **12,082** |
 | ├ call targets | 12,072 |
-| ├ no-call targets | 10 |
-| └ **unreadable** | **56** |
-| prompt-ineligible (n/a) | 5 |
-| name defects | 0 |
-| **passed** | **False** |
+| └ no-call targets | 10 |
+| retained name defects | 0 |
+| **passed** | **True** |
 
-**The preflight does not pass, and §2 cannot freeze until it does.** 56 eligible
-targets are `<tool_call>` blocks carrying no top-level `name` — their only top-level key is
-`arguments`, with the call's name nested inside it. They are not well-formed
-`{name, arguments}` calls, so this study cannot check what tool they teach.
+Eligible 12138 = call 12072 + no_call 10 + unreadable 56; retained 12082 = eligible - unreadable; prompt_ineligible 5 is outside eligible entirely. The CLI exits 0 here and exits non-zero on any retained
+name defect.
 
-No name defects were found among the 12,072 targets that *are* well-formed.
+*Historical note, kept because the discovery is the reason this clause exists.* Before the
+owner adopted (b), the same 56 rows were reported as `unreadable`
+with `passed: False`, and §2 was correctly blocked. Adopting the exclusion did not make the
+defect go away — it made the 56 rows a **declared, named output of
+a versioned rule** rather than an unhandled failure. Their identities are still committed in
+the receipt, and a name defect among the retained rows still fails closed.
 
 **Owner decision, #general msg 2134: (b) preregistered exclusion.**
 
