@@ -1,15 +1,10 @@
-"""Preflight for the study-2 development set `D` (prereg §3.2, candidate).
+"""Fail-closed preflight for study 2's Decision-C development set.
 
-`D` is the whole pinned `live_simple` category. Every property §3.2 claims about
-it — its digests, its size, the structural blind spot that decides the selection
-rule, and its disjointness from both final scoring sets — is checked here, so the
-document cannot state one thing while the data says another.
-
-The load-bearing one is `test_every_dev_item_presents_exactly_one_function`. §3.9
-selects checkpoints by step count among healthy ones rather than by dev accuracy
-*because* `D` cannot exercise ranking. If that ever stops being true, the reason
-for the selection rule has changed and the rule has to be re-argued, not quietly
-kept.
+The development set is a deterministic 258-item subset of the pinned
+`live_multiple` parent. These tests bind the input bytes, reproduce the seeded
+subset, enforce removal of the one final-set question collision, prove the
+mining pool was re-screened against the parent, and keep the whole parent
+category machine-labelled as development-only.
 """
 
 from __future__ import annotations
@@ -18,29 +13,40 @@ import hashlib
 import json
 from pathlib import Path
 
+from eval.bfcl_scoring import preflight_key_names
 from eval.fetch_pinned_bfcl import verify_payload
+from mining.dev_subset import build as build_dev_subset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA = REPO_ROOT / "eval" / "bfcl_data"
 MANIFEST = REPO_ROOT / "eval" / "manifests" / "bfcl_v4_study2.json"
-DECON_RECEIPT = REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_decontamination.json"
+DECON_RECEIPT = (
+    REPO_ROOT
+    / "mining"
+    / "receipts"
+    / "sft_dedup_v2_decontamination_with_live_multiple.json"
+)
+SUBSET_RECEIPT = REPO_ROOT / "mining" / "receipts" / "study2_dev_look_subset.json"
 
-DEV_CATEGORY = "live_simple"
-# The final scoring sets, with the row counts §3.2 and §4 both quote. n = 200 and
-# n = 400 are load-bearing: they are the denominators of the confirmatory and
-# retention contrasts and of A1.3's minimum-detectable-effect grid.
+DEV_CATEGORY = "live_multiple"
+DEV_ROLE = "development_selection_only"
 FINAL_CATEGORIES = {"multiple": 200, "simple_python": 400}
 
-# Quoted from prereg §3.2. Changing either side without the other is the defect
-# this file exists to catch.
+PARENT_ROW_COUNT = 1053
+ELIGIBLE_ROW_COUNT = 1052
 DEV_ROW_COUNT = 258
-DEV_QUESTIONS_SHA256 = "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4"
-DEV_ANSWER_KEY_SHA256 = "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce"
-DEV_SORTED_ID_SHA256 = "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
-MANIFEST_SHA256 = "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
-DISCLOSED_SHARED_FUNCTION_NAMES = {
-    "multiple": {"send_email"},
-    "simple_python": {"get_current_weather", "send_email"},
+DEV_QUESTIONS_SHA256 = "fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8"
+DEV_ANSWER_KEY_SHA256 = "97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084"
+PARENT_SORTED_ID_SHA256 = "96d9015b2f01ea9a9a090afa8bd8638d81dccccd07d6632379dfc79a35c213ae"
+DEV_SORTED_ID_SHA256 = "a91d8271224d7a50f68c27c0070b114173412c2591ba304ac7a6048506760b64"
+MANIFEST_SHA256 = "542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0"
+DECON_RECEIPT_SHA256 = "3daaffa85a2097468f53845d1cddf996a0e68a3605916e26918891c2972732b3"
+SUBSET_RECEIPT_SHA256 = "5a9510711adee429b8d0b2d7e20b35cb57278d052f39cb19d33f86a46b57b33b"
+
+OVERLAP_EXCLUSION = {
+    "id": "live_multiple_190-84-0",
+    "reason": "question_collision_with_final_set",
+    "collides_with": "multiple:multiple_26",
 }
 
 
@@ -53,133 +59,155 @@ def _questions(category: str) -> list[dict]:
     return _rows(DATA / f"BFCL_v4_{category}.json")
 
 
+def _answers(category: str) -> list[dict]:
+    return _rows(DATA / "possible_answer" / f"BFCL_v4_{category}.json")
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _presented_names(rows: list[dict]) -> set[str]:
-    return {fn["name"] for row in rows for fn in row["function"]}
+def _canonical_question(row: dict) -> str:
+    return json.dumps(row["question"], sort_keys=True, separators=(",", ":"))
+
+
+def _manifest() -> dict:
+    return json.loads(MANIFEST.read_text())
 
 
 def _manifest_entry(category: str, role: str) -> dict:
-    manifest = json.loads(MANIFEST.read_text())
     matches = [
         entry
-        for entry in manifest["files"]
+        for entry in _manifest()["files"]
         if entry["category"] == category and entry["role"] == role
     ]
     assert len(matches) == 1, f"expected exactly one {category}/{role} manifest entry"
     return matches[0]
 
 
-def test_manifest_itself_is_the_one_the_prereg_pins() -> None:
-    """§3.2 quotes the manifest's own sha256, and the decontamination receipt
-    records the same value. Every other pin in this file is read *through* the
-    manifest, so an unnoticed manifest edit would move them all at once."""
+def _by_id(rows: list[dict]) -> dict[str, dict]:
+    return {row["id"]: row for row in rows}
+
+
+def test_decision_c_artifacts_match_their_preregistered_digests() -> None:
     assert _sha256(MANIFEST) == MANIFEST_SHA256
-
-    receipt = json.loads(DECON_RECEIPT.read_text())
-    assert receipt["manifest"]["sha256"] == MANIFEST_SHA256, (
-        "the frozen decontamination artifact screened against a different "
-        "manifest revision than §3.2 pins"
-    )
+    assert _sha256(DECON_RECEIPT) == DECON_RECEIPT_SHA256
+    assert _sha256(SUBSET_RECEIPT) == SUBSET_RECEIPT_SHA256
 
 
-def test_final_scoring_sets_have_the_row_counts_the_analysis_assumes() -> None:
-    """n = 200 and n = 400 are the denominators §4's contrasts are sized on."""
+def test_final_scoring_sets_have_the_roles_and_counts_the_analysis_assumes() -> None:
+    categories = _manifest()["categories"]
+    assert {
+        category
+        for category, spec in categories.items()
+        if spec.get("study2_role") == "final_scoring"
+    } == set(FINAL_CATEGORIES)
+
     for category, expected_rows in FINAL_CATEGORIES.items():
         entry = _manifest_entry(category, "questions")
         path = REPO_ROOT / entry["local_path"]
-
         assert entry["row_count"] == expected_rows
         assert entry["unique_id_count"] == expected_rows
         assert len(_rows(path)) == expected_rows
         verify_payload(path.read_bytes(), entry)
 
 
-def test_dev_files_match_their_manifest_pins() -> None:
+def test_live_multiple_parent_files_match_their_manifest_pins() -> None:
     for role, expected_sha in (
         ("questions", DEV_QUESTIONS_SHA256),
         ("answer_key", DEV_ANSWER_KEY_SHA256),
     ):
         entry = _manifest_entry(DEV_CATEGORY, role)
         path = REPO_ROOT / entry["local_path"]
-
-        assert entry["sha256"] == expected_sha, f"{role}: manifest pin moved off §3.2"
-        assert _sha256(path) == expected_sha, f"{role}: file no longer matches its pin"
-        assert entry["row_count"] == DEV_ROW_COUNT
-        assert entry["unique_id_count"] == DEV_ROW_COUNT
-        assert entry["sorted_id_sha256"] == DEV_SORTED_ID_SHA256
-
-
-def test_dev_set_size_and_ids_are_what_the_prereg_says() -> None:
-    """Verified through the fetcher's own checker, not a second recipe.
-
-    The sorted-id digest has an exact serialization, and re-deriving it here
-    would let this file agree with itself while disagreeing with the code that
-    fetches the data.
-    """
-    rows = _questions(DEV_CATEGORY)
-    ids = [row["id"] for row in rows]
-
-    assert len(rows) == DEV_ROW_COUNT
-    assert len(set(ids)) == DEV_ROW_COUNT
-
-    for role in ("questions", "answer_key"):
-        entry = _manifest_entry(DEV_CATEGORY, role)
-        payload = (REPO_ROOT / entry["local_path"]).read_bytes()
-        verify_payload(payload, entry)  # raises VerificationError on any mismatch
+        assert entry["sha256"] == expected_sha
+        assert _sha256(path) == expected_sha
+        assert entry["row_count"] == PARENT_ROW_COUNT
+        assert entry["unique_id_count"] == PARENT_ROW_COUNT
+        assert entry["sorted_id_sha256"] == PARENT_SORTED_ID_SHA256
+        verify_payload(path.read_bytes(), entry)
 
 
-def test_every_dev_item_presents_exactly_one_function() -> None:
-    """§3.2's structural blind spot, and therefore §3.9's selection rule."""
-    counts = {len(row["function"]) for row in _questions(DEV_CATEGORY)}
+def test_live_multiple_parent_is_key_valid_and_can_measure_tool_ranking() -> None:
+    questions = _questions(DEV_CATEGORY)
+    answers = _answers(DEV_CATEGORY)
+    question_by_id = _by_id(questions)
+    answer_by_id = _by_id(answers)
 
-    assert counts == {1}, (
-        "live_simple no longer presents exactly one candidate function per item; "
-        "prereg §3.2's blind-spot argument and §3.9's selection rule both depend "
-        "on this and must be re-argued before an arm runs"
-    )
+    assert len(question_by_id) == len(answer_by_id) == PARENT_ROW_COUNT
+    assert set(question_by_id) == set(answer_by_id)
+    assert {len(row["ground_truth"]) for row in answers} == {1}
+    assert min(len(row["function"]) for row in questions) == 2
+    assert max(len(row["function"]) for row in questions) == 37
+    assert preflight_key_names(question_by_id, answer_by_id) == PARENT_ROW_COUNT
 
 
-def test_dev_set_is_disjoint_from_both_final_scoring_sets() -> None:
-    dev = _questions(DEV_CATEGORY)
-    dev_ids = {row["id"] for row in dev}
-    dev_questions = {json.dumps(row["question"], sort_keys=True) for row in dev}
+def test_seeded_subset_receipt_regenerates_exactly() -> None:
+    committed = json.loads(SUBSET_RECEIPT.read_text())
+    assert build_dev_subset(MANIFEST) == committed
+    assert committed["criterion_id"] == "study2-dev-look-subset/v1"
+    assert committed["seed"] == "study2-dev-look-subset/v1:20260806"
+    assert committed["source"]["rows"] == PARENT_ROW_COUNT
+    assert committed["eligible_rows"] == ELIGIBLE_ROW_COUNT
+    assert committed["subset_size"] == DEV_ROW_COUNT
+    assert len(committed["selected_ids"]) == DEV_ROW_COUNT
+    assert len(set(committed["selected_ids"])) == DEV_ROW_COUNT
+    assert committed["sorted_id_sha256"] == DEV_SORTED_ID_SHA256
 
+
+def test_the_only_final_question_overlap_is_excluded_before_sampling() -> None:
+    receipt = json.loads(SUBSET_RECEIPT.read_text())
+    assert receipt["exclusions"] == [OVERLAP_EXCLUSION]
+    assert OVERLAP_EXCLUSION["id"] not in receipt["selected_ids"]
+
+    parent = _questions(DEV_CATEGORY)
+    parent_questions = {_canonical_question(row): row["id"] for row in parent}
+    parent_ids = set(_by_id(parent))
+    selected_questions = {
+        _canonical_question(row)
+        for row in parent
+        if row["id"] in set(receipt["selected_ids"])
+    }
+
+    overlaps: dict[str, list[tuple[str, str]]] = {}
     for category in FINAL_CATEGORIES:
         final = _questions(category)
-        final_ids = {row["id"] for row in final}
-        final_questions = {json.dumps(row["question"], sort_keys=True) for row in final}
-
-        assert not (dev_ids & final_ids), f"dev/{category} share item ids"
-        assert not (dev_questions & final_questions), f"dev/{category} share a question"
-
-
-def test_shared_function_names_are_exactly_the_disclosed_ones() -> None:
-    """Names are disclosed in §3.2, not removed — but only these names."""
-    dev_names = _presented_names(_questions(DEV_CATEGORY))
-
-    for category, disclosed in DISCLOSED_SHARED_FUNCTION_NAMES.items():
-        shared = dev_names & _presented_names(_questions(category))
-        assert shared == disclosed, (
-            f"dev/{category} function-name overlap changed: {sorted(shared)} "
-            f"vs disclosed {sorted(disclosed)}"
+        final_questions = {_canonical_question(row): row["id"] for row in final}
+        overlaps[category] = sorted(
+            (parent_questions[question], final_questions[question])
+            for question in parent_questions.keys() & final_questions.keys()
         )
+        assert not (parent_ids & set(_by_id(final)))
+        assert not (selected_questions & final_questions.keys())
+
+    assert overlaps == {
+        "multiple": [("live_multiple_190-84-0", "multiple_26")],
+        "simple_python": [],
+    }
 
 
-def test_dev_set_was_screened_by_the_frozen_decontamination_artifact() -> None:
-    """§3.2's decisive argument for `D` over `live_multiple`."""
+def test_re_screened_artifact_includes_the_entire_live_multiple_parent() -> None:
     receipt = json.loads(DECON_RECEIPT.read_text())
     screened = {
         entry["category"]: entry["sha256"]
         for entry in receipt["screened_question_files"]
     }
 
-    assert DEV_CATEGORY in screened, (
-        "the mining pool was not screened against the development set; "
-        "selection would be run against a set the training data may contain"
-    )
-    assert screened[DEV_CATEGORY] == DEV_QUESTIONS_SHA256, (
-        "the screened live_simple revision is not the one §3.2 pins"
-    )
+    assert receipt["manifest"]["sha256"] == MANIFEST_SHA256
+    assert screened[DEV_CATEGORY] == DEV_QUESTIONS_SHA256
+    assert receipt["dropped"] == {
+        "multi": 903,
+        "single": 108,
+        "total": 1011,
+        "by_reason": {"fn_name": 1010, "ngram_overlap": 1},
+    }
+    assert receipt["weights"] == {"n_multi": 8081, "n_single": 2990, "N": 11071}
+
+
+def test_live_multiple_is_machine_disqualified_from_endpoint_reporting() -> None:
+    manifest_role = _manifest()["categories"][DEV_CATEGORY]["study2_role"]
+    subset = json.loads(SUBSET_RECEIPT.read_text())
+
+    assert manifest_role == subset["study2_role"] == DEV_ROLE
+    assert DEV_CATEGORY not in FINAL_CATEGORIES
+    assert "never be reported as a study-2 endpoint" in subset["endpoint_status"]
+    assert "category as a whole is spent" in subset["endpoint_status"]

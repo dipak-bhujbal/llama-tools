@@ -539,59 +539,57 @@ already listed.
 
 ### 3.2 The development set `D` `[candidate]`
 
-`D` is the **entire pinned `live_simple` category** — not a sampled slice, so there is no
-sampling seed to defend and no subset that could have been chosen differently.
+Owner Decision C (#general msg 2244) makes `D` a deterministic **258-item look subset** of
+the pinned `live_multiple` category, after removing every exact question collision with a
+final scoring set and before any study-2 generation. The parent inputs and the subset rule
+are pinned independently:
 
 | | |
 |---|---|
-| questions | `eval/bfcl_data/BFCL_v4_live_simple.json`, sha256 `1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4`, blob `e8f4b8d33c07753affc77bfc4a646f94109de5af` |
-| answer key | `eval/bfcl_data/possible_answer/BFCL_v4_live_simple.json`, sha256 `fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce`, blob `2c4778cee08e5ce7b236861de9a927d3ea7cde1f` |
-| rows / unique ids | 258 / 258 |
-| sorted-id sha256 | `aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3` (both files) |
-| manifest | `eval/manifests/bfcl_v4_study2.json`, sha256 `7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64` |
+| parent questions | `eval/bfcl_data/BFCL_v4_live_multiple.json`, sha256 `fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8`, blob `b7c108f2edc86563fd3e1363e5f6fd961452d142` |
+| parent answer key | `eval/bfcl_data/possible_answer/BFCL_v4_live_multiple.json`, sha256 `97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084`, blob `b2f4c71547d3a534e2e40231db14943bfa81cc74` |
+| parent rows / unique ids | 1,053 / 1,053 in each file; answer-name preflight clean **1,053/1,053** |
+| parent sorted-id sha256 | `96d9015b2f01ea9a9a090afa8bd8638d81dccccd07d6632379dfc79a35c213ae` (both files) |
+| manifest | `eval/manifests/bfcl_v4_study2.json`, sha256 `542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0` |
+| subset receipt | `mining/receipts/study2_dev_look_subset.json`, sha256 `5a9510711adee429b8d0b2d7e20b35cb57278d052f39cb19d33f86a46b57b33b`, criterion `study2-dev-look-subset/v1` |
+| subset | 258 / 258 unique ids from 1,052 eligible; sorted-id sha256 `a91d8271224d7a50f68c27c0070b114173412c2591ba304ac7a6048506760b64` |
 
-**Disjointness from the final scoring sets, measured from the pinned files:**
+**Exact exclusion and disjointness.** The parent has zero id overlap with either final set and
+zero exact question overlap with `simple_python`. It has exactly one canonical-question
+collision with `multiple`: `live_multiple_190-84-0` ↔ `multiple_26`. The receipt excludes
+that item by the general final-question-collision rule, without editing either pinned BFCL
+file, leaving 1,052 eligible items. The selected 258 have zero id and zero exact-question
+overlap with both final sets. Every count and identity is re-derived by
+`tests/test_dev_slice_preflight.py`; drift is a stop condition.
 
-| | vs `multiple` (200) | vs `simple_python` (400) |
-|---|---:|---:|
-| shared ids | 0 | 0 |
-| shared question objects (exact) | 0 | 0 |
-| shared presented function names | 1 (`send_email`) | 2 (`get_current_weather`, `send_email`) |
+**Seeded, composition-preserving selection.** Within the 1,052 eligible items, the receipt
+buckets by presented-tool count `{2, 3, 4, 5–6, 7+}`, allocates 258 slots proportionally by
+exact largest-remainder rounding, and orders ids within a bucket by ascending
+`sha256(seed + ":" + id)` with seed `study2-dev-look-subset/v1:20260806`. No RNG or library
+shuffle participates. The realized bucket allocation is `55 / 74 / 43 / 67 / 19`; it is a
+receipt of the fixed rule, not an adjustable target.
 
-The name overlaps are **disclosed, not removed.** A shared function name is not a shared
-item, and the screen that matters ran the other direction: `live_simple` is one of the four
-categories screened in the frozen decontamination artifact (§2.9), so the mining pool is
-already clean with respect to `D`. Every count above is re-verified from the pinned files at
-run time; a mismatch is a stop condition, not a note.
+**What `D` measures.** All 1,053 parent items present 2–37 candidate tools and every answer
+key row expects exactly one call. `D` therefore exercises selection among tools — the skill
+under test — unlike the abandoned `live_simple` candidate, whose items each presented one
+tool. The development runner must load **exactly** the receipt's 258 ids, match the same 258
+answer rows, and refuse missing, duplicate, excluded, or extra ids.
 
-**What `D` can and cannot measure.** All 258 items present **exactly one** candidate
-function (`len(function) == 1`, verified for all 258). By A1.1's own argument — the argument
-that removed `simple_python` from primary contention — a one-candidate item cannot exercise
-ranking. **`D` therefore measures retention and health (can the policy still emit the
-correct call), and is structurally blind to the skill under test.** That is why `D` is used
-as a health gate and a stop condition and **never as a ranking metric** (§3.9). Stating the
-blind spot is what makes the selection rule defensible; hiding it would make `D` look like a
-task metric it cannot be.
+**Sensitivity cost of the subset.** The 258-item subset keeps the look budget at the prior
+plan's 258 generations per look, but it deliberately gives up resolution versus all 1,052
+eligible items. At 10% discordance and §3.8's exact two-sided `α = 0.0025`, an observed
+258-item comparison with `m = 26` discordances needs at least a 21/5 split (net 16 = 6.20
+points) to separate a checkpoint from the leader; the full eligible set at `m = 105` needs
+69/36 (net 33 = 3.14 points). This is an illustrative exact rejection threshold, not a power
+guarantee. The consequence is intentional: smaller differences remain in §3.9's top set and
+are broken toward more optimizer steps rather than noise-ranked.
 
-**The cost of adopting `D`, recorded as a cost.** `live_simple` is spent: a set that selects
-checkpoints can never also be a final scoring set (WORKING-AGREEMENT §6). Any number derived
-from `D` is a selection diagnostic and may never be reported as a study-2 endpoint.
-
-**A dev set that can see the skill is possible, and its cost is now measured rather than
-argued.** `BFCL_v4_live_multiple.json` is present locally (1,053 items, 2–37 tools) and would
-exercise ranking. An earlier draft dismissed it on four grounds; two of them were wrong, and
-the measurements are in §3.9's Option C. In short: its answer key **does** exist upstream at
-the pinned revision (1,053 rows, sha256 `97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084`,
-verified 2026-08-06), and re-running the screen with it costs **99 further pool prompts and a
-0.18-point shift in the multi share** — not the wholesale disruption "would move the frozen
-weights" implied. It remains true that it is not in the pinned manifest, that it shares one
-question object verbatim with `multiple`, and that adopting it **requires an amendment to
-frozen §2.5/§2.9 adopted publicly before any generation**.
-
-**This is now an owner decision, not a drafting choice** — see §3.9's Option C. What §3.2
-records is the consequence of *not* taking it: `D` stays structurally blind, §3.9 uses it as a
-veto rather than a ranking, and §4 reports the study's conclusions from the endpoint, never
-from `D`.
+**The whole parent category is spent.** The manifest and subset receipt both label
+`live_multiple` as `development_selection_only`. Because its subset selects checkpoints,
+**none of its 1,053 items — including the 795 outside the look subset — may ever be reported
+as a study-2 endpoint.** `tests/test_dev_slice_preflight.py` enforces both role declarations.
+The full parent questions file, not merely the 258 selected rows, is included in Amendment
+3's decontamination screen so the mining pool is clean with respect to any development item.
 
 ### 3.3 The frozen SFT development baseline `[candidate]`
 
@@ -605,7 +603,8 @@ order the gates already require:
 2. Under **separately approved spend**, shipped SFT is scored **once** on `D` — greedy,
    `max_new_tokens = 512`, scored by `eval/bfcl_scoring.py`.
 3. Its **per-item outcome rows** are committed as
-   `eval/results/study2_dev_baseline_live_simple.jsonl` together with a completion record
+   `eval/results/study2_dev_baseline_live_multiple_subset.jsonl` together with a completion
+   record
    naming the run's digest, and that record is **reviewed** before any arm starts.
 4. Only then may arm 1 start.
 
@@ -634,7 +633,7 @@ read past.
 | LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj", "k_proj", "v_proj", "o_proj"]` — identical to study-1 SFT (`train/sft_full.py`). No new modules, no rank change |
 | Epochs | 1 |
 | Precision | bf16, gradient checkpointing on, `max_length = 2048` |
-| Split | 90/10 train/eval, split seed `42`; the **stratification key differs by track** (below) |
+| Split | target 90/10 train/eval within every non-empty track-specific cell, split seed `42`; exact integer rule and **track-specific key** below |
 | Seeds | training seed `42`, split seed `42` |
 | Look cadence | every **50** optimizer steps, `L_max = 20` (§3.8) |
 | Decoding | **greedy** for every dev look and every final score — no sampling seed enters any measurement |
@@ -645,7 +644,7 @@ read past.
 |---|---|
 | Schedule | per-device batch 2 × grad-accum 8 (**effective 16**), peak LR `5e-6`, cosine, `warmup_ratio = 0.03` |
 | Reference | the SFT policy, via the frozen `ref` adapter — asserted, not assumed (below) |
-| Split key | the pair's `error_type` — every 3A row **is** a preference pair and carries exactly one |
+| Split key | the pair's `error_type` — every 3A row **is** a preference pair and carries exactly one; each error-type value is one split cell |
 
 **(c) Track 3B override (B0 only):**
 
@@ -661,17 +660,23 @@ rather than one `error_type`, so stratifying it by `error_type` is not merely aw
 no value to read. B0 therefore stratifies on facts every row does have:
 
 > **Key = (`bucket`, `stratum`)** where `bucket ∈ {0/8, 1–7}` (§3.6) and `stratum ∈ {multi,
-> single}` (frozen §2.2) — four cells, 90/10 within each cell, split seed `42`.
+> single}` (frozen §2.2) — four possible cells, split independently with seed `42`.
 
 `source` (`xlam` / `hermes`) is **reported, not balanced**: it is a provenance label, it is
 already strongly correlated with `stratum`, and balancing on it would shrink cells for no
 inferential gain. Row counts by `source × bucket × stratum` are reported with the composition.
 
+**Exact rounding, applied to both tracks.** For each non-empty cell — an `error_type` cell in
+3A, or a `bucket × stratum` cell in B0 — let `n_cell` be its row count and set
+`n_eval = max(1, ceil(0.10 × n_cell))` and `n_train = n_cell - n_eval`. The realized aggregate
+train/eval counts and proportions are reported; "90/10" names the target, not a claim that
+every small integer cell realizes it exactly.
+
 **Fail-closed on thin cells.** Every non-empty cell must place at least one row on each side
-of the split. A cell that cannot — fewer than 2 rows — **stops the run** with the cell named.
-It is never merged into a neighbour, never dropped, and never silently sent entirely to train:
-each of those is a reclassification of data the split rule could not handle, which is the
-pattern §2.11 exists to forbid.
+of the split. Therefore `n_cell >= 2` is required for **every 3A and B0 cell**; a thinner cell
+**stops the run** with the track and cell named. It is never merged into a neighbour, never
+dropped, and never silently sent entirely to train: each of those is a reclassification of
+data the split rule could not handle, which is the pattern §2.11 exists to forbid.
 
 Where §3.6 says B0 shares "everything else" with 3A, it means table (a), the development set,
 the frozen baseline, the dev-health kill lines, the selection rule, and the analysis — not
@@ -816,13 +821,14 @@ control** (ADR-007's lesson, retained).
    below the baseline indefinitely without ever tripping a rule the roadmap had already set
    at 1.0 point. **A kill line must be an absolute floor**; a significance test is not one,
    because its trigger point moves with the discordance the run happens to produce.
-5. **Direction guard** — a look where the policy is *ahead* of baseline stops nothing and
-   promotes nothing. `D` is not an endpoint (§3.2), and a dev win is not a result.
+5. **Direction guard** — a look where the policy is *ahead* of baseline stops nothing. It may
+   affect the within-arm checkpoint ranking in §3.9, but `D` is not an endpoint (§3.2), and a
+   dev win is not a study result.
 
-**Exact McNemar is still computed at every look and recorded** — `b`, `c`, and the p-value
-against `α_look` (§3.8) — as a **reported diagnostic**. It triggers nothing. Keeping the
-number without giving it authority is the point: a reviewer sees how the dev comparison
-moved, and no stop or selection depends on a quantity whose threshold drifts with the data.
+**Exact McNemar against the frozen baseline is still computed at every look and recorded** —
+`b`, `c`, and the p-value against `α_look` (§3.8) — as a **reported diagnostic**. It triggers
+no kill. Checkpoint-to-checkpoint McNemar comparisons have the separate, narrow authority
+stated in §3.9: defining the statistically indistinguishable top set after training.
 
 A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
 silently replaced by another arm or another seed.
@@ -857,15 +863,13 @@ Recomputing `α_look` after seeing how many looks actually happened would be the
 one level down from the one Amendment 2 fixed: a threshold that moves with the data it
 judges.
 
-**What `α_look` is now for, and what it is not.** No stop and no selection depends on it —
-kill lines are absolute counts (§3.7 rule 4) and selection is an absolute margin (§3.9). It
-exists so that the McNemar diagnostic recorded at each look is reported against a
-multiplicity-aware threshold rather than a bare `p < 0.05`, which across up to twenty looks
-gives twenty **opportunities** for a false positive rather than a familywise 5% one. (An
-earlier draft said such a threshold "would look significant twenty times by construction" —
-that overstates it: it inflates the chance of at least one spurious flag, it does not
-manufacture flags.) **These p-values are never inference:** they enter none of §4's families
-and are never reported as evidence of an effect.
+**What `α_look` is now for, and what it is not.** No kill depends on it — kill lines are
+absolute counts (§3.7 rule 4). It gives the baseline diagnostic a multiplicity-aware display
+threshold and, at final within-arm selection only, defines §3.9's McNemar-indistinguishable
+top set. A bare `p < 0.05` across up to twenty saved looks would give twenty opportunities for
+a false flag; Bonferroni over `L_max` fixes the operational threshold before the number of
+realized looks is known. **These p-values are never endpoint inference:** they enter none of
+§4's families and are never reported as evidence of a study effect.
 
 ### 3.9 Checkpoint selection `[candidate]`
 
@@ -875,7 +879,16 @@ the set of selectable checkpoints and the set of dev measurements are the same s
 > **Eligible** = a checkpoint whose dev correct-count satisfies `n_ckpt >= n_base - 2` — a
 > fixed **non-inferiority margin of 2 items (0.78 points)** against the frozen SFT baseline.
 >
-> **Selected** = the **eligible** checkpoint with the most optimizer steps. **If no
+> Among eligible checkpoints, define the **observed leader** as the checkpoint with the
+> highest dev correct-count; if several have the same count, use the one with the most
+> optimizer steps as the deterministic comparison anchor.
+>
+> The **McNemar-indistinguishable top set** contains the observed leader and every other
+> eligible checkpoint whose paired per-item outcomes are **not significantly worse** than
+> that leader by exact two-sided McNemar at `α_look = 0.0025` (§3.8), meaning `p >= 0.0025`.
+> This is an operational statistical tie, **not** an equivalence or non-inferiority claim.
+>
+> **Selected** = the checkpoint in that top set with the most optimizer steps. **If no
 > checkpoint is eligible, the arm has no candidate** (§4.7).
 
 **The eligibility margin is strictly tighter than the kill margin, and has to be.** The kill
@@ -887,9 +900,12 @@ boundaries cannot cross: anything the kill line would stop for is already inelig
 last-look first strike may go un-killed (one look, no second to confirm), but it can never be
 selected.
 
-Not best `eval_loss`. Not best reward margins. Not any number from `multiple` or
-`simple_python` — **the final scoring sets are not opened until the checkpoint is already
-selected.**
+This ranks first by the held-out task metric, as WORKING-AGREEMENT §6 requires, while refusing
+to let sub-resolution count noise automatically pick an earlier checkpoint. With at most 20
+saved looks there are at most 20 leader comparisons, so the `0.05 / L_max` threshold is fixed
+before the arm and does not tighten or loosen with its realized length. Not best `eval_loss`.
+Not best reward margins. Not any number from `multiple` or `simple_python` — **the final
+scoring sets are not opened until the checkpoint is already selected.**
 
 **Why an absolute margin and not a significance test.** An earlier draft made eligibility
 "not significantly worse at α = 0.05". That was wrong twice over: failing to reject harm is
@@ -898,71 +914,14 @@ baseline twenty times at an unadjusted threshold. A fixed margin has neither pro
 makes no test, so it has no multiplicity, and it states in advance exactly how much dev
 degradation the study is willing to carry into a candidate.
 
-**This deviates from roadmap 3A.1 ("best callback-BFCL checkpoint per arm"), deliberately,
-and it needs an owner decision — see the box below.** `D` is structurally blind to the skill
-under test (§3.2): every one of its 258 items presents exactly one function. Ranking
-checkpoints on `D` would select on a metric orthogonal to the hypothesis, and because DPO's
-known failure mode is degrading exactly the single-tool call correctness `D` measures,
-ranking on `D` systematically prefers the least-trained checkpoint and biases every arm
-toward the null by construction. So `D` gates health, step count breaks the tie, and the
-endpoint decides the result. A dev set that cannot see the skill gets a veto, not a vote.
-
-> **Owner decision required before adoption — this rule and WORKING-AGREEMENT §6 disagree.**
->
-> §6 says: *"Checkpoint selection is by held-out task metric, never by preference metrics and
-> never by training loss."* The rule above uses the held-out task metric as a **gate** and
-> orders by step count, which is not selection *by* that metric. The disagreement is real and
-> is not resolved by wording.
->
-> **Option A — comply with §6 as written.** Select the eligible checkpoint with the **highest
-> dev accuracy**. *Consequence:* selection runs on a metric that cannot see the trained skill
-> and that DPO is known to degrade. That does not guarantee the least-trained checkpoint wins
-> — the claim is about what the metric can and cannot measure, not a measured tendency — but
-> it does mean the ordering carries no information about the hypothesis and plausibly
-> anti-correlates with training progress. A null would then be partly attributable to the
-> selection rule, and the write-up would have to say so.
->
-> **Option B — amend §6 for study 2, in writing, before adoption.** Keep the rule above, and
-> record in WORKING-AGREEMENT §6 that where the development set is structurally blind to the
-> skill under test, it gates on a pre-stated non-inferiority margin and does not rank.
-> *Consequence:* selection stops being outcome-blind in §6's literal sense and becomes
-> *design*-blind — step count is fixed before any data exist and cannot be chosen to favour a
-> result. §6's purpose (never select on the thing you are about to claim) is preserved; its
-> text is not.
->
-> **Option C (evaluate first) — build a dev set that can see the skill, at $0 in model spend.**
-> Adopt `live_multiple` (minus its one exact question overlap with `multiple`) as `D`, fetch
-> and pin its answer key, re-run decontamination, and amend frozen §2.5/§2.9 **publicly before
-> any generation**. Then §6 is satisfied literally *and* selection measures the trained skill.
-> Measured feasibility, 2026-08-06, not asserted:
->
-> | check | result |
-> |---|---|
-> | answer key exists upstream at the pinned revision | **yes** — 1,053 rows, sha256 `97e90d59…`, and the local questions file already matches upstream `fd8ccfad…` |
-> | question overlap with `multiple` | **1 item**, removed → 1,052 usable |
-> | id overlap with either final set | **0** |
-> | re-running the screen with `live_multiple` added | dropped 912 → **1,011** (+99, all function-name); weights `(8173, 2997, 11170)` → **`(8081, 2990, 11071)`**; multi share 73.169% → **72.993%** |
-> | code change needed | `eval/bfcl_category_config.py` supports only `simple_python` and `multiple` — extension required |
-> | dev-look cost | 1,052 items ≈ **4× per look** unless a deterministic subset is pinned; at `L_max` that is 21,040 generations per arm versus 5,160 |
->
-> *(Reproduce: add a `live_multiple` questions entry to a copy of the manifest and re-run
-> `mining/decontaminate_pool.py data/processed/sft_dedup_v2.jsonl --manifest <copy> --json
-> <scratch>`. Nothing in the repository was modified to obtain these numbers.)*
->
-> *Consequences to weigh:* it costs paper work and CPU, not model spend; it re-opens a section
-> frozen yesterday and spends 99 more pool prompts (0.9% of the post-screen pool); it needs a
-> subset rule to keep look costs sane; and it is only legitimate **while no generation has
-> happened** — which is true today and stops being true after the pilot.
->
-> **My recommendation, revised after measuring: evaluate C first.** I originally rejected C on
-> two grounds that turned out to be false — a missing answer key and an implied large weight
-> shift — so the earlier recommendation of B was made on bad information. If C's amendment is
-> unacceptable *because* §2 was frozen yesterday, B is preferable to knowingly selecting on a
-> structurally blind ranking metric.
->
-> All three options keep the final scoring sets closed until after selection. **§3 is not
-> adoptable until this is answered**, because adopting it silently would mean a prereg section
-> overriding a ratified working agreement without anyone deciding to.
+**Owner decision: Option C, 2026-08-06 (#general msg 2244).** The earlier `live_simple`
+proposal could gate single-tool health but was blind to the multi-tool ranking skill under
+test. That blindness did **not** prove it would systematically select the least-trained
+checkpoint — the relationship between its accuracy and optimizer step was unmeasured — but
+it left the hypothesis unobserved during selection. The owner therefore selected the
+skill-visible `live_multiple` development design in §3.2 while no study-2 generation existed.
+The choice amends frozen counts and inputs through Amendment 3; it does not amend §6 or weaken
+the rule against selecting on training/preference metrics.
 
 ### 3.10 Before arm 1 `[candidate]`
 
@@ -976,8 +935,12 @@ Every item is a precondition; any failure is a stop, not a warning.
 - **Dev baseline run, committed, reviewed, and digest-matched** (§3.3) — a separately
   approved spend that completes *before* arm 1, not alongside it.
 - **`D`'s pinned counts and digests re-verified** from the files (§3.2).
-- **The WORKING-AGREEMENT §6 selection question answered by the owner** (§3.9), and §6
-  amended in writing if Option B is chosen.
+- **The WORKING-AGREEMENT §6 selection question answered by the owner** — Option C,
+  #general msg 2244 (§3.9). Before any generation, the `live_multiple` questions and answer
+  key, the overlap exclusion, the seeded dev-subset receipt, the amended manifest, the
+  re-screened decontamination artifact and weights, and Amendment 3 must all be committed,
+  reviewed, and public. The miner consumes the re-screened pool; it may not mine the
+  superseded artifact.
 - **§3 and §4 adopted by the owner and public** before any arm starts.
 
 ### 3.11 Spend `[candidate]`
@@ -994,22 +957,26 @@ guess:
 | one 3B arm | 1 epoch of LoRA-SFT at effective batch 32, plus the same dev-look budget |
 | final scoring (§4) | per candidate: 200 (`multiple`) + 400 (`simple_python`) greedy generations |
 
-`L = ceil(total_steps / cadence)` with `cadence = max(50, ceil(total_steps / 20))` (§3.8), and
-`total_steps = ceil(0.9 × mined_pairs / 16)` for a 3A arm. Worked, so the estimate is
-arithmetic rather than a guess:
+`L = ceil(total_steps / cadence)` with `cadence = max(50, ceil(total_steps / 20))` (§3.8).
+For a 3A arm, the exact split rule in §3.4 gives
+`train_rows = sum(n_cell - max(1, ceil(0.10 × n_cell)))` over the realized `error_type`
+cells, then `total_steps = ceil(train_rows / 16)`. Before the cell composition exists,
+`train_rows <= floor(0.90 × mined_pairs)`, so the table gives conservative upper bounds,
+not claimed realized counts:
 
-| mined pairs | optimizer steps | cadence | `L` | dev generations |
+| mined pairs | upper-bound optimizer steps | cadence | upper-bound `L` | upper-bound dev generations |
 |---:|---:|---:|---:|---:|
 | 500 | 29 | 50 | 1 | 258 |
 | 1,000 | 57 | 50 | 2 | 516 |
 | 2,500 | 141 | 50 | 3 | 774 |
 | 5,000 | 282 | 50 | 6 | 1,548 |
 | 12,000 | 675 | 50 | 14 | 3,612 |
-| ≥ 16,890 | ≥ 951 | 50 → stretches | **20 (capped)** | **5,160** |
+| 16,890 | 951 | 50 | **20 (capped)** | **5,160** |
 
-The ceiling is **5,160 dev generations per arm**, more than four times the entire endpoint
-probe (1,200), and it is only reached above ~16,900 mined pairs. Every row is at least one
-look, so no yield produces an arm without a selectable checkpoint.
+The conservative upper bound first reaches the **5,160-dev-generation ceiling per arm** at
+16,890 mined pairs; the realized cellwise split can produce fewer train rows, steps, and
+looks. Every positive-step arm still has at least one final-step look, so no realized yield
+produces an arm without a selectable checkpoint.
 
 **Flagged before anyone is surprised by it:** the dev looks, not the training, dominate an
 arm's inference cost. The cadence is the knob if the written estimate comes back higher than
@@ -1079,7 +1046,7 @@ observed paired difference**, with no test and no p-value:
 **Operating characteristics, computed rather than asserted.** An earlier draft claimed a
 2.0-point margin "is not a margin that noise alone can breach". **That was false**, and the
 arithmetic says so. Under no true difference, the discordant split is symmetric, so
-`P(net loss >= 9 items)` depends entirely on how many discordant items there are:
+`P(net loss >= 8 items)` depends entirely on how many discordant items there are:
 
 | discordant items `m` | P(retention fails by chance alone) |
 |---:|---:|
@@ -1208,6 +1175,7 @@ the superseded language verbatim and supersedes it by reference.
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
+| 4 | 2026-08-06 | §2.5, §2.9 | **Candidate Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C, #general msg 2244; exact content pending review, publication, and adoption |
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
 Argument-level matching semantics stay as `eval/bfcl_scoring.py` implements them
@@ -1527,3 +1495,128 @@ defect** with the discrepancy documented and filed upstream. It is not silently
 graded either way, and it is not dropped from the denominator without being
 named. Recording the defect and re-running with a documented exclusion is a
 preregistration amendment, not a scoring detail.
+
+---
+
+### Amendment 3 — skill-visible development set and re-screened mining pool (2026-08-06) `[PENDING REVIEW / PUBLICATION / ADOPTION]`
+
+**Owner authorization.** The owner selected Decision C in #general msg 2244: pin a seeded
+`live_multiple` look subset, make checkpoint selection rank by its held-out task accuracy,
+permanently disqualify the parent category from endpoint reporting, and re-screen the mining
+pool before mining. The owner authorized this design and its private-backup work; **this exact
+text and artifact package remain a candidate until reviewed, public, and adopted.**
+
+**Status of data at authorization and drafting: no study-2 model output, development score,
+probe score, mined pair, or yield number had been observed. No model had been run and model
+spend remained $0.** The counts below are deterministic CPU measurements of pinned input
+files and the decontamination predicate, traceable to the committed receipts. They are not
+model results and authorize no model call, mining run, arm, or spend.
+
+**Superseded §2.5 text, quoted verbatim and retained above:**
+
+> **Derived weights** (`mining/receipts/sft_dedup_v2_decontamination.json`, sha256
+> `fb7a0200dbeeabb831006eeb800a23d3c92d89a468666c61b098ca1277231906`, criterion
+> `bfcl-pool-decontamination/v1`):
+>
+> **`(n_multi, n_single, N)` = (8,173, 2,997, 11,170)**
+>
+> Stored as exact integers. The multi share
+> 8173/11170 = 73.169% is **derived at display time and
+> never stored**, so `P_std` is computed from exact ratios.
+>
+> 12143 cleaned source - 5 prompt-ineligible - 56 target-structural exclusions = 12082 screen inputs; of those, 912 were dropped
+> ({'fn_name': 911, 'ngram_overlap': 1}) leaving 11,170 survivors. §1's 12,160-row figures remain
+> non-comparable: different source revision, different denominator.
+
+**Superseded §2.9 text, quoted verbatim and retained above:**
+
+> Criterion **`bfcl-pool-decontamination/v1`**, whose predicate pins the 13-gram user-text
+> normalization rule, the presented-function-name collision rule, all four manifest
+> categories, **the cascade order**, and fail-closed parsing.
+>
+> - **the SHA-256 of each of the four screened `role=questions` files** from the pinned
+>   manifest, as `(category, local_path, sha256)` tuples — the screened question *bytes*, not
+>   the manifest file and not the answer keys — plus the manifest's own hash. A future BFCL
+>   re-pin then detectably invalidates this artifact instead of silently coexisting with it
+
+The criterion's predicate, cascade order, eligibility rules, and 12,082-row screen-input
+population do **not** change. Amendment 3 replaces only the pinned manifest inputs, the
+resulting artifact, and the artifact-derived weights, through A3.1–A3.5.
+
+#### A3.1 `live_multiple` is a pinned development input
+
+The manifest now adds `live_multiple/questions` and `live_multiple/answer_key` at upstream
+revision `9d8416a96d1d69975493f1b6d60ff07d12a1726a`:
+
+| role | rows / unique ids | sha256 | git blob |
+|---|---:|---|---|
+| questions | 1,053 / 1,053 | `fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8` | `b7c108f2edc86563fd3e1363e5f6fd961452d142` |
+| answer key | 1,053 / 1,053 | `97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084` | `b2f4c71547d3a534e2e40231db14943bfa81cc74` |
+
+Both files have sorted-id sha256
+`96d9015b2f01ea9a9a090afa8bd8638d81dccccd07d6632379dfc79a35c213ae`, and the standing
+answer-name preflight passes **1,053/1,053** rows. The amended manifest sha256 is
+`542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0`. This extends A2.3's
+standing manifest check; it does not change the function-name scoring rule.
+
+#### A3.2 The five-file screen replaces the four-file artifact
+
+The operative decontamination receipt becomes
+`mining/receipts/sft_dedup_v2_decontamination_with_live_multiple.json`, sha256
+`3daaffa85a2097468f53845d1cddf996a0e68a3605916e26918891c2972732b3`. It binds the amended
+manifest and all **five** `role=questions` files, including the full 1,053-row
+`live_multiple` parent. Re-running the unchanged criterion gives:
+
+| | frozen artifact | Amendment 3 artifact | change |
+|---|---:|---:|---:|
+| screen inputs | 12,082 | 12,082 | 0 |
+| dropped — function name | 911 | 1,010 | +99 |
+| dropped — 13-gram overlap | 1 | 1 | 0 |
+| dropped — total | 912 | 1,011 | +99 |
+| surviving multi | 8,173 | 8,081 | −92 |
+| surviving single | 2,997 | 2,990 | −7 |
+| surviving total | 11,170 | 11,071 | −99 |
+
+The amended post-screen id-set sha256 is
+`69d381413f8095d483b35c9bcd77e83bd6f72771edc9b4f192510f8e7392e5e3`. The original
+`mining/receipts/sft_dedup_v2_decontamination.json` remains untouched as the historical
+artifact that froze §2; it is now **superseded and may not feed study-2 mining**.
+
+#### A3.3 §2.5's operative weights are replaced before mining
+
+Applying §2.5's unchanged artifact-derived rule to the Amendment 3 artifact gives:
+
+> **`(n_multi, n_single, N)` = `(8,081, 2,990, 11,071)`**
+>
+> `w_multi = 8081/11071 = 72.993%` and `w_single = 2990/11071 = 27.007%`, displayed only;
+> `P_std` continues to use the exact integer ratios.
+
+The previous multi share was `8173/11170 = 73.169%`; the amended share is lower by 0.177
+percentage points (0.18 points at the precision used in the owner decision). These are
+artifact-backed pool-composition measurements, not portfolio targets or model outcomes.
+
+#### A3.4 The development subset removes the final-set collision and spends the parent
+
+`mining/receipts/study2_dev_look_subset.json`, sha256
+`5a9510711adee429b8d0b2d7e20b35cb57278d052f39cb19d33f86a46b57b33b`, applies
+`study2-dev-look-subset/v1` to the parent. It removes the one exact canonical-question
+collision, `live_multiple_190-84-0` ↔ `multiple_26`, then deterministically selects 258 of
+1,052 eligible ids under seed `study2-dev-look-subset/v1:20260806`. The selected sorted-id
+sha256 is `a91d8271224d7a50f68c27c0070b114173412c2591ba304ac7a6048506760b64`.
+
+The manifest and receipt both label `live_multiple` as `development_selection_only`.
+Selection spends the **entire parent category**, not only the chosen rows: no score on any of
+its 1,053 items may be reported as a study-2 endpoint. The exclusion exists only in the
+receipt; the pinned eval inputs remain read-only and byte-identical to A3.1.
+
+#### A3.5 Sequencing is fail-closed
+
+Amendment 3 must be reviewed, made public, and adopted **before any generation**. Then the
+re-screened artifact and exact `(8,081, 2,990, 11,071)` weights must be the inputs to the
+miner **before the first prompt is mined**. The miner must verify the amended manifest digest,
+the current decontamination-receipt digest, and the post-screen id-set digest; a missing or
+superseded input is a refusal, never a fallback to the four-file pool.
+
+Only after that ordering is satisfied may §3's Decision-C development design be adopted.
+Every later model or paid-compute stage still requires a written agent-agreed estimate and
+the owner's separate explicit approval. This amendment authorizes none.

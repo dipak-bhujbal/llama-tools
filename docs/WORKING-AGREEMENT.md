@@ -83,6 +83,11 @@ when that file lands.
 
 - Pushing to GitHub or Hugging Face, and changing artifact visibility, are **owner actions**.
   Agents stage; the owner publishes.
+- **Private-backup exception (owner, #general msg 2244).** Pushing pending branch work to the
+  private `backup` remote is standing-authorized and is **reported after the push, not asked
+  before it**. This exception authorizes no push to `origin`, no merge, no default-branch
+  change, no visibility change, and no Hugging Face publication. A backup push is a
+  recoverability action, not review or publication.
 - **`main` requires review before merge** (owner, #general msg 2117). No merge or direct push
   to `main` happens until codex has signed off on the exact commit being merged — owner
   authorization alone is not sufficient. This was added after a merge landed on owner
