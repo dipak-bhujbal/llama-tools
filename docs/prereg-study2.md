@@ -107,32 +107,37 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[ADOPTION CANDIDATE — codex signed off the full candidate content at 6110545 (#general msg 2173); awaiting owner adoption]`
+## 2. Mining `[FROZEN — adopted by the owner 2026-08-05, #general msg 2181]`
 
 Drafting authorized by the owner, #general msg 2095. The **decontamination artifact
 package** was signed off at `0dccddd` (#general msg 2169); that sign-off covered the
 implementation and artifact, and explicitly left §2 as a draft. **Codex signed off the full
-candidate content at `6110545` (#general msg 2173); awaiting owner adoption.** This section
-does **not** govern anything:
-it becomes `[FROZEN]` when @dipak explicitly adopts it, at which point the adoption line
-below is completed and the amendments-table row loses its *pending* marker — the same bar
-Amendment 2 cleared.
+candidate content at `6110545` (#general msg 2173); the owner adopted it at #general msg
+2181.** This section now governs:
+it became `[FROZEN]` on the owner's explicit adoption, recorded in the adoption line below
+and as amendments-table row 3 — the same bar Amendment 2 cleared.
 
-> **Adoption line — @dipak:** *pending.* Adopting freezes §§2.1–2.11 as written, including
-> the yield gate arithmetic, the exclusion criterion, and the weights
-> **(8,173, 2,997, 11,170)** derived from the committed
-> decontamination artifact (sha256 `fb7a0200dbeeabb8…`).
-> No study-2 model output has been observed; adoption authorizes **no model call and no
-> spend**.
+> **Adoption line.** Adopted by the owner on 2026-08-05 (#general msg 2181):
+>
+> *Adopt §2 Mining as frozen in reviewed content commit `d6ff0cad0aae952f2d4ce2e5e066f36d73d98dcd`,
+> published unchanged on public/private `main` by merge commit
+> `d7c4e5cc76fdb116c75e7b93c77d538c3bde5b53`, before any study-2 model call. The earlier
+> provisional 65/35 composition came from a parser that read only one tool-list format; the
+> frozen artifact-derived weights are `(8173, 2997, 11170)` (73.169% / 26.831%) over the
+> corrected post-exclusion, post-screen population.*
+>
+> No study-2 model output had been observed at adoption. Adoption authorized no model call
+> and no spend.
 
 All owner decisions are made and all mechanical work is done: the decontamination artifact
 is built and committed, the weights are derived from it as an exact integer triple, and
-codex has verified every binding independently. What remains is the owner's adoption.
+codex verified every binding independently, and the owner adopted the reviewed package in
+#general msg 2181.
 
 No mining run had produced a single pair when this was drafted; no yield number of any kind
 had been observed.
 
-### 2.1 Required inputs (closes roadmap [H] 1.1)
+### 2.1 Required inputs `[FROZEN]` (closes roadmap [H] 1.1)
 
 | | |
 |---|---|
@@ -144,7 +149,7 @@ had been observed.
 The adapter revision is the one already pinned in §0.2; the same string governs both, so the
 probe and the mining run cannot silently diverge.
 
-### 2.2 Strata `[adoption candidate]`
+### 2.2 Strata `[FROZEN]`
 
 Every mined prompt is assigned to exactly one stratum by the count of tools its prompt
 presents:
@@ -179,7 +184,7 @@ one silently reclassifies the other. That is not hypothetical — see the note i
 Every ledger record carries its `stratum` label, so `y_multi` and `y_single` are recomputable
 from the artifact rather than reconstructed from a run log.
 
-### 2.3 Allocation `[adoption candidate]`
+### 2.3 Allocation `[FROZEN]`
 
 **Proportional.** Each stratum is sampled in proportion to its target weight `w_s` (§2.5).
 Both strata receive a **nonzero** allocation in the pilot and in the calibration run, so
@@ -189,7 +194,7 @@ Allocation is planned proportionally but **realized** allocation is what gets re
 gate arithmetic in §2.6 standardizes to the target weights regardless, so integer rounding
 or a failed prompt cannot move the gate.
 
-### 2.4 Sampling parameters `[adoption candidate]`
+### 2.4 Sampling parameters `[FROZEN]`
 
 | | |
 |---|---|
@@ -201,7 +206,7 @@ or a failed prompt cannot move the gate.
 | pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
 | calibration | `--n-prompts 1000`, `--out-dir mining_out` |
 
-### 2.5 Target weights `[adoption candidate — artifact-derived, exact counts]`
+### 2.5 Target weights `[FROZEN — artifact-derived, exact counts]`
 
 Owner decision, #general msg 2108: **artifact-derived, exact counts.** The weights are not
 the literal 65/35 of the earlier instruction — that figure descends from a composition count
@@ -235,7 +240,7 @@ If fixed design weights are ever preferred to natural composition, they may be u
 if labelled a design choice rather than measured composition, and recorded here before the
 run.
 
-### 2.6 Yield gate arithmetic `[adoption candidate]`
+### 2.6 Yield gate arithmetic `[FROZEN]`
 
 > `y_s` = (active pairs materialized from stratum `s`) / (active post-screen prompts mined
 > in stratum `s`), both terms as defined by Amendment 2 A2.1.
@@ -292,7 +297,7 @@ of 12,155 classifiable rows, not 66.8%**. The post-screen figure, and therefore
 never edited in place. The figures above are reproducible from the committed parser and the
 recorded digest rather than being a second uncommitted count.
 
-### 2.7 Mining population `[adoption candidate — curated SFT pool, cleaned revision]`
+### 2.7 Mining population `[FROZEN — curated SFT pool, cleaned revision]`
 
 Owner decision, #general msg 2108: **the curated SFT pool at the cleaned revision**, with
 decontamination and weights re-run over it.
@@ -322,7 +327,7 @@ population. §1's decontamination figures do **not** carry over — they were co
 pre-screen counts; §2.5's weights come from the post-screen artifact once decontamination is
 re-run here, and that artifact governs.
 
-### 2.8 The pool's own targets are preflighted `[adoption candidate]`
+### 2.8 The pool's own targets are preflighted `[FROZEN]`
 
 Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
 pool's own targets.
@@ -424,7 +429,7 @@ invalid: the parser fell back to a regex search for `"name"`, which matched the 
 argument key and reported these 56 malformed targets as valid calls. A check that
 invents the value it is checking is worse than no check, and the fallback has been removed.
 
-### 2.9 The decontamination artifact `[adoption candidate — artifact signed off at 0dccddd]`
+### 2.9 The decontamination artifact `[FROZEN — artifact signed off at 0dccddd]`
 
 Spec settled in #general msgs 2143 and 2150, recorded here so the implementer works from the
 preregistration rather than from chat. **Exclusion precedes screening**, so the screen input
@@ -473,7 +478,7 @@ failure**, not a new exclusion bucket.
 §1's 12,160-row figures are **explicitly non-comparable**: different source revision and
 different denominator.
 
-### 2.10 Expected: near-zero spurious-call pairs `[adoption candidate; owner-directed]`
+### 2.10 Expected: near-zero spurious-call pairs `[FROZEN — owner-directed]`
 
 Recorded in advance so it is never mistaken for a miner defect. The retained population
 carries only **10 genuine `no_call` rows in 12,082**, so mined **spurious-call preference
@@ -484,7 +489,7 @@ endpoint: this pool barely exercises no-call behaviour at all.
 An implementation that produced *many* spurious-call pairs from this pool would be the
 anomaly worth investigating.
 
-### 2.11 The miner re-asserts eligibility at load `[adoption candidate; owner-directed]`
+### 2.11 The miner re-asserts eligibility at load `[FROZEN — owner-directed]`
 
 The pool arrives pre-screened, and the miner **re-asserts that every row it receives parses
 under `pool-target-structural-eligibility/v1`, refusing the run otherwise.** Checked twice,
@@ -527,7 +532,7 @@ the superseded language verbatim and supersedes it by reference.
 |---|---|---|---|---|
 | 1 | 2026-08-04 | §0.3 | Endpoint locked unconditionally; qualification threshold demoted to a headroom gate | Owner, #general msg 1974 |
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
-| 3 | *pending* | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | *awaiting owner adoption* |
+| 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
 Argument-level matching semantics stay as `eval/bfcl_scoring.py` implements them
