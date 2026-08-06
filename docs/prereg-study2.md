@@ -418,17 +418,28 @@ Required contents:
 
 - source path + sha256 (`sft_dedup_v2`); implementation identity
 - eligibility criterion id + target-preflight receipt hash
-- **the four BFCL manifest file hashes actually screened against**, so a future BFCL re-pin
-  detectably invalidates this artifact instead of silently coexisting with it
+- **the SHA-256 of each of the four screened `role=questions` files** from the pinned
+  manifest, as `(category, local_path, sha256)` tuples — the screened question *bytes*, not
+  the manifest file and not the answer keys — plus the manifest's own hash. A future BFCL
+  re-pin then detectably invalidates this artifact instead of silently coexisting with it
 - sorted-id digest of the 12,082 screen-input population, and of the post-screen population
 - exact pre/post counts by `multi`/`single`, by drop reason, and in total
 - **weights as the integer triple `(n_multi, n_single, N)`** — decimals are display-only,
   derived at render time. Exact ratios in, exact `P_std` out.
 
-**Match order is part of the criterion, not an implementation detail.** A row tripping both
-the 13-gram screen and the name-collision screen is attributed to whichever runs first, so
-"first-match drop reason" is meaningless unless the cascade order is pinned in the criterion
-text itself.
+**Match order, pinned.** A row tripping both screens is attributed to whichever runs first,
+so "first-match drop reason" is meaningless unless the order is part of the criterion:
+
+> **1. 13-gram user-text overlap. 2. Exact presented-function-name collision. Stop at the
+> first match.**
+>
+> **Category tie-break:** both screens index `gram → category` and `name → category` with
+> `setdefault`, so where two categories share a gram or a function name, the **first
+> category loaded from the manifest wins**, in manifest file order. That order is therefore
+> part of the criterion too, and the manifest order in force is recorded in the artifact.
+
+This matches `Decontaminator.is_contaminated` as implemented today; if the code order ever
+changes, the criterion id changes with it.
 
 A row that survives eligibility but cannot be deterministically screened is a **hard
 failure**, not a new exclusion bucket.
@@ -436,7 +447,7 @@ failure**, not a new exclusion bucket.
 §1's 12,160-row figures are **explicitly non-comparable**: different source revision and
 different denominator.
 
-### 2.10 Expected: near-zero spurious-call pairs `[proposed]`
+### 2.10 Expected: near-zero spurious-call pairs `[owner-directed; pending §2 freeze]`
 
 Recorded in advance so it is never mistaken for a miner defect. The retained population
 carries only **10 genuine `no_call` rows in 12,082**, so mined **spurious-call preference
@@ -447,7 +458,7 @@ endpoint: this pool barely exercises no-call behaviour at all.
 An implementation that produced *many* spurious-call pairs from this pool would be the
 anomaly worth investigating.
 
-### 2.11 The miner re-asserts eligibility at load `[proposed]`
+### 2.11 The miner re-asserts eligibility at load `[owner-directed; pending §2 freeze]`
 
 The pool arrives pre-screened, and the miner **re-asserts that every row it receives parses
 under `pool-target-structural-eligibility/v1`, refusing the run otherwise.** Checked twice,
