@@ -107,10 +107,17 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[FROZEN — committed before the pilot runs]`
+## 2. Mining `[DRAFT — awaiting codex review and owner adoption]`
 
-Authorized by the owner, #general msg 2095. Reviewed by codex before adoption. No mining
-run had produced a single pair when this section was committed; no yield number of any kind
+Drafting authorized by the owner, #general msg 2095. **This section is not yet frozen and
+does not yet govern anything.** It becomes `[FROZEN]` only when codex has signed off on the
+gate arithmetic and @dipak has explicitly adopted it, at which point it gets an adoption
+line and a row in the amendments table — the same bar Amendment 2 had to clear.
+
+Two clauses below (§2.5 weights, §2.7 mining population) carry open owner decisions and are
+marked as such. They are not agent choices to make.
+
+No mining run had produced a single pair when this was drafted; no yield number of any kind
 had been observed.
 
 ### 2.1 Required inputs (closes roadmap [H] 1.1)
@@ -125,7 +132,7 @@ had been observed.
 The adapter revision is the one already pinned in §0.2; the same string governs both, so the
 probe and the mining run cannot silently diverge.
 
-### 2.2 Strata `[FROZEN]`
+### 2.2 Strata `[proposed]`
 
 Every mined prompt is assigned to exactly one stratum by the count of tools its prompt
 presents:
@@ -134,9 +141,14 @@ presents:
 >
 > The tool list is parsed from the prompt's system message under **both** pinned formats:
 > the `Tools:` JSON array, and the longest well-formed JSON array inside `<tools>…</tools>`.
-> A prompt whose tool list parses under neither is **not mined** and is recorded in the
-> ledger as `stratum=unparseable` with its source id. It never enters either numerator or
-> denominator.
+> A prompt whose tool list parses under neither is **not mined**, and is recorded in the
+> **pre-mining eligibility artifact** (`mining/pool_strata.py`), never as a mining-ledger
+> record. It enters neither numerator nor denominator.
+
+Recording it in the ledger would do the opposite of what is intended: `mining/ledger.py`
+treats every active non-control record as one unit of completed work, so an
+`unparseable` record would land in A2.1's denominator and depress yield by exactly the rows
+that were never mined.
 
 Both parses are required because the pool carries both formats, and a rule that reads only
 one silently reclassifies the other. That is not hypothetical — see the note in §2.6.
@@ -144,7 +156,7 @@ one silently reclassifies the other. That is not hypothetical — see the note i
 Every ledger record carries its `stratum` label, so `y_multi` and `y_single` are recomputable
 from the artifact rather than reconstructed from a run log.
 
-### 2.3 Allocation `[FROZEN]`
+### 2.3 Allocation `[proposed]`
 
 **Proportional.** Each stratum is sampled in proportion to its target weight `w_s` (§2.5).
 Both strata receive a **nonzero** allocation in the pilot and in the calibration run, so
@@ -154,7 +166,7 @@ Allocation is planned proportionally but **realized** allocation is what gets re
 gate arithmetic in §2.6 standardizes to the target weights regardless, so integer rounding
 or a failed prompt cannot move the gate.
 
-### 2.4 Sampling parameters `[FROZEN]`
+### 2.4 Sampling parameters `[proposed]`
 
 | | |
 |---|---|
@@ -166,7 +178,22 @@ or a failed prompt cannot move the gate.
 | pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
 | calibration | `--n-prompts 1000`, `--out-dir mining_out` |
 
-### 2.5 Target weights `[FROZEN as a rule, not as a value]`
+### 2.5 Target weights `[OPEN — owner decision required]`
+
+> **@dipak: msg 2095 chose "final-sweep composition = natural 65/35". That instruction was
+> given before the parser defect in §2.6 was known, and 65/35 descends from it. This clause
+> therefore records the choice as open rather than resolving it, because amending your
+> decision is not an agent's call. Two options, and codex and I both recommend (a):**
+>
+> **(a) Artifact-derived natural composition** — the rule below. Weights are whatever the
+> committed pre-generation artifact measures over the chosen mining population. Robust to
+> the defect; the value is not known until the artifact exists.
+>
+> **(b) Fixed design weights** — retain literal 65/35, labelled explicitly as a *design
+> choice* and not as measured natural composition, since the measurement behind it is now
+> known to be wrong.
+
+The rule referred to by option (a):
 
 > `w_s` = (active post-screen prompts in stratum `s`) / (all active post-screen prompts),
 > computed from the **committed, hash-pinned decontamination artifact** over the mining
@@ -180,7 +207,7 @@ If fixed design weights are ever preferred to natural composition, they may be u
 if labelled a design choice rather than measured composition, and recorded here before the
 run.
 
-### 2.6 Yield gate arithmetic `[FROZEN]`
+### 2.6 Yield gate arithmetic `[proposed]`
 
 > `y_s` = (active pairs materialized from stratum `s`) / (active post-screen prompts mined
 > in stratum `s`), both terms as defined by Amendment 2 A2.1.
@@ -210,15 +237,44 @@ is an *operational* gate — the human reads its histogram and approves continui
 explicitly not the DPO-versus-3B scientific gate. Roadmap step 1.3 already says it: *do not
 proceed on projections alone.*
 
-**Recorded defect in §1's provisional composition.** §1 reports 8,117 multi-tool of 12,160.
-That count parsed only the `Tools:` format; all 1,161 `hermes`-format rows failed to parse
-and were counted as non-multi-tool. Parsing both formats gives **8,999 multi-tool and 3,156
-single-tool of 12,155 classifiable rows — 74.0%, not 66.8%** (5 rows parse under neither and
-are excluded per §2.2). The corresponding post-screen figure, and therefore the "65/35
-natural composition", is wrong by the same mechanism. §1's numbers are left unaltered as
-frozen text; A2.2 already removed their authority, and §2.5 computes the weights from the
-artifact instead. This is recorded here because it is the reason the rule-versus-value
-distinction is load-bearing rather than pedantic.
+**Recorded defect in §1's provisional composition.** §1 reports 8,117 multi-tool of
+12,160. That count parses only the `Tools:` format; every `hermes`-format row uses
+`<tools>…</tools>`, fails that parse, and was counted as not multi-tool.
+
+Measured by `mining/pool_strata.py` over `data/processed/sft_dedup.jsonl` (sha256
+`e6f4b16a606aa7846f5563d889a1d6b42bb817b7ea973c47a0f895bb5f9cbc11`), receipt committed at
+`mining/receipts/sft_dedup_strata.json`:
+
+| source | multi | single | unparseable |
+|---|---:|---:|---:|
+| `xlam` | 8,117 | 2,882 | 0 |
+| `hermes` | 882 | 274 | 5 |
+| **total** | **8,999** | **3,156** | **5** |
+
+`xlam` multi-tool reproduces §1's 8,117 exactly, which is what identifies the defect rather
+than merely disagreeing with it. Across both formats the share is **74.0%
+of 12,155 classifiable rows, not 66.8%**. The post-screen figure, and therefore
+"65/35 natural composition", inherits the same undercount.
+
+§1's frozen text is left unaltered — A2.2 already removed its authority, and frozen text is
+never edited in place. The figures above are reproducible from the committed parser and the
+recorded digest rather than being a second uncommitted count.
+
+### 2.7 Mining population `[OPEN — owner decision required]`
+
+§1 decontaminates `data/processed/sft_dedup.jsonl` — the SFT *training* pool — while §2.1
+mines `NousResearch/hermes-function-calling-v1`. **These are different populations, and §1's
+composition cannot supply §2's weights across them.**
+
+> **@dipak: one population must be chosen explicitly.** Whichever is chosen, decontamination
+> and the weights artifact must both be run over *that* population before generation, and the
+> dataset revision pinned — a bare dataset name is not a pin, and the run must fail closed if
+> the resolved revision differs from the recorded one.
+
+The distinction is not academic: the Hermes pool is entirely the format §1's counter could
+not read. Among `hermes` rows in the SFT pool the multi-tool share is
+76.3%, against 73.8% for `xlam` — so a weight taken from the
+wrong population is wrong twice over, once for the parse defect and once for the population.
 
 ## 3. Training arms `[PENDING]`
 

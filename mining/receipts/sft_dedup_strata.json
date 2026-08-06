@@ -1,0 +1,24 @@
+{
+  "by_source": {
+    "hermes": {
+      "multi": 882,
+      "single": 274,
+      "unparseable": 5
+    },
+    "xlam": {
+      "multi": 8117,
+      "single": 2882,
+      "unparseable": 0
+    }
+  },
+  "classifiable": 12155,
+  "counts": {
+    "multi": 8999,
+    "single": 3156,
+    "unparseable": 5
+  },
+  "multi_share": 0.7403537638831756,
+  "pool_path": "sft_dedup.jsonl",
+  "rows": 12160,
+  "sha256": "e6f4b16a606aa7846f5563d889a1d6b42bb817b7ea973c47a0f895bb5f9cbc11"
+}
