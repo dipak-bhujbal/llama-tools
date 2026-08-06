@@ -398,6 +398,66 @@ invalid: the parser fell back to a regex search for `"name"`, which matched the 
 argument key and reported these 56 malformed targets as valid calls. A check that
 invents the value it is checking is worse than no check, and the fallback has been removed.
 
+### 2.9 The decontamination artifact `[spec pinned; not yet built]`
+
+Spec settled in #general msgs 2143 and 2150, recorded here so the implementer works from the
+preregistration rather than from chat. **Exclusion precedes screening**, so the screen input
+is 12,082:
+
+```
+12,143 cleaned source − 5 prompt-ineligible − 56 target-structural exclusions = 12,082
+```
+
+That reconciliation is stated in the artifact **before** any drop or survival count.
+
+Criterion **`bfcl-pool-decontamination/v1`**, whose predicate pins the 13-gram user-text
+normalization rule, the presented-function-name collision rule, all four manifest
+categories, **the cascade order**, and fail-closed parsing.
+
+Required contents:
+
+- source path + sha256 (`sft_dedup_v2`); implementation identity
+- eligibility criterion id + target-preflight receipt hash
+- **the four BFCL manifest file hashes actually screened against**, so a future BFCL re-pin
+  detectably invalidates this artifact instead of silently coexisting with it
+- sorted-id digest of the 12,082 screen-input population, and of the post-screen population
+- exact pre/post counts by `multi`/`single`, by drop reason, and in total
+- **weights as the integer triple `(n_multi, n_single, N)`** — decimals are display-only,
+  derived at render time. Exact ratios in, exact `P_std` out.
+
+**Match order is part of the criterion, not an implementation detail.** A row tripping both
+the 13-gram screen and the name-collision screen is attributed to whichever runs first, so
+"first-match drop reason" is meaningless unless the cascade order is pinned in the criterion
+text itself.
+
+A row that survives eligibility but cannot be deterministically screened is a **hard
+failure**, not a new exclusion bucket.
+
+§1's 12,160-row figures are **explicitly non-comparable**: different source revision and
+different denominator.
+
+### 2.10 Expected: near-zero spurious-call pairs `[proposed]`
+
+Recorded in advance so it is never mistaken for a miner defect. The retained population
+carries only **10 genuine `no_call` rows in 12,082**, so mined **spurious-call preference
+pairs will be approximately zero**. That is a property of the training pool, not of the
+miner, and it is consistent with `irrelevance` being a descriptive secondary rather than an
+endpoint: this pool barely exercises no-call behaviour at all.
+
+An implementation that produced *many* spurious-call pairs from this pool would be the
+anomaly worth investigating.
+
+### 2.11 The miner re-asserts eligibility at load `[proposed]`
+
+The pool arrives pre-screened, and the miner **re-asserts that every row it receives parses
+under `pool-target-structural-eligibility/v1`, refusing the run otherwise.** Checked twice,
+trusted once.
+
+The quarantined `mine_pairs.py` did the opposite: a target it could not parse silently
+became a `no_call` ground truth. **That fallback is replaced by a refusal, never a
+reclassification** — a row the miner cannot read is a stop condition, not a row it gets to
+reinterpret.
+
 ## 3. Training arms `[PENDING]`
 
 Arms, seeds, LoRA config, kill lines, and the callback development slice (drawn from
