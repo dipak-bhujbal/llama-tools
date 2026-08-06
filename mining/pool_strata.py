@@ -51,6 +51,7 @@ _XLAM_MARKER = "Tools:"
 _TOOL_CALL = re.compile(r"<tool_call>(?:\s|\\[nrt])*(\{.*?\})(?:\s|\\[nrt])*</tool_call>", re.S)
 _TOOL_CALL_MARKER = "<tool_call>"
 _TOOL_CALL_OPEN = re.compile(r"<tool_call>")
+_TOOL_CALL_CLOSE = re.compile(r"</tool_call>")
 
 
 def tool_count(system_prompt: str) -> int | None:
@@ -155,7 +156,11 @@ def classify_target(assistant_turn: str) -> tuple[str, set[str]]:
         # beside one malformed call is a malformed target, not a valid one --
         # 612 rows in the pinned pool carry more than one block, so accepting a
         # partial parse would silently check a fraction of them.
-        if len(blocks) != len(_TOOL_CALL_OPEN.findall(text)):
+        if not (
+            len(blocks)
+            == len(_TOOL_CALL_OPEN.findall(text))
+            == len(_TOOL_CALL_CLOSE.findall(text))
+        ):
             return UNREADABLE, set()
         names: set[str] = set()
         for block in blocks:
@@ -324,9 +329,9 @@ def target_defects(pool_path: Path) -> dict[str, Any]:
         "no_call_targets": no_call_targets,
         "prompt_ineligible": prompt_ineligible,
         "unreadable": len(unreadable),
-        "unreadable_rows": unreadable[:50],
+        "unreadable_rows": unreadable,
         "defect_count": len(defects),
-        "defects": defects[:50],
+        "defects": defects,
         "passed": not defects and not unreadable,
     }
 

@@ -259,6 +259,15 @@ def test_one_valid_call_beside_one_malformed_call_is_unreadable() -> None:
     assert classify_target(turn)[0] == UNREADABLE
 
 
+def test_an_unmatched_closing_tool_call_marker_is_unreadable() -> None:
+    """Fail closed on a dangling close marker as well as a dangling open one."""
+    turn = (
+        '<tool_call>\n{"name": "ok", "arguments": {}}\n</tool_call>\n'
+        "</tool_call>"
+    )
+    assert classify_target(turn)[0] == UNREADABLE
+
+
 def test_a_block_without_a_top_level_name_is_unreadable() -> None:
     """The defect that invalidated the first receipt: these blocks carry only
     `arguments`, and a regex search for `"name"` finds an ordinary argument key
@@ -278,3 +287,27 @@ def test_a_python_repr_block_with_a_top_level_name_is_read() -> None:
 def test_an_argument_literally_named_name_is_not_the_function_name() -> None:
     turn = '<tool_call>\n{"name": "real_fn", "arguments": {"name": "decoy"}}\n</tool_call>'
     assert classify_target(turn) == (CALL, {"real_fn"})
+
+
+def test_the_receipt_preserves_every_failure_identity(tmp_path: Path) -> None:
+    """A repair/exclusion decision needs the exact set, not a sampled prefix."""
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {
+            "source_id": f"broken-{index}",
+            "messages": [
+                {"role": "system", "content": XLAM_TWO},
+                {"role": "assistant", "content": "<tool_call>garbage</tool_call>"},
+            ],
+        }
+        for index in range(56)
+    ]
+    pool.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["unreadable"] == 56
+    assert len(report["unreadable_rows"]) == 56
+    assert {row["source_id"] for row in report["unreadable_rows"]} == {
+        f"broken-{index}" for index in range(56)
+    }
