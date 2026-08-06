@@ -91,6 +91,19 @@ when that file lands.
   public default branch that is ahead of its own review.
 - The reviewed-and-merged state of `main` is what a stranger reads. Work in progress belongs
   on the branch, clearly labelled, until it has cleared the same bar.
+- **`main` is brought up to date before the owner is asked to decide anything** (owner,
+  #general msg 2128). A decision made against a stale default branch is a decision made
+  against the wrong artifact. Reviewed work is merged first, then the question is asked.
+
+## 7a. Asking the owner for a decision
+
+- **Give full context in the question itself** (owner, #general msg 2128). A decision request
+  states what is being decided, the options with their consequences, what each one costs or
+  changes, what the agents recommend and why, and what happens next under each. The owner
+  should not have to reconstruct the situation from earlier messages, or open the repo to
+  find out what a choice means.
+- Say plainly when new evidence weakens a recommendation the agents already gave. A
+  recommendation that quietly stops being true is worse than one that was never made.
 
 ## 8. Intake
 
