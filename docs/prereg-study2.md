@@ -107,10 +107,118 @@ Yield projections for the Phase 2 gate are computed on the **post-screen** pool.
 
 ---
 
-## 2. Mining `[PENDING]`
+## 2. Mining `[FROZEN — committed before the pilot runs]`
 
-Pool composition, stratification toward multi-tool prompts, sampling parameters, verifier
-version, and the yield gate arithmetic. **Must be committed before the pilot runs.**
+Authorized by the owner, #general msg 2095. Reviewed by codex before adoption. No mining
+run had produced a single pair when this section was committed; no yield number of any kind
+had been observed.
+
+### 2.1 Required inputs (closes roadmap [H] 1.1)
+
+| | |
+|---|---|
+| `SFT_ADAPTER` | `centuriandip/llama-3.1-8b-tools-sft`, subfolder `adapter/`, revision `b6f4da479f8c6fc044ee8b802a92f47780f970c5` |
+| `BFCL_LOCAL` | the pinned fetch outputs of `eval/manifests/bfcl_v4_study2.json`, verified by `python eval/fetch_pinned_bfcl.py --verify-only` |
+| Prompt pool | `NousResearch/hermes-function-calling-v1`, config `func_calling_singleturn`, split `train` |
+| Verifier | `onpolicy_verifier_v1`, gated by the fixture self-test (1,600/1,600) before any prompt is mined |
+
+The adapter revision is the one already pinned in §0.2; the same string governs both, so the
+probe and the mining run cannot silently diverge.
+
+### 2.2 Strata `[FROZEN]`
+
+Every mined prompt is assigned to exactly one stratum by the count of tools its prompt
+presents:
+
+> **`multi` = 2 or more tools presented. `single` = exactly 1.**
+>
+> The tool list is parsed from the prompt's system message under **both** pinned formats:
+> the `Tools:` JSON array, and the longest well-formed JSON array inside `<tools>…</tools>`.
+> A prompt whose tool list parses under neither is **not mined** and is recorded in the
+> ledger as `stratum=unparseable` with its source id. It never enters either numerator or
+> denominator.
+
+Both parses are required because the pool carries both formats, and a rule that reads only
+one silently reclassifies the other. That is not hypothetical — see the note in §2.6.
+
+Every ledger record carries its `stratum` label, so `y_multi` and `y_single` are recomputable
+from the artifact rather than reconstructed from a run log.
+
+### 2.3 Allocation `[FROZEN]`
+
+**Proportional.** Each stratum is sampled in proportion to its target weight `w_s` (§2.5).
+Both strata receive a **nonzero** allocation in the pilot and in the calibration run, so
+`y_multi` and `y_single` are each estimable and neither is assumed from the other.
+
+Allocation is planned proportionally but **realized** allocation is what gets recorded; the
+gate arithmetic in §2.6 standardizes to the target weights regardless, so integer rounding
+or a failed prompt cannot move the gate.
+
+### 2.4 Sampling parameters `[FROZEN]`
+
+| | |
+|---|---|
+| samples per prompt | 8 |
+| temperature | 0.8 |
+| top_p | 1.0 |
+| max_new_tokens | 256 |
+| seed | 20260804 |
+| pilot | `--n-prompts 100`, `--out-dir mining_pilot` |
+| calibration | `--n-prompts 1000`, `--out-dir mining_out` |
+
+### 2.5 Target weights `[FROZEN as a rule, not as a value]`
+
+> `w_s` = (active post-screen prompts in stratum `s`) / (all active post-screen prompts),
+> computed from the **committed, hash-pinned decontamination artifact** over the mining
+> prompt pool, **before any generation**, and recorded with that artifact's sha256.
+
+The weights are a rule and not a constant on purpose. Amendment 2 (A2.2) gives authority to
+the committed artifact alone, and §1's provisional composition figures have since been shown
+to be wrong (§2.6). Freezing today's numbers would have frozen a defect.
+
+If fixed design weights are ever preferred to natural composition, they may be used **only**
+if labelled a design choice rather than measured composition, and recorded here before the
+run.
+
+### 2.6 Yield gate arithmetic `[FROZEN]`
+
+> `y_s` = (active pairs materialized from stratum `s`) / (active post-screen prompts mined
+> in stratum `s`), both terms as defined by Amendment 2 A2.1.
+>
+> `y_std = w_multi · y_multi + w_single · y_single`
+>
+> `P_std = 10,000 · y_std` — projected pairs per **10,000 post-screen active-ledger
+> prompts** at the target weights.
+
+No survival-rate conversion appears anywhere in this arithmetic. The gate is denominated in
+post-screen prompts, so the decontamination survival fraction — unmeasured until A2.2's
+artifact exists — never enters the decision.
+
+**Decision table**, applied to `P_std` **unrounded**:
+
+| `P_std` | Decision |
+|---|---|
+| `>= 1000` | PROCEED to Phase 3A (DPO rerun) |
+| `>= 300` and `< 1000` | PROCEED CAUTIOUSLY: 1 epoch max, eval callback every ~50 steps |
+| `< 300` | DO NOT run DPO. Go to Phase 3B (rejection-sampling SFT). This outcome is itself a publishable finding that strengthens the study-1 ADR |
+
+Edges are evaluated on the exact value: `P_std = 999.6` is **not** `>= 1000`, and
+`P_std = 299.99` goes to 3B. No rounding, no "approximately", at any boundary.
+
+**This table decides on the committed calibration-run artifact only.** The 100-prompt pilot
+is an *operational* gate — the human reads its histogram and approves continuing — and is
+explicitly not the DPO-versus-3B scientific gate. Roadmap step 1.3 already says it: *do not
+proceed on projections alone.*
+
+**Recorded defect in §1's provisional composition.** §1 reports 8,117 multi-tool of 12,160.
+That count parsed only the `Tools:` format; all 1,161 `hermes`-format rows failed to parse
+and were counted as non-multi-tool. Parsing both formats gives **8,999 multi-tool and 3,156
+single-tool of 12,155 classifiable rows — 74.0%, not 66.8%** (5 rows parse under neither and
+are excluded per §2.2). The corresponding post-screen figure, and therefore the "65/35
+natural composition", is wrong by the same mechanism. §1's numbers are left unaltered as
+frozen text; A2.2 already removed their authority, and §2.5 computes the weights from the
+artifact instead. This is recorded here because it is the reason the rule-versus-value
+distinction is load-bearing rather than pedantic.
 
 ## 3. Training arms `[PENDING]`
 
