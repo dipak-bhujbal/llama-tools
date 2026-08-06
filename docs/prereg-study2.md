@@ -320,7 +320,8 @@ read" are different facts:
 - **`no_call`** — a target that deliberately answers in prose, e.g. asking for a missing
   argument rather than guessing one. Legitimate training signal, not a defect.
 - **`unreadable`** — a target that announces itself as a tool call, or as JSON, and then
-  does not parse. A hard failure.
+  does not parse. Under the adopted criterion `pool-target-structural-eligibility/v1` this is a **structural exclusion**, counted
+  and named; absent such a criterion it is a hard failure that stops the run.
 
 Rows whose *prompt* is ineligible (§2.2) are counted as **not applicable** rather than as
 checked passes: the prompt is outside the mining population, so its target is not a target
