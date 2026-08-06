@@ -303,17 +303,65 @@ re-run here, and that artifact governs.
 Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
 pool's own targets.
 
-> Before mining, every pool example is checked so that **every tool name its assistant turn
-> calls appears among the tools its own system prompt presents.** A row failing this is a
-> training-side `simple_python_363`: it teaches the model to invent a tool name, and no
-> downstream eval attributes that habit back to the pool. Such rows are reported and
-> excluded, never mined.
+> Before mining, every eligible pool example is checked so that **every tool name its
+> assistant turn calls appears among the tools its own system prompt presents.** A row
+> failing this is a training-side `simple_python_363`: it teaches the model to invent a tool
+> name, and no downstream eval attributes that habit back to the pool.
+>
+> **This fails closed.** A defect, or an eligible target the parser cannot read, is a
+> **stop condition** for the freeze and for mining — not a row to drop. Excluding such rows
+> would repair the denominator by discarding the evidence that something is wrong, which is
+> the opposite of what A2.3 does with a defective answer key.
 
-Result at this revision (receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
-**12,072 rows checked, 0 defects.** 71
-rows have an assistant turn this parser cannot read and are reported as unchecked rather
-than as passing — the count is stated so the coverage claim is 12,072 of
-12,143, not "the pool is clean".
+Targets are classified three ways, because "not a tool call" and "a tool call we cannot
+read" are different facts:
+
+- **`call`** — a tool call; its names are checked against the prompt.
+- **`no_call`** — a target that deliberately answers in prose, e.g. asking for a missing
+  argument rather than guessing one. Legitimate training signal, not a defect.
+- **`unreadable`** — a target that announces itself as a tool call, or as JSON, and then
+  does not parse. A hard failure.
+
+Rows whose *prompt* is ineligible (§2.2) are counted as **not applicable** rather than as
+checked passes: the prompt is outside the mining population, so its target is not a target
+this study will use.
+
+**Result at the pinned revision** (`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`,
+receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
+
+| | |
+|---|---:|
+| raw rows | 12,143 |
+| eligible rows | 12,138 |
+| ├ call targets | 12,072 |
+| ├ no-call targets | 10 |
+| └ **unreadable** | **56** |
+| prompt-ineligible (n/a) | 5 |
+| name defects | 0 |
+| **passed** | **False** |
+
+**The preflight does not pass, and §2 cannot freeze until it does.** 56 eligible
+targets are `<tool_call>` blocks carrying no top-level `name` — their only top-level key is
+`arguments`, with the call's name nested inside it. They are not well-formed
+`{name, arguments}` calls, so this study cannot check what tool they teach.
+
+No name defects were found among the 12,072 targets that *are* well-formed.
+
+> **@dipak: repairing these 56 rows is a material data change and neither agent should
+> make it silently.** Two options, both requiring your decision:
+>
+> **(a) Documented deterministic repair** — lift the nested `arguments.name` to top level
+> under a committed, tested transform, producing a new cleaned revision with its own sha256.
+> Recovers 56 rows; changes training data.
+>
+> **(b) Preregistered exclusion** — declare these rows out of the mining population here,
+> before any generation, with the count and the reason recorded. Loses 56 rows of
+> 12,138 (0.5%); changes nothing else.
+
+An earlier version of this section reported `unreadable: 0, passed: true`. That receipt was
+invalid: the parser fell back to a regex search for `"name"`, which matched the *nested*
+argument key and reported these 56 malformed targets as valid calls. A check that
+invents the value it is checking is worse than no check, and the fallback has been removed.
 
 ## 3. Training arms `[PENDING]`
 

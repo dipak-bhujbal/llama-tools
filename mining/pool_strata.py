@@ -23,6 +23,7 @@ denominator.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -45,8 +46,12 @@ ZERO_TOOLS = "zero_tools"
 # matches that first and parses nothing.
 _HERMES = re.compile(r"<tools>\s*(\[.*?\])\s*</tools>", re.S)
 _XLAM_MARKER = "Tools:"
-_TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
-_CALL_NAME = re.compile(r'"name"\s*:\s*"([^"]+)"')
+# Some Hermes targets carry the tag boundary as the two characters backslash-n
+# rather than a newline, so a plain `\s*` misses 61 rows in the current pool.
+_TOOL_CALL = re.compile(r"<tool_call>(?:\s|\\[nrt])*(\{.*?\})(?:\s|\\[nrt])*</tool_call>", re.S)
+_TOOL_CALL_MARKER = "<tool_call>"
+_TOOL_CALL_OPEN = re.compile(r"<tool_call>")
+_TOOL_CALL_CLOSE = re.compile(r"</tool_call>")
 
 
 def tool_count(system_prompt: str) -> int | None:
@@ -124,87 +129,99 @@ def presented_names(system_prompt: str) -> set[str]:
     return names
 
 
-def target_names(assistant_turn: str) -> set[str] | None:
-    """The tool names this example teaches the model to call. `None` if unreadable."""
-    blocks = _TOOL_CALL.findall(assistant_turn)
-    if blocks:
-        # Hermes targets embed a Python-repr dict often enough that json.loads
-        # fails on the arguments; the tool *name* is still well-formed, and the
-        # name is the whole of what this check needs. Falling back to it keeps
-        # 1,161 rows inside the check rather than reporting them as unreadable
-        # -- which would repeat, on the target side, exactly the blind spot the
-        # presented-tool parser was fixed for.
+CALL = "call"
+NO_CALL = "no_call"
+UNREADABLE = "unreadable"
+
+
+def classify_target(assistant_turn: str) -> tuple[str, set[str]]:
+    """Return `(kind, names)` for what this example teaches the model to emit.
+
+    Three outcomes, and the distinction is the point. `call` is a tool call and
+    its names are checked against the prompt. `no_call` is a target that
+    deliberately answers in prose -- a clarification request, a refusal to guess
+    at missing arguments -- which is legitimate training signal and not a defect.
+    `unreadable` is a target that announces itself as a tool call, or as JSON,
+    and then does not parse; that is a hard failure, because a target we cannot
+    read is one we cannot check, and treating it as benign is how an unchecked
+    row becomes a passing row.
+    """
+    text = assistant_turn.strip()
+    if not text:
+        return UNREADABLE, set()
+
+    if _TOOL_CALL_MARKER in text:
+        blocks = _TOOL_CALL.findall(text)
+        # Every opening marker must have produced a parsed block. One valid call
+        # beside one malformed call is a malformed target, not a valid one --
+        # 612 rows in the pinned pool carry more than one block, so accepting a
+        # partial parse would silently check a fraction of them.
+        if not (
+            len(blocks)
+            == len(_TOOL_CALL_OPEN.findall(text))
+            == len(_TOOL_CALL_CLOSE.findall(text))
+        ):
+            return UNREADABLE, set()
         names: set[str] = set()
         for block in blocks:
-            try:
-                call = json.loads(block)
-                if isinstance(call, dict) and isinstance(call.get("name"), str):
-                    names.add(call["name"])
-                    continue
-            except (json.JSONDecodeError, ValueError):
-                pass
-            found = _CALL_NAME.search(block)
-            if found is None:
-                return None
-            names.add(found.group(1))
-        return names or None
+            call = _parse_call_block(block)
+            if call is None:
+                return UNREADABLE, set()
+            names.add(call)
+        return (CALL, names) if names else (UNREADABLE, set())
 
+    if text[0] in "[{":
+        parsed_names = _json_call_names(text)
+        return (CALL, parsed_names) if parsed_names else (UNREADABLE, set())
+
+    # Prose. Not a call, and not a failure to read one.
+    return NO_CALL, set()
+
+
+def _parse_call_block(block: str) -> str | None:
+    """The function name this `<tool_call>` block declares, or `None`.
+
+    JSON first, then a safe Python-literal parse, because some targets embed a
+    repr rather than JSON. Either way a **top-level string `name`** is required.
+
+    There is deliberately no regex fallback. The previous one searched the block
+    for `"name": "..."` and found it inside `arguments` on blocks that have no
+    top-level name at all -- manufacturing a function name out of an ordinary
+    argument key, and reporting 56 malformed targets as valid calls. A check that
+    invents the value it is checking is worse than no check.
+    """
+    parsed: Any = None
     try:
-        parsed = json.loads(assistant_turn.strip())
+        parsed = json.loads(block)
     except (json.JSONDecodeError, ValueError):
+        try:
+            parsed = ast.literal_eval(block)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return None
+    if not isinstance(parsed, dict):
         return None
+    name = parsed.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _json_call_names(text: str) -> set[str]:
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return set()
     calls = parsed if isinstance(parsed, list) else [parsed]
     names: set[str] = set()
     for call in calls:
         if not isinstance(call, dict) or not isinstance(call.get("name"), str):
-            return None
+            return set()
         names.add(call["name"])
-    return names or None
+    return names
 
 
-def target_defects(pool_path: Path) -> dict[str, Any]:
-    """Rows whose training target calls a tool the prompt never presented.
-
-    The same rule the answer-key preflight applies to BFCL, turned on our own
-    training pool: `simple_python_363` was a key expecting a name the item never
-    offered, and an SFT example whose assistant turn calls a tool absent from its
-    own system prompt is that defect on the training side. It teaches the model
-    to invent a tool name, and no eval will attribute the habit back here.
-    """
-    payload = pool_path.read_bytes()
-    defects: list[dict[str, Any]] = []
-    checked = unreadable_target = 0
-
-    for index, line in enumerate(payload.decode("utf-8").splitlines()):
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        presented = presented_names(_system_prompt(row))
-        assistant = next(
-            (m.get("content", "") for m in row.get("messages", []) if m.get("role") == "assistant"),
-            "",
-        )
-        called = target_names(assistant)
-        if called is None:
-            unreadable_target += 1
-            continue
-        checked += 1
-        missing = sorted(called - presented)
-        if missing:
-            defects.append({
-                "line": index + 1,
-                "source_id": row.get("source_id"),
-                "called_but_not_presented": missing,
-            })
-
-    return {
-        "pool_path": pool_path.name,
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "rows_checked": checked,
-        "unreadable_target": unreadable_target,
-        "defect_count": len(defects),
-        "defects": defects[:50],
-    }
+def target_names(assistant_turn: str) -> set[str] | None:
+    """The tool names this example teaches the model to call. `None` if not a call."""
+    kind, names = classify_target(assistant_turn)
+    return names if kind == CALL else None
 
 
 def _system_prompt(row: dict[str, Any]) -> str:
@@ -250,13 +267,98 @@ def composition(pool_path: Path) -> dict[str, Any]:
     }
 
 
+def target_defects(pool_path: Path) -> dict[str, Any]:
+    """Preflight the pool's own targets: does every call name a presented tool?
+
+    The answer-key rule of prereg A2.3, turned on our own training data.
+    `simple_python_363` was a key expecting a name its item never offered; an SFT
+    example whose assistant turn calls a tool absent from its own system prompt
+    is that same defect on the training side, and it teaches the model to invent
+    a tool name where no eval will attribute the habit back here.
+
+    Fail-closed. A defect or an unreadable eligible target is a stop condition,
+    not a row to drop: silently excluding them would repair the denominator by
+    discarding the evidence that something is wrong.
+    """
+    payload = pool_path.read_bytes()
+    defects: list[dict[str, Any]] = []
+    unreadable: list[dict[str, Any]] = []
+    raw_rows = call_targets = no_call_targets = prompt_ineligible = 0
+
+    for index, line in enumerate(payload.decode("utf-8").splitlines()):
+        if not line.strip():
+            continue
+        raw_rows += 1
+        row = json.loads(line)
+        system = _system_prompt(row)
+        assistant = next(
+            (m.get("content", "") for m in row.get("messages", []) if m.get("role") == "assistant"),
+            "",
+        )
+        stratum, _ = stratum_of(system)
+        if stratum == INELIGIBLE:
+            # Not applicable rather than unchecked: the prompt itself is out of
+            # the mining population, so its target is not a target we will use.
+            prompt_ineligible += 1
+            continue
+
+        kind, called = classify_target(assistant)
+        if kind == NO_CALL:
+            no_call_targets += 1
+            continue
+        if kind == UNREADABLE:
+            unreadable.append({"line": index + 1, "source_id": row.get("source_id")})
+            continue
+
+        call_targets += 1
+        missing = sorted(called - presented_names(system))
+        if missing:
+            defects.append({
+                "line": index + 1,
+                "source_id": row.get("source_id"),
+                "called_but_not_presented": missing,
+            })
+
+    eligible = call_targets + no_call_targets + len(unreadable)
+    return {
+        "pool_path": pool_path.name,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "raw_rows": raw_rows,
+        "eligible_rows": eligible,
+        "call_targets": call_targets,
+        "no_call_targets": no_call_targets,
+        "prompt_ineligible": prompt_ineligible,
+        "unreadable": len(unreadable),
+        "unreadable_rows": unreadable,
+        "defect_count": len(defects),
+        "defects": defects,
+        "passed": not defects and not unreadable,
+    }
+
+
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pool", type=Path)
     parser.add_argument("--json", type=Path, help="write the receipt as JSON")
+    parser.add_argument("--targets", action="store_true",
+                        help="run the target preflight instead of the composition count")
     args = parser.parse_args()
+
+    if args.targets:
+        report = target_defects(args.pool)
+        print(f"{report['pool_path']}  sha256={report['sha256']}")
+        for field in ("raw_rows", "eligible_rows", "call_targets", "no_call_targets",
+                      "prompt_ineligible", "unreadable", "defect_count"):
+            print(f"  {field:<18} {report[field]}")
+        print(f"  {'PASSED':<18} {report['passed']}")
+        if args.json:
+            args.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print(f"wrote {args.json}")
+        if not report["passed"]:
+            raise SystemExit("target preflight FAILED: see defects/unreadable above")
+        return
 
     receipt = composition(args.pool)
     counts = receipt["counts"]
