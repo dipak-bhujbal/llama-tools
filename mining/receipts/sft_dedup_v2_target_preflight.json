@@ -1,8 +1,14 @@
 {
+  "call_targets": 12128,
   "defect_count": 0,
   "defects": [],
+  "eligible_rows": 12138,
+  "no_call_targets": 10,
+  "passed": true,
   "pool_path": "sft_dedup_v2.jsonl",
-  "rows_checked": 12072,
+  "prompt_ineligible": 5,
+  "raw_rows": 12143,
   "sha256": "9e5b7b4f3a5990b5c92e1d5f1b84d8664a9cce006f88087db7cc7219ffe76b2b",
-  "unreadable_target": 71
+  "unreadable": 0,
+  "unreadable_rows": []
 }

@@ -303,17 +303,46 @@ re-run here, and that artifact governs.
 Owner instruction, #general msg 2108: extend the answer-key preflight principle to the
 pool's own targets.
 
-> Before mining, every pool example is checked so that **every tool name its assistant turn
-> calls appears among the tools its own system prompt presents.** A row failing this is a
-> training-side `simple_python_363`: it teaches the model to invent a tool name, and no
-> downstream eval attributes that habit back to the pool. Such rows are reported and
-> excluded, never mined.
+> Before mining, every eligible pool example is checked so that **every tool name its
+> assistant turn calls appears among the tools its own system prompt presents.** A row
+> failing this is a training-side `simple_python_363`: it teaches the model to invent a tool
+> name, and no downstream eval attributes that habit back to the pool.
+>
+> **This fails closed.** A defect, or an eligible target the parser cannot read, is a
+> **stop condition** for the freeze and for mining — not a row to drop. Excluding such rows
+> would repair the denominator by discarding the evidence that something is wrong, which is
+> the opposite of what A2.3 does with a defective answer key.
 
-Result at this revision (receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
-**12,072 rows checked, 0 defects.** 71
-rows have an assistant turn this parser cannot read and are reported as unchecked rather
-than as passing — the count is stated so the coverage claim is 12,072 of
-12,143, not "the pool is clean".
+Targets are classified three ways, because "not a tool call" and "a tool call we cannot
+read" are different facts:
+
+- **`call`** — a tool call; its names are checked against the prompt.
+- **`no_call`** — a target that deliberately answers in prose, e.g. asking for a missing
+  argument rather than guessing one. Legitimate training signal, not a defect.
+- **`unreadable`** — a target that announces itself as a tool call, or as JSON, and then
+  does not parse. A hard failure.
+
+Rows whose *prompt* is ineligible (§2.2) are counted as **not applicable** rather than as
+checked passes: the prompt is outside the mining population, so its target is not a target
+this study will use.
+
+**Result at the pinned revision** (`python -m mining.pool_strata data/processed/sft_dedup_v2.jsonl --targets`,
+receipt at `mining/receipts/sft_dedup_v2_target_preflight.json`):
+
+| | |
+|---|---:|
+| raw rows | 12,143 |
+| eligible rows | 12,138 |
+| ├ call targets | 12,128 |
+| └ no-call targets | 10 |
+| prompt-ineligible (n/a) | 5 |
+| **unreadable** | **0** |
+| **defects** | **0** |
+| passed | True |
+
+The eligible population is classified completely — 12,128 + 10 = 12,138,
+with nothing in an unchecked bucket. That completeness is the claim; "0 defects" over a
+partial scan would not have been one.
 
 ## 3. Training arms `[PENDING]`
 

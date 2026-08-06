@@ -14,11 +14,15 @@ import json
 from pathlib import Path
 
 from mining.pool_strata import (
+    CALL,
     INELIGIBLE,
     MULTI,
+    NO_CALL,
     NO_TOOL_LIST,
     SINGLE,
+    UNREADABLE,
     ZERO_TOOLS,
+    classify_target,
     composition,
     presented_names,
     stratum_of,
@@ -177,7 +181,68 @@ def test_target_defects_flags_a_call_to_an_unpresented_tool(tmp_path: Path) -> N
 
     report = target_defects(pool)
 
-    assert report["rows_checked"] == 2
+    assert report["call_targets"] == 2
     assert report["defect_count"] == 1
+    assert report["passed"] is False
     assert report["defects"][0]["source_id"] == "bad"
     assert report["defects"][0]["called_but_not_presented"] == ["invented"]
+
+
+def test_a_tool_call_tag_bounded_by_literal_backslash_n_is_read() -> None:
+    """61 rows in the pool carry the tag boundary as the two characters
+    backslash-n rather than a newline. A plain `\\s*` misses every one of them
+    and reports a readable target as unreadable."""
+    turn = '<tool_call>\\n{"name": "search", "arguments": {}}\\n</tool_call>'
+    kind, names = classify_target(turn)
+    assert (kind, names) == (CALL, {"search"})
+
+
+def test_a_prose_target_is_no_call_not_unreadable() -> None:
+    """Answering in prose -- asking for a missing argument rather than guessing
+    -- is legitimate training signal, not a parse failure."""
+    kind, names = classify_target("Certainly! Before proceeding I would need the data set.")
+    assert (kind, names) == (NO_CALL, set())
+
+
+def test_a_target_claiming_to_be_a_call_and_failing_to_parse_is_unreadable() -> None:
+    """The hard failure: it announces itself as a tool call and then does not
+    parse. A target we cannot read is one we cannot check."""
+    assert classify_target("<tool_call>not json at all</tool_call>")[0] == UNREADABLE
+    assert classify_target('[{"name": ')[0] == UNREADABLE
+
+
+def test_the_preflight_fails_closed_on_an_unreadable_eligible_target(tmp_path: Path) -> None:
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {"source_id": "ok", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": '[{"name": "a", "arguments": {}}]'}]},
+        {"source_id": "broken", "messages": [
+            {"role": "system", "content": XLAM_TWO},
+            {"role": "assistant", "content": "<tool_call>garbage</tool_call>"}]},
+    ]
+    pool.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["unreadable"] == 1
+    assert report["passed"] is False, "an unreadable eligible target must stop the freeze"
+
+
+def test_a_prompt_ineligible_row_is_not_applicable_rather_than_a_pass(tmp_path: Path) -> None:
+    """Its prompt is out of the mining population, so its target is not a target
+    we will use -- counted separately, never as a checked pass."""
+    pool = tmp_path / "pool.jsonl"
+    rows = [
+        {"source_id": "nopromptools", "messages": [
+            {"role": "system", "content": "no tools here"},
+            {"role": "assistant", "content": '[{"name": "x", "arguments": {}}]'}]},
+    ]
+    pool.write_text(json.dumps(rows[0]) + "\n")
+
+    report = target_defects(pool)
+
+    assert report["prompt_ineligible"] == 1
+    assert report["call_targets"] == 0
+    assert report["eligible_rows"] == 0
+    assert report["passed"] is True
