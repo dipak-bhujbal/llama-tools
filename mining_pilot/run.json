@@ -1,0 +1,61 @@
+{
+  "adapter": {
+    "repo": "centuriandip/llama-3.1-8b-tools-sft",
+    "revision": "b6f4da479f8c6fc044ee8b802a92f47780f970c5",
+    "subfolder": "adapter/"
+  },
+  "allocation": {
+    "multi": 73,
+    "single": 27
+  },
+  "backend_sha256": "4df991f7cdde9ffda5a9d20cca5b90644a8491f4533c5f8496ad21266f97310f",
+  "base_model": {
+    "repo": "meta-llama/Llama-3.1-8B-Instruct",
+    "revision": "0e9e39f249a16976918f6564b8830bc894c89659"
+  },
+  "decontamination_receipt_sha256": "3daaffa85a2097468f53845d1cddf996a0e68a3605916e26918891c2972732b3",
+  "manifest_sha256": "542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0",
+  "miner_sha256": "83dde462ad1905f6959304a630360ea2bd06f53d6acbe2997b88309889d1e187",
+  "n_prompts": 100,
+  "pool_sha256": "9e5b7b4f3a5990b5c92e1d5f1b84d8664a9cce006f88087db7cc7219ffe76b2b",
+  "post_screen_id_sha256": "69d381413f8095d483b35c9bcd77e83bd6f72771edc9b4f192510f8e7392e5e3",
+  "sampling": {
+    "max_new_tokens": 256,
+    "mode": "batched-num-return-sequences",
+    "samples": 8,
+    "seed": 20260804,
+    "seed_derivation": "sha256(seed:prompt_id:batch) >> 1",
+    "temperature": 0.8,
+    "top_p": 1.0
+  },
+  "selected_id_sha256": "b2e091fc144ada17958799626cdf7b4badac2c15b15a7f7dfd22eb9a0dcb00ef",
+  "selected_ids_ordered_sha256": "00a73fe7bc65a064f48894f18855de2b26f640a351a07aae8c1d1db6ba4307cf",
+  "stage": "pilot",
+  "verifier": {
+    "module_sha256": "dbbb48ef00d1dee281ac60ca066cfa51259f113e0d341fd1fb622f1571f99333",
+    "selftest": {
+      "fixtures": [
+        {
+          "path": "tests/fixtures/fixture_pairs_train.jsonl",
+          "rows": 1440,
+          "sha256": "83e12a3e2f374d3e440b1e61c7d3b71cb50c7f2379bf2ef51b0b2be1c9e1ac0c"
+        },
+        {
+          "path": "tests/fixtures/fixture_pairs_eval.jsonl",
+          "rows": 160,
+          "sha256": "f4228bacce224dff52be7e0bb53524dcf7019b94c09ce0fc3ef0cad0a9b10b87"
+        }
+      ],
+      "pairs": 1600,
+      "pairs_passed": 1600,
+      "receipt_sha256": "3e0f921e607fd112555c35aaa1cd9f16f54841cfed46ddda9c20066a0474cf7f"
+    },
+    "selftest_version": "onpolicy_verifier_v1",
+    "version": "onpolicy_verifier_v1"
+  },
+  "weights": {
+    "N": 11071,
+    "n_multi": 8081,
+    "n_single": 2990
+  }
+}
