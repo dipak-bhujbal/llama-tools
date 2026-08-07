@@ -1,8 +1,9 @@
 # Amendment 4 — KTO comparison arm — **DRAFT, NOT ADOPTED**
 
-**Status: draft for review, cycle 3.** Not in `docs/prereg-study2.md`, authorizes
-nothing, and no arm may run on it. To be folded in as **record 5 / numbered
-Amendment 4** once reviewed and adopted in its final reviewed form.
+**Status: draft for review, cycle-3 role-reversal fix.** Not in
+`docs/prereg-study2.md`, authorizes nothing, and no arm may run on it. To be
+folded in as **record 5 / numbered Amendment 4** once reviewed and adopted in its
+final reviewed form.
 
 **Owner decisions already recorded (#general msg 2625) and preserved unchanged
 through this revision:** A4.1 pairs-only · A4.3 equal weights · A4.5 Holm
@@ -63,7 +64,10 @@ desirable and undesirable rows on opposite sides and leak the held-out set.
 | `prompt` | **exactly the pair's `prompt_messages` list**, unmodified |
 | `completion` | **exactly** `[{"role": "assistant", "content": <chosen or rejected>}]` |
 | `label` | `bool` — `true` desirable, `false` undesirable |
-| `error_type` | **`= rejected_reason`** from the pair row. The miner emits `rejected_reason`; there is no `error_type` field. **A null or unrecognised value fails the conversion** |
+| `chosen_index` / `rejected_index` | both source indices, copied unchanged onto both expanded rows |
+| `stratum` | the source pair's `multi` / `single` stratum, copied unchanged |
+| `verifier_version` | exactly `onpolicy_verifier_v1`; any other value fails the conversion |
+| `error_type` | **`= rejected_reason`** from the pair row. The miner emits `rejected_reason`; there is no `error_type` field. The complete recognized set is **`{invalid_json, missing_call, spurious_call, wrong_tool, wrong_args}`**, exactly `mining.verifier.REASONS` under `onpolicy_verifier_v1`; null or any other value fails the conversion |
 
 **Asserted before the arm starts, fail-closed:** every `pair_id` appears exactly
 twice with opposite labels; **no `pair_id` and no `prompt_id` appears in both
@@ -83,9 +87,11 @@ completion and destroy the mismatched-prompt KL estimate.**
 > two **distinct** `pair_id`s and `prompt_id`s, and there is no singleton
 > remainder. **Requires `N >= 2` distinct pairs in each split.**
 >
-> **Pinned `CUDA_VISIBLE_DEVICES` world size = 1**, asserted at start — not
-> merely "one device visible" — since any multi-device batching would change the
-> KL construction silently.
+> **Pinned distributed `world_size = 1` with exactly one selected CUDA device**,
+> asserted at start (`WORLD_SIZE == 1` and the accelerator reports one process).
+> The physical GPU index is not pinned; the process count and batching topology
+> are. Any multi-process or multi-GPU launch fails because it would change the KL
+> construction silently.
 
 ## A4.5 — batch size, in the correct unit
 
@@ -103,19 +109,21 @@ double the step count.
 
 | | |
 |---|---|
+| base | `meta-llama/Llama-3.1-8B-Instruct` revision `0e9e39f249a16976918f6564b8830bc894c89659` — §3.4(a) |
+| init | shipped SFT adapter revision `b6f4da479f8c6fc044ee8b802a92f47780f970c5`, trained in place — §3.4(a) |
 | `beta` | 0.1 |
 | `desirable_weight` / `undesirable_weight` | 1.0 / 1.0 |
 | LR · schedule · warmup | **`5e-6`** · cosine · `warmup_ratio = 0.03` — §3.4(b), **not** §3.4 common, which carries none of these |
-| batch | per-device **2**, grad-accum **16**, eval batch 2 |
+| epochs · batch | 1 epoch; per-device **2**, grad-accum **16**, eval batch 2 |
 | precision | bf16, gradient checkpointing **on**, `max_length = 2048` |
-| LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj","k_proj","v_proj","o_proj"]` — §3.4(b) by reference |
-| `disable_dropout` | **`True`** — matches the deterministic-eval posture of the other arms |
+| LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj","k_proj","v_proj","o_proj"]` — §3.4(a), no new modules or rank change |
+| `disable_dropout` | **`True`** — fixes runtime behavior explicitly: the adapter config retains `dropout = 0.05`, while TRL disables dropout modules during this run |
 | `precompute_ref_log_probs` | **`False`** |
 | `sync_ref_model` | **`False`** |
 | sampling | `train_sampling_strategy='sequential'` |
 | seeds | training 42, split 42 |
-| libraries | the frozen version table recorded in the run artifact, asserted at start |
-| reference model | **asserted equal to the shipped SFT adapter at step 0** |
+| libraries | `trl 1.8.0`, `peft 0.19.1`, `transformers 5.14.1`, `torch 2.13.0`, `datasets 5.0.0`, `accelerate 1.14.0` — exact equality asserted at start |
+| reference model | frozen `ref` adapter copied from the shipped SFT adapter above; **parameter-hash equality asserted at step 0** before the policy updates |
 
 **Why both weights are 1.0:** A4.1's conversion is **exactly balanced**, and 1/1
 is the principled setting for that regime. *(Not "because TRL's defaults were
