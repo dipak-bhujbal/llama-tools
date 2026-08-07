@@ -992,6 +992,30 @@ def run(
 
     ledger = Ledger(out_dir / "ledger.jsonl")
     already = ledger.processed_ids()
+    # A deadline stop or a crash must still leave the artifact set consistent
+    # with the ledger. Without the finally below, an aborted run keeps whatever
+    # summary the previous invocation wrote — describing work this one extended.
+    summary: dict[str, Any] | None = None
+    try:
+        _mine_selected(preflight, ledger, already, generate_fn)
+    finally:
+        summary = write_derivatives(
+            out_dir,
+            ledger,
+            preflight.survivor_counts,
+            stage,
+            preflight.allocation,
+        )
+
+    return summary
+
+
+def _mine_selected(
+    preflight: StagePreflight,
+    ledger: Ledger,
+    already: set[str],
+    generate_fn: Callable[[Prompt, int], list[str]],
+) -> None:
     for prompt in preflight.selected:
         if prompt.prompt_id in already:
             continue  # resume: already paid for, never re-sampled
@@ -1014,14 +1038,6 @@ def run(
                 },
             }
         )
-
-    return write_derivatives(
-        out_dir,
-        ledger,
-        preflight.survivor_counts,
-        stage,
-        preflight.allocation,
-    )
 
 
 def redo_run(out_dir: Path, count: int) -> tuple[int, dict[str, Any]]:
@@ -1068,6 +1084,10 @@ def main() -> None:
                         help="the pod's ACTUAL hourly rate from the console")
     parser.add_argument("--cap-usd", type=float, default=None,
                         help="owner-approved total-stage cap in USD")
+    parser.add_argument("--confirm-paid-run", action="store_true",
+                        help="required to bill: rate and cap alone are arithmetic")
+    parser.add_argument("--persistent-root", type=Path, default=None,
+                        help="verified durable mount the out-dir must live under")
     parser.add_argument("--redo-last", type=int, default=None,
                         help="tombstone the most recent N active records and exit")
     args = parser.parse_args()
@@ -1113,18 +1133,31 @@ def main() -> None:
             "the run carries a deadline derived from what this pod actually "
             "charges. Use --dry-run to walk the whole path at $0."
         )
+    if not args.confirm_paid_run:
+        raise SystemExit(
+            "refusing to launch: --confirm-paid-run is required. A rate and a cap "
+            "are arithmetic; this flag is the operator stating that a billable pod "
+            "is intended, with provider-side auto-termination already armed."
+        )
 
-    from mining.backend import load_policy, sampling_receipt
+    # Both names are caught deliberately. Run as `python -m mining.mine_pairs`
+    # this module exists twice — once as `__main__`, once as `mining.mine_pairs`
+    # via the backend's import — so `__main__.MinerError` and the BackendError
+    # base class are different objects and a bare `except MinerError` catches
+    # nothing. Catching the backend's own class works under either entry point.
+    from mining.backend import BackendError, execute_paid_stage
 
-    receipt = sampling_receipt(args.hourly_rate, args.cap_usd)
-    bound = receipt["spend_bound"]
-    print(
-        f"spend bound: ${args.cap_usd:.2f} cap at ${args.hourly_rate:.2f}/hr "
-        f"-> terminate after {bound['deadline_seconds']}s "
-        f"({bound['deadline_seconds'] / 3600:.2f} h)"
-    )
-    generate_fn, _guard = load_policy(args.hourly_rate, args.cap_usd)
-    summary = run(out_dir=args.out_dir, stage=args.stage, generate_fn=generate_fn)
+    try:
+        summary = execute_paid_stage(
+            out_dir=args.out_dir,
+            stage=args.stage,
+            hourly_rate_usd=args.hourly_rate,
+            cap_usd=args.cap_usd,
+            persistent_root=args.persistent_root,
+            fresh=args.fresh,
+        )
+    except (MinerError, BackendError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(
         f"mined {summary['prompts_mined_total']} prompts -> "
         f"{summary['pairs_total']} pairs; histogram {summary['pass_histogram']}"

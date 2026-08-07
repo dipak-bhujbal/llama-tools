@@ -182,3 +182,131 @@ def test_the_receipt_records_what_a_launch_sheet_must_carry() -> None:
     assert receipt["adapter"]["revision"].startswith("b6f4da4")
     assert receipt["spend_bound"]["deadline_seconds"] == compute_deadline_seconds(1.00, 0.53)
     assert receipt["spend_bound"]["hourly_rate_usd"] == 0.53
+
+
+# --- Review cycle 1: the cap must bound the STAGE, not the invocation --------
+
+
+def test_the_deadline_check_runs_per_sample_not_per_prompt() -> None:
+    """Codex's repro: 8 samples of 100s each all ran past a 10s deadline,
+    because the only check happened between prompts."""
+    clock = {"now": 0.0}
+    guard = SpendGuard(deadline_seconds=10, monotonic=lambda: clock["now"])
+    produced: list[int] = []
+
+    def generate_once(model, tok, rendered, mx, temp, top_p, seed):
+        clock["now"] += 100.0  # each sample burns 100s
+        produced.append(seed)
+        return "out"
+
+    generate_fn = make_generate_fn(object(), FakeTokenizer(), guard, generate_once)
+
+    with pytest.raises(BackendError, match="spend deadline reached"):
+        generate_fn(_prompt("p1"), 8)
+
+    assert len(produced) == 1, "the deadline stops the second sample, not the ninth"
+
+
+def test_prior_sessions_shrink_the_allowance() -> None:
+    """A resume gets what is left, not a fresh window."""
+    guard = SpendGuard(
+        deadline_seconds=100, monotonic=lambda: 0.0, consumed_before=95.0
+    )
+
+    assert guard.remaining == pytest.approx(5.0)
+
+
+def test_an_exhausted_allowance_refuses_immediately() -> None:
+    guard = SpendGuard(
+        deadline_seconds=100, monotonic=lambda: 0.0, consumed_before=100.0
+    )
+
+    with pytest.raises(BackendError, match="spend deadline reached"):
+        guard.check()
+
+
+def test_a_cap_above_the_approved_ceiling_is_refused() -> None:
+    with pytest.raises(BackendError, match="exceeds the owner-approved"):
+        compute_deadline_seconds(100.0, 0.53)
+
+
+def test_non_finite_values_are_refused_rather_than_crashing() -> None:
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(BackendError, match="finite number"):
+            compute_deadline_seconds(bad, 0.53)
+        with pytest.raises(BackendError, match="finite number"):
+            compute_deadline_seconds(1.00, bad)
+
+
+# --- Chat-template preflight, before any weights load ------------------------
+
+
+class RefusingTokenizer:
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        if any(m["role"] == "tool" for m in messages):
+            raise ValueError("template does not know the 'tool' role")
+        return "RENDERED"
+
+
+def test_the_template_preflight_fails_closed_before_weights_load() -> None:
+    from mining.backend import preflight_chat_template
+
+    prompts = [
+        _prompt("plain"),
+        _prompt("tooled", messages=(("system", "s"), ("user", "u"), ("tool", "t"))),
+    ]
+
+    with pytest.raises(BackendError, match="cannot render this row's turns"):
+        preflight_chat_template(RefusingTokenizer(), prompts)
+
+
+def test_the_template_preflight_passes_when_every_row_renders() -> None:
+    from mining.backend import preflight_chat_template
+
+    prompts = [_prompt(f"p{i}") for i in range(5)]
+    assert preflight_chat_template(FakeTokenizer(), prompts) == 5
+
+
+# --- Exclusive lock ----------------------------------------------------------
+
+
+def test_two_processes_cannot_bill_against_one_stage(tmp_path) -> None:
+    from mining.backend import RunLock
+
+    with RunLock(tmp_path):
+        with pytest.raises(BackendError, match="is held by"):
+            with RunLock(tmp_path):
+                pass
+
+
+def test_the_lock_is_released_on_exit(tmp_path) -> None:
+    from mining.backend import RunLock
+
+    with RunLock(tmp_path):
+        pass
+    with RunLock(tmp_path):
+        pass  # reacquiring is fine once released
+
+
+# --- Persistent output root --------------------------------------------------
+
+
+def test_a_paid_run_refuses_container_local_output(tmp_path) -> None:
+    from mining.backend import verify_persistent_root
+
+    with pytest.raises(BackendError, match="--persistent-root is required"):
+        verify_persistent_root(tmp_path / "out", None)
+
+
+def test_the_out_dir_must_live_inside_the_durable_mount(tmp_path) -> None:
+    from mining.backend import verify_persistent_root
+
+    root = tmp_path / "mnt"
+    root.mkdir()
+    elsewhere = tmp_path / "container_local"
+    elsewhere.mkdir()
+
+    with pytest.raises(BackendError, match="not inside"):
+        verify_persistent_root(elsewhere, root)
+
+    assert verify_persistent_root(root / "pilot", root) == (root / "pilot").resolve()

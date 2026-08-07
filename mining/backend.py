@@ -29,8 +29,11 @@ and its tests stay importable — and runnable — with no GPU and no weights.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import json
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mining.mine_pairs import (
@@ -57,6 +60,10 @@ STORAGE_RESERVE_USD = 0.08
 # estimate covers would make the estimate decorative.
 MAX_WALL_CLOCK_SECONDS = 2 * 60 * 60
 
+# The owner approved exactly this much (msgs 2370-2371). A cap argument is an
+# operator transcription of that decision, not a place to raise it.
+APPROVED_CAP_USD = 1.00
+
 
 class BackendError(MinerError):
     """Generation cannot proceed safely, so it does not proceed."""
@@ -81,8 +88,16 @@ def compute_deadline_seconds(cap_usd: float, hourly_rate_usd: float) -> int:
     Takes the *observed* console rate rather than a remembered one. July's
     $0.49/hr is evidence of what was paid then, not of what this pod costs.
     """
+    for label, value in (("cap", cap_usd), ("hourly rate", hourly_rate_usd)):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise BackendError(f"{label} must be a finite number, not {value!r}")
     if hourly_rate_usd <= 0:
         raise BackendError("hourly rate must be positive to bound a run")
+    if cap_usd > APPROVED_CAP_USD:
+        raise BackendError(
+            f"cap ${cap_usd:.2f} exceeds the owner-approved ${APPROVED_CAP_USD:.2f} "
+            f"ceiling; raising it is an owner decision, not a flag"
+        )
     budget = cap_usd - STORAGE_RESERVE_USD
     if budget <= 0:
         raise BackendError(
@@ -100,10 +115,12 @@ class SpendGuard:
     guard cannot be defeated by a wall-clock adjustment mid-run.
     """
 
-    deadline_seconds: int
+    deadline_seconds: float
     monotonic: Callable[[], float]
+    consumed_before: float = 0.0
     started_at: float = 0.0
     prompts_started: int = 0
+    samples_started: int = 0
 
     def __post_init__(self) -> None:
         if self.deadline_seconds <= 0:
@@ -112,22 +129,33 @@ class SpendGuard:
 
     @property
     def elapsed(self) -> float:
-        return self.monotonic() - self.started_at
+        """This session's elapsed time plus everything earlier sessions billed."""
+        return (self.monotonic() - self.started_at) + self.consumed_before
 
     @property
     def remaining(self) -> float:
         return self.deadline_seconds - self.elapsed
 
-    def check(self) -> None:
-        """Refuse to start further work once the budget is spent."""
+    def check(self, unit: str = "prompt") -> None:
+        """Refuse to start further work once the budget is spent.
+
+        Called before every **sample**, not only every prompt. Checking once per
+        prompt bounds nothing when a prompt is 8 sequential generations: codex
+        drove 8 samples of 100s each past a 10s deadline and all 8 ran.
+        """
         if self.remaining <= 0:
             raise BackendError(
-                f"spend deadline reached after {self.elapsed:.0f}s and "
-                f"{self.prompts_started} prompts; stopping before the next prompt. "
-                f"The ledger holds every prompt already completed — rerun the same "
-                f"command against the same directory to resume"
+                f"spend deadline reached after {self.elapsed:.0f}s of the "
+                f"{self.deadline_seconds:.0f}s stage allowance "
+                f"({self.prompts_started} prompts, {self.samples_started} samples); "
+                f"stopping before the next {unit}. Every completed prompt is in the "
+                f"ledger — rerun the same command against the same directory to "
+                f"resume within whatever allowance remains"
             )
-        self.prompts_started += 1
+        if unit == "prompt":
+            self.prompts_started += 1
+        else:
+            self.samples_started += 1
 
 
 def build_chat_prompt(tokenizer: Any, prompt: Prompt) -> str:
@@ -160,10 +188,13 @@ def make_generate_fn(
     """
 
     def generate_fn(prompt: Prompt, samples: int) -> list[str]:
-        guard.check()
+        guard.check("prompt")
         rendered = build_chat_prompt(tokenizer, prompt)
         outputs: list[str] = []
         for index in range(samples):
+            # Per sample, not per prompt: a prompt is 8 generations, and a bound
+            # that is only consulted between prompts does not bound them.
+            guard.check("sample")
             outputs.append(
                 generate_once(
                     model,
@@ -180,28 +211,94 @@ def make_generate_fn(
     return generate_fn
 
 
-def load_policy(hourly_rate_usd: float, cap_usd: float, device_map: str = "auto") -> Any:
-    """Load the pinned SFT policy and return a bounded `generate_fn`.
+def preflight_chat_template(tokenizer: Any, prompts: Sequence[Prompt]) -> int:
+    """Render every selected prompt before a model is loaded, or refuse.
 
-    The first line in this project that can spend money, which is why it is the
-    last thing built and why it takes the rate as an argument: the deadline is
-    computed from what this pod actually charges, not from a constant.
+    The pinned Llama-3.1 template may reject a bare `tool` role, and 7 of the
+    pool's rows carry one. Discovering that after the weights are resident means
+    discovering it on billed time; the tokenizer alone is free to load.
     """
-    # Deliberately lazy: importing torch is not needed to reason about a run.
-    import torch
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    for prompt in prompts:
+        try:
+            rendered = build_chat_prompt(tokenizer, prompt)
+        except BackendError:
+            raise
+        except Exception as exc:
+            roles = [role for role, _ in prompt.messages]
+            raise BackendError(
+                f"{prompt.prompt_id}: the pinned chat template cannot render this "
+                f"row's turns {roles}: {exc}. Refusing before any weights load"
+            ) from exc
+        if not rendered.strip():
+            raise BackendError(f"{prompt.prompt_id}: chat template rendered empty")
+    return len(prompts)
 
-    deadline = compute_deadline_seconds(cap_usd, hourly_rate_usd)
-    import time
 
-    guard = SpendGuard(deadline_seconds=deadline, monotonic=time.monotonic)
+LOCK_NAME = "run.lock"
+
+
+class RunLock:
+    """One process at a time may bill against a stage directory.
+
+    Two concurrent miners would duplicate paid generations and consume the
+    ceiling twice while each believed itself compliant. `O_EXCL` makes the claim
+    atomic; a stale lock is reported rather than stolen, because "the other
+    process is probably dead" is exactly the assumption that produces two live
+    miners.
+    """
+
+    def __init__(self, out_dir: Path) -> None:
+        self.path = Path(out_dir) / LOCK_NAME
+        self._fd: int | None = None
+
+    def __enter__(self) -> RunLock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError as exc:
+            holder = self.path.read_text().strip() or "unknown"
+            raise BackendError(
+                f"{self.path} is held by {holder}. Another process may be billing "
+                f"against this stage. If it is certainly dead, remove the lock "
+                f"deliberately — this is not stolen automatically"
+            ) from exc
+        with os.fdopen(self._fd, "w") as handle:
+            handle.write(f"pid={os.getpid()}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._fd = None
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+def load_tokenizer() -> Any:
+    """Load only the tokenizer. Free, and enough to prove the template renders."""
+    from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
         BASE_MODEL_REPO, revision=BASE_MODEL_REVISION
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def load_policy_with(
+    tokenizer: Any, guard: SpendGuard, device_map: str = "auto"
+) -> Callable[[Prompt, int], list[str]]:
+    """Load the pinned SFT policy and return a `generate_fn` bound by `guard`.
+
+    The first line in this project that can spend money, which is why it is the
+    last thing reached: the allowance, the lock, and the chat template are all
+    proved before these weights are touched.
+    """
+    # Deliberately lazy: importing torch is not needed to reason about a run.
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+
     base = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_REPO,
         revision=BASE_MODEL_REVISION,
@@ -239,7 +336,7 @@ def load_policy(hourly_rate_usd: float, cap_usd: float, device_map: str = "auto"
             out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
         )
 
-    return make_generate_fn(model, tokenizer, guard, generate_once), guard
+    return make_generate_fn(model, tokenizer, guard, generate_once)
 
 
 def sampling_receipt(hourly_rate_usd: float, cap_usd: float) -> dict[str, Any]:
@@ -267,3 +364,116 @@ def sampling_receipt(hourly_rate_usd: float, cap_usd: float) -> dict[str, Any]:
             "max_wall_clock_seconds": MAX_WALL_CLOCK_SECONDS,
         },
     }
+
+
+def verify_persistent_root(out_dir: Path, persistent_root: Path | None) -> Path:
+    """Refuse a container-local output directory for a billed run.
+
+    A pilot whose only copy of the ledger lives on the pod's container disk is
+    one `stop` away from having cost money and produced nothing — container disk
+    is erased on stop, which is exactly why it is the cheap option. The operator
+    must name a durable mount and the output must sit inside it.
+    """
+    if persistent_root is None:
+        raise BackendError(
+            "--persistent-root is required for a paid run: the ledger is the only "
+            "evidence the money bought, and container disk is erased on stop"
+        )
+    root = Path(persistent_root).resolve()
+    if not root.is_dir():
+        raise BackendError(f"--persistent-root {root} is not an existing directory")
+    probe = root / ".mine_pairs_write_probe"
+    try:
+        probe.write_text("probe\n")
+        probe.unlink()
+    except OSError as exc:
+        raise BackendError(f"--persistent-root {root} is not writable: {exc}") from exc
+
+    resolved = Path(out_dir).resolve()
+    if root not in resolved.parents and resolved != root:
+        raise BackendError(
+            f"--out-dir {resolved} is not inside --persistent-root {root}; a billed "
+            f"run may not write its only evidence to container-local storage"
+        )
+    return resolved
+
+
+def execute_paid_stage(
+    out_dir: Path,
+    stage: str,
+    hourly_rate_usd: float,
+    cap_usd: float,
+    persistent_root: Path | None,
+    fresh: bool = False,
+    now: Callable[[], float] | None = None,
+) -> dict[str, Any]:
+    """The one billable entry point, with every bound applied in order.
+
+    Order matters and is the point: the allowance is claimed and the template is
+    proved *before* weights load, so the expensive failure modes are discovered
+    while the pod is still cheap.
+    """
+    import time
+
+    from mining.mine_pairs import RUN_METADATA_NAME, preflight_stage, run
+    from mining.spend_ledger import close_session, open_session
+
+    clock = now or time.time
+    resolved_out = verify_persistent_root(out_dir, persistent_root)
+    total_seconds = compute_deadline_seconds(cap_usd, hourly_rate_usd)
+
+    with RunLock(resolved_out):
+        session, allowance = open_session(
+            resolved_out, total_seconds, hourly_rate_usd, cap_usd, clock()
+        )
+        print(
+            f"stage allowance {total_seconds}s; already consumed "
+            f"{allowance.consumed_seconds:.0f}s across {allowance.sessions} session(s); "
+            f"{allowance.remaining_seconds:.0f}s remain at ${hourly_rate_usd:.2f}/hr"
+        )
+
+        exit_reason = "unknown"
+        try:
+            preflight = preflight_stage(stage)
+            tokenizer = load_tokenizer()
+            rendered = preflight_chat_template(tokenizer, preflight.selected)
+            print(f"chat-template preflight rendered {rendered} prompts before model load")
+
+            guard = SpendGuard(
+                deadline_seconds=total_seconds,
+                monotonic=time.monotonic,
+                consumed_before=allowance.consumed_seconds,
+            )
+            generate_fn = load_policy_with(tokenizer, guard)
+            summary = run(out_dir=resolved_out, stage=stage, generate_fn=generate_fn)
+            exit_reason = "completed"
+            return summary
+        except BackendError as exc:
+            exit_reason = f"stopped: {exc}"
+            raise
+        except BaseException as exc:
+            exit_reason = f"failed: {type(exc).__name__}"
+            raise
+        finally:
+            record = close_session(
+                resolved_out, session, clock(), exit_reason, hourly_rate_usd
+            )
+            receipt = sampling_receipt(hourly_rate_usd, cap_usd)
+            receipt["session"] = record
+            receipt["run_metadata"] = str(resolved_out / RUN_METADATA_NAME)
+            receipt["backend_sha256"] = _sha256_of_backend()
+            from mining.mine_pairs import _atomic_write
+
+            _atomic_write(
+                resolved_out / "spend_receipt.json",
+                json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            )
+            print(
+                f"session {session} ended ({exit_reason}); stage consumed "
+                f"{record['stage_consumed_seconds']:.0f}s "
+                f"≈ ${record['stage_estimated_cost_usd']:.4f}"
+            )
+
+
+def _sha256_of_backend() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
