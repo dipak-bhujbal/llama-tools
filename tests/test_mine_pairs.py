@@ -46,9 +46,14 @@ BAD = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 99}}\n</tool_call>'
 MALFORMED = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 1}\n</tool_call>'
 
 
-def _prompt(pid: str = "p1", stratum: str = MULTI) -> Prompt:
+def _prompt(pid: str = "p1", stratum: str = MULTI, messages=None) -> Prompt:
     return Prompt(
-        prompt_id=pid, stratum=stratum, system="sys", user="u", target=TARGET
+        prompt_id=pid,
+        stratum=stratum,
+        system="sys",
+        user="u",
+        target=TARGET,
+        messages=messages if messages is not None else (("system", "sys"), ("user", "u")),
     )
 
 
@@ -278,7 +283,7 @@ def test_an_unestimable_stratum_does_not_silently_produce_a_decision() -> None:
 # --- Run loop, ledger, and refusals ------------------------------------------
 
 
-def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path) -> None:
+def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path, monkeypatch) -> None:
     prompts = [_prompt(f"m{i}", MULTI) for i in range(4)] + [
         _prompt(f"s{i}", SINGLE) for i in range(4)
     ]
@@ -289,15 +294,8 @@ def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path) -> N
         return [GOOD] * 4 + [BAD] * 4
 
     out = tmp_path / "mining_pilot"
-    summary = mine_pairs.run(
-        out_dir=out,
-        stage="pilot",
-        n_prompts=4,
-        generate_fn=generate_fn,
-        prompts=prompts,
-        survivor_counts={MULTI: 4, SINGLE: 4},
-        receipt=_RECEIPT,
-    )
+    _install_fake_pool(monkeypatch, prompts, "pilot", 4)
+    summary = mine_pairs.run(out_dir=out, stage="pilot", generate_fn=generate_fn)
 
     assert summary["prompts_mined_total"] == 4
     assert summary["pairs_total"] == 4
@@ -309,49 +307,26 @@ def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path) -> N
 
     # Resume: same command, nothing re-sampled.
     first_pass = list(calls)
-    mine_pairs.run(
-        out_dir=out,
-        stage="pilot",
-        n_prompts=4,
-        generate_fn=generate_fn,
-        prompts=prompts,
-        survivor_counts={MULTI: 4, SINGLE: 4},
-        receipt=_RECEIPT,
-    )
+    mine_pairs.run(out_dir=out, stage="pilot", generate_fn=generate_fn)
     assert calls == first_pass, "a resumed run must not re-sample paid-for work"
 
 
-def test_the_pilot_summary_says_it_is_not_the_scientific_gate(tmp_path) -> None:
-    prompts = [_prompt("m1", MULTI), _prompt("s1", SINGLE)]
-    summary = mine_pairs.run(
-        out_dir=tmp_path / "out",
-        stage="pilot",
-        n_prompts=2,
-        generate_fn=_generator([GOOD] * 4 + [BAD] * 4),
-        prompts=prompts,
-        survivor_counts={MULTI: 1, SINGLE: 1},
-        receipt=_RECEIPT,
-    )
+def test_the_pilot_summary_says_it_is_not_the_scientific_gate(tmp_path, monkeypatch) -> None:
+    summary = _run(tmp_path / "out", monkeypatch)
 
     assert "CALIBRATION" in summary["gate_note"]
     assert "decision" not in summary, "a pilot must not emit a Phase 2 decision"
 
 
-def test_fresh_refuses_to_delete_an_existing_ledger(tmp_path) -> None:
+def test_fresh_refuses_to_delete_an_existing_ledger(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out"
     out.mkdir()
     (out / "ledger.jsonl").write_text("")
 
+    _install_fake_pool(monkeypatch, [_prompt("m1", MULTI), _prompt("s1", SINGLE)])
     with pytest.raises(MinerError, match="evidence, not scratch space"):
         mine_pairs.run(
-            out_dir=out,
-            stage="pilot",
-            n_prompts=2,
-            generate_fn=_generator([GOOD] * 8),
-            prompts=[_prompt("m1", MULTI), _prompt("s1", SINGLE)],
-            survivor_counts={MULTI: 1, SINGLE: 1},
-            receipt=_RECEIPT,
-            fresh=True,
+            out_dir=out, stage="pilot", generate_fn=_generator([GOOD] * 8), fresh=True
         )
 
 
@@ -426,46 +401,48 @@ def test_a_missing_artifact_refuses() -> None:
 # --- Review cycle 1: run identity, derivatives, manifest, schema -------------
 
 
-def _run(out, stage="pilot", n=2, prompts=None, gen=None):
+def _install_fake_pool(monkeypatch, prompts, stage="pilot", n=2):
+    """Substitute the loader itself. There is no injection seam in run()."""
+    monkeypatch.setattr(
+        mine_pairs, "load_eligible_prompts", lambda *a, **k: (list(prompts), _RECEIPT)
+    )
+    monkeypatch.setattr(mine_pairs, "STAGES", {**mine_pairs.STAGES, stage: n})
+
+
+def _run(out, monkeypatch, stage="pilot", n=2, prompts=None, gen=None):
     prompts = prompts or [_prompt("m1", MULTI), _prompt("s1", SINGLE)]
+    _install_fake_pool(monkeypatch, prompts, stage, n)
     return mine_pairs.run(
         out_dir=out,
         stage=stage,
-        n_prompts=n,
         generate_fn=gen or _generator([GOOD] * 4 + [BAD] * 4),
-        prompts=prompts,
-        survivor_counts={
-            MULTI: sum(1 for p in prompts if p.stratum == MULTI),
-            SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
-        },
-        receipt=_RECEIPT,
     )
 
 
-def test_a_directory_will_not_accept_a_second_run_of_a_different_shape(tmp_path) -> None:
+def test_a_directory_refuses_a_second_run_of_a_different_shape(tmp_path, monkeypatch) -> None:
     """Codex's repro: the same directory accepted n=2 then n=4 and produced one
     four-record artifact that no stated design asked for."""
     out = tmp_path / "out"
     prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
         _prompt(f"s{i}", SINGLE) for i in range(2)
     ]
-    _run(out, n=2, prompts=prompts)
+    _run(out, monkeypatch, n=2, prompts=prompts)
 
     with pytest.raises(MinerError, match="describes a different run"):
-        _run(out, n=4, prompts=prompts)
+        _run(out, monkeypatch, n=4, prompts=prompts)
 
 
-def test_a_pilot_directory_will_not_accept_a_calibration_run(tmp_path) -> None:
+def test_a_pilot_directory_will_not_accept_a_calibration_run(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out"
-    _run(out, stage="pilot", n=2)
+    _run(out, monkeypatch, stage="pilot", n=2)
 
     with pytest.raises(MinerError, match=r"separate\s+evidence chains"):
-        _run(out, stage="calibration", n=2)
+        _run(out, monkeypatch, stage="calibration", n=2)
 
 
-def test_run_metadata_pins_every_input_that_could_move(tmp_path) -> None:
+def test_run_metadata_pins_every_input_that_could_move(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out"
-    _run(out)
+    _run(out, monkeypatch)
     meta = json.loads((out / "run.json").read_text())
 
     assert meta["stage"] == "pilot"
@@ -474,18 +451,25 @@ def test_run_metadata_pins_every_input_that_could_move(tmp_path) -> None:
     assert meta["decontamination_receipt_sha256"] == mine_pairs.DECON_SHA256
     assert meta["weights"]["N"] == 11071
     assert meta["adapter"]["revision"] == mine_pairs.SFT_ADAPTER_REVISION
-    assert meta["verifier_selftest_version"] == mine_pairs.VERIFIER_VERSION
+    assert meta["verifier"]["selftest_version"] == mine_pairs.VERIFIER_VERSION
+    assert meta["verifier"]["module_sha256"], "a version string cannot detect code drift"
+    assert meta["verifier"]["selftest_receipt_sha256"]
+    assert meta["miner_sha256"]
+    assert meta["base_model"]["revision"] == mine_pairs.BASE_MODEL_REVISION
+    assert meta["allocation"] == {MULTI: 1, SINGLE: 1}
     assert meta["selected_id_sha256"]
+    # Sampling order is part of what a seeded run promises to reproduce.
+    assert meta["selected_ids_ordered_sha256"]
 
 
-def test_a_rollback_re_materializes_the_derived_files(tmp_path) -> None:
+def test_a_rollback_re_materializes_the_derived_files(tmp_path, monkeypatch) -> None:
     """Codex's second repro: after redo_last(1) the files still reported the
     rolled-back work, so the summary contradicted its own ledger."""
     out = tmp_path / "out"
     prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
         _prompt(f"s{i}", SINGLE) for i in range(2)
     ]
-    _run(out, n=4, prompts=prompts)
+    _run(out, monkeypatch, n=4, prompts=prompts)
     assert json.loads((out / "mining_summary.json").read_text())["pairs_total"] == 4
 
     ledger = Ledger(out / "ledger.jsonl")
@@ -498,21 +482,15 @@ def test_a_rollback_re_materializes_the_derived_files(tmp_path) -> None:
     assert len((out / "mined_pairs.jsonl").read_text().strip().splitlines()) == 3
 
 
-def test_fresh_refuses_when_any_evidence_file_exists(tmp_path) -> None:
+def test_fresh_refuses_when_any_evidence_file_exists(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out"
     out.mkdir()
     (out / "mining_summary.json").write_text("{}")
 
+    _install_fake_pool(monkeypatch, [_prompt("m1", MULTI), _prompt("s1", SINGLE)])
     with pytest.raises(MinerError, match=re.escape("mining_summary.json")):
         mine_pairs.run(
-            out_dir=out,
-            stage="pilot",
-            n_prompts=2,
-            generate_fn=_generator([GOOD] * 8),
-            prompts=[_prompt("m1", MULTI), _prompt("s1", SINGLE)],
-            survivor_counts={MULTI: 1, SINGLE: 1},
-            receipt=_RECEIPT,
-            fresh=True,
+            out_dir=out, stage="pilot", generate_fn=_generator([GOOD] * 8), fresh=True
         )
 
 
@@ -523,16 +501,17 @@ def test_a3_5_requires_the_manifest_digest_checked_directly(monkeypatch) -> None
         mine_pairs.load_eligible_prompts()
 
 
-def test_a_mined_pair_carries_the_prompt_the_trainer_needs(tmp_path) -> None:
+def test_a_mined_pair_carries_the_prompt_the_trainer_needs(tmp_path, monkeypatch) -> None:
     """Producer -> consumer: every DPO loader in the repo keys on
     `prompt_messages`. Two completion strings are not a trainable row."""
     out = tmp_path / "out"
-    _run(out)
+    _run(out, monkeypatch)
     rows = [json.loads(x) for x in (out / "mined_pairs.jsonl").read_text().splitlines()]
 
     assert rows
     for row in rows:
-        assert [m["role"] for m in row["prompt_messages"]] == ["system", "user"]
+        roles = [m["role"] for m in row["prompt_messages"]]
+        assert roles == ["system", "user"]
         assert all(m["content"] for m in row["prompt_messages"])
         assert row["chosen"] and row["rejected"]
 
@@ -603,14 +582,18 @@ def test_a_failing_selftest_stops_the_run_before_any_generation(tmp_path, monkey
         return [GOOD] * 8
 
     with pytest.raises(MinerError, match="fixture self-test failed"):
-        _run(tmp_path / "out", gen=generate_fn)
+        _run(tmp_path / "out", monkeypatch, gen=generate_fn)
 
     assert called == [], "no prompt may be sampled behind a failed gate"
 
 
 def test_an_unknown_stage_is_refused(tmp_path) -> None:
     with pytest.raises(MinerError, match="stage must be one of"):
-        _run(tmp_path / "out", stage="exploratory")
+        mine_pairs.run(
+            out_dir=tmp_path / "out",
+            stage="exploratory",
+            generate_fn=_generator([GOOD] * 8),
+        )
 
 
 # --- Owner decision A+C: guardrails measured, never applied ------------------
@@ -640,10 +623,123 @@ def test_the_guardrail_caps_are_measured_and_never_filter(tmp_path) -> None:
     assert "NOT applied" in diagnostics["note"]
 
 
-def test_diagnostics_ride_along_with_the_summary_without_changing_yield(tmp_path) -> None:
+def test_diagnostics_ride_along_without_changing_yield(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out"
-    summary = _run(out)
+    summary = _run(out, monkeypatch)
 
     assert summary["guardrail_diagnostics"]["pairs"] == summary["pairs_total"]
     written = json.loads((out / "mining_summary.json").read_text())
     assert written["guardrail_diagnostics"]["length_gap_reference"] == 0.40
+
+
+# --- Review cycle 2 ----------------------------------------------------------
+
+
+def test_run_has_no_seam_that_skips_the_pinned_preflight(monkeypatch, tmp_path) -> None:
+    """Codex's repro: an injectable prompts/receipt let a run succeed while
+    `run.json` recorded pinned digests no preflight had ever checked."""
+
+    def exploding_loader(*args, **kwargs):
+        raise MinerError("preflight ran")
+
+    monkeypatch.setattr(mine_pairs, "load_eligible_prompts", exploding_loader)
+
+    with pytest.raises(MinerError, match="preflight ran"):
+        mine_pairs.run(
+            out_dir=tmp_path / "out", stage="pilot", generate_fn=_generator([GOOD] * 8)
+        )
+
+
+def test_the_stage_fixes_the_prompt_count(monkeypatch, tmp_path) -> None:
+    """`STAGES` must bind n, not merely suggest it."""
+    seen: list[int] = []
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(200)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(200)
+    ]
+    monkeypatch.setattr(
+        mine_pairs, "load_eligible_prompts", lambda *a, **k: (prompts, _RECEIPT)
+    )
+
+    def generate_fn(prompt, n):
+        seen.append(n)
+        return [GOOD] * 4 + [BAD] * 4
+
+    mine_pairs.run(out_dir=tmp_path / "out", stage="pilot", generate_fn=generate_fn)
+
+    assert len(seen) == mine_pairs.STAGES["pilot"] == 100
+
+
+# --- Multi-turn rows: split at the FIRST assistant turn ----------------------
+
+
+def test_a_two_assistant_row_targets_only_the_first_turn() -> None:
+    """439 of the 11,071 survivors carry two assistant turns. Joining them
+    produced a ground truth no row ever taught."""
+    row = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "FIRST"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "SECOND"},
+        ]
+    }
+
+    prompt_messages, target = mine_pairs.split_at_first_assistant(row)
+
+    assert target == "FIRST", "never FIRST + SECOND concatenated"
+    assert [m["role"] for m in prompt_messages] == ["system", "user"]
+    assert [m["content"] for m in prompt_messages] == ["sys", "u1"]
+
+
+def test_a_tool_prefixed_row_keeps_the_tool_message_in_its_prompt() -> None:
+    """7 survivors place a `tool` message before their first assistant turn.
+    Flattening to system+user drops context the completion depends on."""
+    row = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u"},
+            {"role": "tool", "content": "tool output"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    }
+
+    prompt_messages, target = mine_pairs.split_at_first_assistant(row)
+
+    assert target == "answer"
+    assert [m["role"] for m in prompt_messages] == ["system", "user", "tool"]
+    assert prompt_messages[2]["content"] == "tool output"
+
+
+def test_the_real_pool_has_the_role_shapes_codex_measured() -> None:
+    prompts, _receipt = mine_pairs.load_eligible_prompts()
+
+    tool_prefixed = [p for p in prompts if any(r == "tool" for r, _ in p.messages)]
+    assert len(tool_prefixed) == 7
+    # Nothing before a first assistant turn can itself be an assistant turn.
+    assert not [p for p in prompts if any(r == "assistant" for r, _ in p.messages)]
+
+
+# --- Redo and derivative metadata -------------------------------------------
+
+
+def test_the_summary_on_disk_carries_the_sft_bucket_count(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "out"
+    _run(out, monkeypatch, gen=_generator([BAD] * 8))
+
+    written = json.loads((out / "mining_summary.json").read_text())
+    # 0-of-8 prompts, counted into the summary before it is serialized.
+    assert written["sft_bucket_rows"] == 2
+
+
+def test_a_rollback_does_not_delete_the_recorded_allocation(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "out"
+    _run(out, monkeypatch)
+    ledger = Ledger(out / "ledger.jsonl")
+    ledger.redo_last(1)
+
+    # allocation omitted, exactly as the CLI redo path calls it
+    mine_pairs.write_derivatives(out, ledger, {MULTI: 1, SINGLE: 1}, "pilot")
+
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["allocation"] == {MULTI: 1, SINGLE: 1}, "read back from run.json"

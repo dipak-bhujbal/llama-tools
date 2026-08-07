@@ -93,6 +93,14 @@ MANIFEST_SHA256 = "542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe
 STAGES = {"pilot": 100, "calibration": 1000}
 RUN_METADATA_NAME = "run.json"
 
+# §3.3/eval pins: the policy being sampled is an adapter on this exact base.
+BASE_MODEL_REPO = "meta-llama/Llama-3.1-8B-Instruct"
+BASE_MODEL_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
+
+MINER_SOURCE = Path("mining/mine_pairs.py")
+VERIFIER_SOURCE = Path("mining/verifier.py")
+VERIFIER_SELFTEST_RECEIPT = Path("mining/receipts/verifier_selftest.json")
+
 # §2.1 required inputs (closes roadmap H1.1 — the owner supplies nothing further)
 SFT_ADAPTER_REPO = "centuriandip/llama-3.1-8b-tools-sft"
 SFT_ADAPTER_SUBFOLDER = "adapter/"
@@ -130,6 +138,12 @@ class Prompt:
     system: str
     user: str
     target: str
+    messages: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def prompt_messages(self) -> list[dict[str, str]]:
+        """The exact turns preceding the target, in order, roles preserved."""
+        return [{"role": role, "content": content} for role, content in self.messages]
 
 
 @dataclass
@@ -170,19 +184,48 @@ def _verify_pin(path: Path, expected: str, label: str) -> bytes:
 
 
 def _message(row: dict[str, Any], role: str) -> str:
+    """Join every turn of one role. Used only where the artifact does."""
     return " ".join(
         m.get("content", "") for m in row.get("messages", []) if m.get("role") == role
     )
 
 
+def split_at_first_assistant(row: dict[str, Any]) -> tuple[list[dict[str, str]], str]:
+    """Return `(prompt_messages, target)` split at the row's first assistant turn.
+
+    The signed eligibility artifact classifies the **first** assistant turn.
+    Joining every assistant turn — which this module did until codex measured it
+    — concatenates `first + final` into one string. Of the 11,071 survivors, 439
+    carry two assistant turns and 7 place a `tool` message before their first
+    assistant, so the join produced a ground truth that no row ever taught, and
+    dropped required context for the tool-prefixed rows.
+
+    The preceding messages are preserved exactly, in order and with their roles,
+    rather than flattened into system+user.
+    """
+    messages = row.get("messages", [])
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant":
+            prompt_messages = [
+                {"role": m.get("role", ""), "content": m.get("content", "")}
+                for m in messages[:index]
+            ]
+            return prompt_messages, message.get("content", "")
+    return (
+        [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages],
+        "",
+    )
+
+
 def _target_turn(row: dict[str, Any], prompt_id: str) -> str:
+    """Deprecated shim retained only for the §2.11 refusal test path."""
     """The assistant turn this row teaches, or a refusal.
 
     §2.11: a target the miner cannot read is a **stop condition**. The
     quarantined miner turned this exact branch into `no_call` ground truth,
     which produces a preference pair whose chosen answer is wrong.
     """
-    assistant = _message(row, "assistant")
+    _prompt_messages, assistant = split_at_first_assistant(row)
     kind, _ = classify_target(assistant)
     if kind == "unreadable":
         raise MinerError(
@@ -250,7 +293,7 @@ def load_eligible_prompts(
         if stratum == INELIGIBLE:
             continue
 
-        assistant = _message(row, "assistant")
+        prompt_messages, assistant = split_at_first_assistant(row)
         kind, called = classify_target(assistant)
         if kind == "unreadable":
             continue
@@ -275,7 +318,8 @@ def load_eligible_prompts(
                 stratum=stratum,
                 system=system,
                 user=user,
-                target=_target_turn(row, prompt_id),
+                target=assistant,
+                messages=tuple((m["role"], m["content"]) for m in prompt_messages),
             )
         )
 
@@ -366,12 +410,23 @@ def _atomic_write(path: Path, text: str) -> None:
     partial. The ledger already survives crashes this way; its derivatives have
     to as well or the artifact set is only as trustworthy as its weakest file.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     with tmp.open("w") as handle:
         handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
+    # Without this the rename itself can be lost on power failure, leaving the
+    # old bytes behind a durable-looking write.
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _digest_of(path: Path) -> str:
+    return _sha256((REPO_ROOT / path).read_bytes())
 
 
 def run_metadata(
@@ -380,6 +435,7 @@ def run_metadata(
     selected: Sequence[Prompt],
     receipt: dict[str, Any],
     selftest_version: str,
+    allocation: dict[str, int],
 ) -> dict[str, Any]:
     """The immutable identity of a mining run.
 
@@ -391,7 +447,14 @@ def run_metadata(
     return {
         "stage": stage,
         "n_prompts": n_prompts,
+        "allocation": dict(allocation),
         "selected_id_sha256": _id_digest(p.prompt_id for p in selected),
+        # The sorted digest cannot distinguish two runs that sample the same ids
+        # in a different order, and sampling order is part of what a seeded run
+        # promises to reproduce.
+        "selected_ids_ordered_sha256": _sha256(
+            ("\n".join(p.prompt_id for p in selected) + "\n").encode()
+        ),
         "pool_sha256": POOL_SHA256,
         "decontamination_receipt_sha256": DECON_SHA256,
         "manifest_sha256": MANIFEST_SHA256,
@@ -413,8 +476,15 @@ def run_metadata(
             "subfolder": SFT_ADAPTER_SUBFOLDER,
             "revision": SFT_ADAPTER_REVISION,
         },
-        "verifier_version": VERIFIER_VERSION,
-        "verifier_selftest_version": selftest_version,
+        "base_model": {"repo": BASE_MODEL_REPO, "revision": BASE_MODEL_REVISION},
+        # A version string cannot detect code or fixture drift; digests can.
+        "miner_sha256": _digest_of(MINER_SOURCE),
+        "verifier": {
+            "version": VERIFIER_VERSION,
+            "selftest_version": selftest_version,
+            "module_sha256": _digest_of(VERIFIER_SOURCE),
+            "selftest_receipt_sha256": _digest_of(VERIFIER_SELFTEST_RECEIPT),
+        },
     }
 
 
@@ -422,8 +492,20 @@ def bind_run_metadata(out_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]
     """Create the run identity once, or prove the resumed run matches it."""
     path = out_dir / RUN_METADATA_NAME
     if not path.exists():
-        _atomic_write(path, json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-        return metadata
+        # O_EXCL, not exists()-then-write: two miners starting together would
+        # both see "absent" and both write, and the loser's identity would be
+        # the one the run is judged against.
+        payload = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError:
+            pass  # another process won the race; fall through and compare
+        else:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return metadata
 
     existing = json.loads(path.read_text())
     differing = sorted(
@@ -499,10 +581,7 @@ def mine_prompt(prompt: Prompt, generate_fn: Callable[[Prompt, int], list[str]])
         stratum=prompt.stratum,
         generations=generations,
         verdicts=verdicts,
-        prompt_messages=[
-            {"role": "system", "content": prompt.system},
-            {"role": "user", "content": prompt.user},
-        ],
+        prompt_messages=prompt.prompt_messages,
         target=prompt.target,
     )
 
@@ -697,8 +776,16 @@ def write_derivatives(
     not reach the derivatives leaves `mining_summary.json` reporting a yield the
     ledger no longer supports — the artifact contradicting its own evidence,
     which is worse than having no summary at all.
+
+    `allocation` is read back from `run.json` when not supplied, so a rollback
+    cannot silently delete it from the summary.
     """
     out_dir = Path(out_dir)
+    if allocation is None:
+        metadata_path = out_dir / RUN_METADATA_NAME
+        if metadata_path.exists():
+            allocation = json.loads(metadata_path.read_text()).get("allocation")
+
     summary = summarize(ledger, survivor_counts)
     summary["stage"] = stage
     if allocation is not None:
@@ -719,10 +806,13 @@ def write_derivatives(
 
     pairs = summary.pop("materialized_pairs")
     bucket = summary.pop("sft_bucket")
+    # Counted into the summary *before* it is serialized, or the artifact on
+    # disk lacks a number the returned dict claims to carry.
+    summary["sft_bucket_rows"] = len(bucket)
+
     _atomic_write(out_dir / "mined_pairs.jsonl", "".join(json.dumps(p) + "\n" for p in pairs))
     _atomic_write(out_dir / "sft_bucket.jsonl", "".join(json.dumps(r) + "\n" for r in bucket))
     _atomic_write(out_dir / "mining_summary.json", json.dumps(summary, indent=2) + "\n")
-    summary["sft_bucket_rows"] = len(bucket)
     return summary
 
 
@@ -730,23 +820,25 @@ def run(
     out_dir: Path,
     stage: str,
     generate_fn: Callable[[Prompt, int], list[str]],
-    prompts: Sequence[Prompt] | None = None,
-    survivor_counts: dict[str, int] | None = None,
-    receipt: dict[str, Any] | None = None,
     fresh: bool = False,
-    n_prompts: int | None = None,
 ) -> dict[str, Any]:
-    """Mine one stage, resuming only into a run with the same identity."""
+    """Mine one stage, resuming only into a run with the same identity.
+
+    There is deliberately no way to inject prompts, survivor counts, or a
+    receipt. An earlier signature accepted all three, which let a caller skip
+    `load_eligible_prompts()` entirely while `run.json` still recorded the
+    pinned digests — evidence asserting a preflight that never ran. Tests
+    substitute the loader itself, so the production path has one route in.
+    """
     if stage not in STAGES:
         raise MinerError(f"stage must be one of {sorted(STAGES)}, not {stage!r}")
-    n_prompts = STAGES[stage] if n_prompts is None else n_prompts
+    n_prompts = STAGES[stage]
 
-    if prompts is None or survivor_counts is None or receipt is None:
-        prompts, receipt = load_eligible_prompts()
-        survivor_counts = {
-            MULTI: sum(1 for p in prompts if p.stratum == MULTI),
-            SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
-        }
+    prompts, receipt = load_eligible_prompts()
+    survivor_counts = {
+        MULTI: sum(1 for p in prompts if p.stratum == MULTI),
+        SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
+    }
 
     # §5.1's last guardrail: the fixture gate runs before every mining session.
     # Binding its version into the run identity is what makes "it passed" a
@@ -772,7 +864,7 @@ def run(
     selected = select_prompts(prompts, allocation)
     bind_run_metadata(
         out_dir,
-        run_metadata(stage, n_prompts, selected, receipt, report.version),
+        run_metadata(stage, n_prompts, selected, receipt, report.version, allocation),
     )
 
     ledger = Ledger(out_dir / "ledger.jsonl")
@@ -823,15 +915,24 @@ def main() -> None:
 
     if args.redo_last is not None:
         out_dir = Path(args.out_dir)
-        ledger = Ledger(out_dir / "ledger.jsonl")
-        tombstoned = ledger.redo_last(args.redo_last)
-        # Re-materialize, or the derivatives keep reporting the rolled-back work.
-        metadata = json.loads((out_dir / RUN_METADATA_NAME).read_text())
+        # Everything that can fail happens BEFORE the tombstone. A tombstone is
+        # permanent; a failed preflight after one leaves a changed ledger with
+        # derivatives that still describe the rolled-back state.
+        metadata_path = out_dir / RUN_METADATA_NAME
+        if not metadata_path.exists():
+            raise SystemExit(f"{metadata_path} is missing; refusing to roll back a run "
+                             f"whose identity cannot be established")
+        metadata = json.loads(metadata_path.read_text())
+        if metadata.get("stage") not in STAGES:
+            raise SystemExit(f"{metadata_path} carries no recognised stage")
         _prompts, receipt = load_eligible_prompts()
         counts = {
             MULTI: receipt["survivors"]["multi"],
             SINGLE: receipt["survivors"]["single"],
         }
+
+        ledger = Ledger(out_dir / "ledger.jsonl")
+        tombstoned = ledger.redo_last(args.redo_last)
         summary = write_derivatives(out_dir, ledger, counts, metadata["stage"])
         print(
             f"tombstoned {tombstoned} records; re-materialized "
