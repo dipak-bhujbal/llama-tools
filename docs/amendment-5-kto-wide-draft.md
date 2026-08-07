@@ -1,6 +1,7 @@
 # Amendment 5 — wide KTO arm — **CANDIDATE DRAFT, NOT ADOPTED**
 
-**Status: candidate draft, cycle 3.** Not in `docs/prereg-study2.md`, authorizes
+**Status: candidate draft, cycle 4 (roles reversed).** Not in
+`docs/prereg-study2.md`, authorizes
 nothing, and no arm may run on it. Would be folded as **record 6 / numbered
 Amendment 5** only after review and explicit owner adoption.
 
@@ -175,8 +176,10 @@ conversion**, rather than silently emptying an eval stratum.
 
 > 1. Sort all rows by `(pair_id, label)` ascending — a total order, no ties.
 > 2. Split into `D` (desirable) and `U` (undesirable), each in that order.
-> 3. Let **minority** be the smaller class and **majority** the larger. Walk the
->    minority in sorted order; each minority row is matched to the
+> 3. Set **minority = D and majority = U when `|D| <= |U|`**; otherwise set
+>    **minority = U and majority = D**. This makes the equal-size case explicit
+>    and deterministic. Walk the minority in sorted order; each minority row is
+>    matched to the
 >    **lowest-sorted unconsumed majority row carrying a different `prompt_id`**.
 >    **Each majority row is consumed at most once** — it is never skipped-and-
 >    reused, so no row is duplicated or omitted.
