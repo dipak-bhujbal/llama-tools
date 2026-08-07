@@ -125,6 +125,14 @@ double the step count.
 | libraries | `trl 1.8.0`, `peft 0.19.1`, `transformers 5.14.1`, `torch 2.13.0`, `datasets 5.0.0`, `accelerate 1.14.0` — exact equality asserted at start |
 | reference model | frozen `ref` adapter copied from the shipped SFT adapter above; **parameter-hash equality asserted at step 0** before the policy updates |
 
+**Environment scope.** Those six versions are the frozen **training-arm** pins
+in §3.4, not the separate §0 inference-probe environment in
+`requirements-probe.txt`. The mining pilot's recorded Torch 2.8 runtime is
+therefore not evidence that a future arm satisfies §3.4, and this amendment does
+not claim it is. Changing any training-arm pin requires a separate amendment to
+§3.4; silently replacing the table with whatever a pod happens to provide is
+forbidden.
+
 **Why both weights are 1.0:** A4.1's conversion is **exactly balanced**, and 1/1
 is the principled setting for that regime. *(Not "because TRL's defaults were
 designed for imbalance" — they were not; the earlier draft said so and was
