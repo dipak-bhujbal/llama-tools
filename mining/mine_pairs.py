@@ -1064,6 +1064,10 @@ def main() -> None:
     parser.add_argument("--stage", choices=sorted(STAGES), default="pilot")
     parser.add_argument("--out-dir", type=Path, default=Path("mining_pilot"))
     parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--hourly-rate", type=float, default=None,
+                        help="the pod's ACTUAL hourly rate from the console")
+    parser.add_argument("--cap-usd", type=float, default=None,
+                        help="owner-approved total-stage cap in USD")
     parser.add_argument("--redo-last", type=int, default=None,
                         help="tombstone the most recent N active records and exit")
     args = parser.parse_args()
@@ -1100,12 +1104,30 @@ def main() -> None:
         print(f"dry run: selected {len(selected)} prompts, generated nothing, $0 spent")
         raise SystemExit(0)
 
-    # Deliberately not wired: importing the model stack is the first line that
-    # can cost money, so it is a separate, separately reviewed change. Until
-    # then this CLI cannot spend by accident.
-    raise SystemExit(
-        "generation backend is not wired in this commit; use --dry-run or call "
-        "run() with a generate_fn. No paid path exists here yet."
+    # The paid path. It exists only when the operator types the rate the console
+    # actually shows and the cap the owner approved: there is no default that
+    # spends, and no way to launch without a mechanically enforced deadline.
+    if args.hourly_rate is None or args.cap_usd is None:
+        raise SystemExit(
+            "refusing to launch: --hourly-rate and --cap-usd are both required so "
+            "the run carries a deadline derived from what this pod actually "
+            "charges. Use --dry-run to walk the whole path at $0."
+        )
+
+    from mining.backend import load_policy, sampling_receipt
+
+    receipt = sampling_receipt(args.hourly_rate, args.cap_usd)
+    bound = receipt["spend_bound"]
+    print(
+        f"spend bound: ${args.cap_usd:.2f} cap at ${args.hourly_rate:.2f}/hr "
+        f"-> terminate after {bound['deadline_seconds']}s "
+        f"({bound['deadline_seconds'] / 3600:.2f} h)"
+    )
+    generate_fn, _guard = load_policy(args.hourly_rate, args.cap_usd)
+    summary = run(out_dir=args.out_dir, stage=args.stage, generate_fn=generate_fn)
+    print(
+        f"mined {summary['prompts_mined_total']} prompts -> "
+        f"{summary['pairs_total']} pairs; histogram {summary['pass_histogram']}"
     )
 
 
