@@ -100,6 +100,7 @@ BASE_MODEL_REPO = "meta-llama/Llama-3.1-8B-Instruct"
 BASE_MODEL_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
 
 MINER_SOURCE = Path("mining/mine_pairs.py")
+BACKEND_SOURCE = Path("mining/backend.py")
 VERIFIER_SOURCE = Path("mining/verifier.py")
 VERIFIER_SELFTEST_RECEIPT = Path("mining/receipts/verifier_selftest.json")
 VERIFIER_SELFTEST_RECEIPT_SHA256 = (
@@ -117,6 +118,8 @@ TEMPERATURE = 0.8
 TOP_P = 1.0
 MAX_NEW_TOKENS = 256
 SEED = 20260804
+SAMPLING_MODE = "batched-num-return-sequences"
+SEED_DERIVATION = "sha256(seed:prompt_id:batch) >> 1"
 
 # Target weights as exact integers — Amendment 3 A3.3, which replaces §2.5's
 # (8173, 2997, 11170) before mining. The multi share (8081/11071 = 72.993%) is
@@ -549,6 +552,8 @@ def run_metadata(
             "top_p": TOP_P,
             "max_new_tokens": MAX_NEW_TOKENS,
             "seed": SEED,
+            "mode": SAMPLING_MODE,
+            "seed_derivation": SEED_DERIVATION,
         },
         "adapter": {
             "repo": SFT_ADAPTER_REPO,
@@ -558,6 +563,7 @@ def run_metadata(
         "base_model": {"repo": BASE_MODEL_REPO, "revision": BASE_MODEL_REVISION},
         # A version string cannot detect code or fixture drift; digests can.
         "miner_sha256": _digest_of(MINER_SOURCE),
+        "backend_sha256": _digest_of(BACKEND_SOURCE),
         "verifier": {
             "version": VERIFIER_VERSION,
             "selftest_version": selftest_version,
@@ -962,6 +968,43 @@ def write_derivatives(
     return summary
 
 
+def prepare_stage_run(out_dir: Path, stage: str, fresh: bool = False) -> StagePreflight:
+    """Validate and bind the immutable run identity before model loading."""
+    preflight = preflight_stage(stage)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = [
+        name for name in (*DERIVED_FILES, "ledger.jsonl", RUN_METADATA_NAME)
+        if (out_dir / name).exists()
+    ]
+    if fresh and existing:
+        raise MinerError(
+            f"--fresh refuses to delete existing evidence in {out_dir}: {existing}. "
+            "Move the directory aside deliberately; this is evidence, not scratch space"
+        )
+    bind_run_metadata(out_dir, preflight.metadata)
+    return preflight
+
+
+def _run_prepared(
+    out_dir: Path,
+    preflight: StagePreflight,
+    generate_fn: Callable[[Prompt, int], list[str]],
+) -> dict[str, Any]:
+    """Run a preflighted stage; kept separate so the backend can bind first."""
+    ledger = Ledger(Path(out_dir) / "ledger.jsonl")
+    already = ledger.processed_ids()
+    summary: dict[str, Any] | None = None
+    try:
+        _mine_selected(preflight, ledger, already, generate_fn)
+    finally:
+        summary = write_derivatives(
+            Path(out_dir), ledger, preflight.survivor_counts,
+            preflight.stage, preflight.allocation,
+        )
+    return summary
+
+
 def run(
     out_dir: Path,
     stage: str,
@@ -976,38 +1019,7 @@ def run(
     pinned digests — evidence asserting a preflight that never ran. Tests
     substitute the loader itself, so the production path has one route in.
     """
-    preflight = preflight_stage(stage)
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    existing = [name for name in (*DERIVED_FILES, "ledger.jsonl", RUN_METADATA_NAME)
-                if (out_dir / name).exists()]
-    if fresh and existing:
-        raise MinerError(
-            f"--fresh refuses to delete existing evidence in {out_dir}: {existing}. "
-            f"Move the directory aside deliberately; this is evidence, not scratch space"
-        )
-
-    bind_run_metadata(out_dir, preflight.metadata)
-
-    ledger = Ledger(out_dir / "ledger.jsonl")
-    already = ledger.processed_ids()
-    # A deadline stop or a crash must still leave the artifact set consistent
-    # with the ledger. Without the finally below, an aborted run keeps whatever
-    # summary the previous invocation wrote — describing work this one extended.
-    summary: dict[str, Any] | None = None
-    try:
-        _mine_selected(preflight, ledger, already, generate_fn)
-    finally:
-        summary = write_derivatives(
-            out_dir,
-            ledger,
-            preflight.survivor_counts,
-            stage,
-            preflight.allocation,
-        )
-
-    return summary
+    return _run_prepared(Path(out_dir), prepare_stage_run(out_dir, stage, fresh), generate_fn)
 
 
 def _mine_selected(
@@ -1080,18 +1092,12 @@ def main() -> None:
     parser.add_argument("--stage", choices=sorted(STAGES), default="pilot")
     parser.add_argument("--out-dir", type=Path, default=Path("mining_pilot"))
     parser.add_argument("--fresh", action="store_true")
-    parser.add_argument("--hourly-rate", type=float, default=None,
-                        help="the pod's ACTUAL hourly rate from the console")
-    parser.add_argument("--cap-usd", type=float, default=None,
-                        help="owner-approved total-stage cap in USD")
     parser.add_argument("--confirm-paid-run", action="store_true",
-                        help="required to bill: rate and cap alone are arithmetic")
+                        help="required for an intentional model-backed launch")
     parser.add_argument("--persistent-root", type=Path, default=None,
-                        help="verified durable mount the out-dir must live under")
+                        help="durable mount the out-dir must live under")
     parser.add_argument("--attest-durable-root", action="store_true",
                         help="state on the record that the root survives termination")
-    parser.add_argument("--provider-terminate-seconds", type=int, default=None,
-                        help="the pod's ARMED provider-side auto-termination value")
     parser.add_argument("--redo-last", type=int, default=None,
                         help="tombstone the most recent N active records and exit")
     args = parser.parse_args()
@@ -1128,20 +1134,15 @@ def main() -> None:
         print(f"dry run: selected {len(selected)} prompts, generated nothing, $0 spent")
         raise SystemExit(0)
 
-    # The paid path. It exists only when the operator types the rate the console
-    # actually shows and the cap the owner approved: there is no default that
-    # spends, and no way to launch without a mechanically enforced deadline.
-    if args.hourly_rate is None or args.cap_usd is None:
-        raise SystemExit(
-            "refusing to launch: --hourly-rate and --cap-usd are both required so "
-            "the run carries a deadline derived from what this pod actually "
-            "charges. Use --dry-run to walk the whole path at $0."
-        )
     if not args.confirm_paid_run:
         raise SystemExit(
-            "refusing to launch: --confirm-paid-run is required. A rate and a cap "
-            "are arithmetic; this flag is the operator stating that a billable pod "
-            "is intended, with provider-side auto-termination already armed."
+            "refusing to launch: --confirm-paid-run is required for a model-backed "
+            "run. Use --dry-run to walk the whole path at $0."
+        )
+    if args.persistent_root is None:
+        raise SystemExit(
+            "refusing to launch: --persistent-root is required; use the external "
+            "scripts/launch_mining_stage.py envelope for lifecycle controls"
         )
 
     # Both names are caught deliberately. Run as `python -m mining.mine_pairs`
@@ -1149,21 +1150,17 @@ def main() -> None:
     # via the backend's import — so `__main__.MinerError` and the BackendError
     # base class are different objects and a bare `except MinerError` catches
     # nothing. Catching the backend's own class works under either entry point.
-    from mining.backend import BackendError, execute_paid_stage
-    from mining.spend_ledger import SpendLedgerError
+    from mining.backend import BackendError, execute_model_stage
 
     try:
-        summary = execute_paid_stage(
+        summary = execute_model_stage(
             out_dir=args.out_dir,
             stage=args.stage,
-            hourly_rate_usd=args.hourly_rate,
-            cap_usd=args.cap_usd,
             persistent_root=args.persistent_root,
             fresh=args.fresh,
             attested=args.attest_durable_root,
-            provider_terminate_seconds=args.provider_terminate_seconds,
         )
-    except (MinerError, BackendError, SpendLedgerError) as exc:
+    except (MinerError, BackendError) as exc:
         raise SystemExit(str(exc)) from exc
     print(
         f"mined {summary['prompts_mined_total']} prompts -> "
