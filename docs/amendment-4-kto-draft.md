@@ -1,6 +1,6 @@
 # Amendment 4 — KTO comparison arm — **DRAFT, NOT ADOPTED**
 
-**Status: draft for review, cycle 2.** Not in `docs/prereg-study2.md`, authorizes
+**Status: draft for review, cycle 3.** Not in `docs/prereg-study2.md`, authorizes
 nothing, and no arm may run on it. To be folded in as **record 5 / numbered
 Amendment 4** once reviewed and adopted in its final reviewed form.
 
@@ -49,16 +49,21 @@ integer rule, track-specific cell key and **split seed 42** — *then* each pair
 expands into its two rows. Splitting after expansion would place a prompt's
 desirable and undesirable rows on opposite sides and leak the held-out set.
 
-**Row schema:**
+**`pair_id` is defined, not described:**
 
-| field | |
+> `pair_id = f"{prompt_id}:{chosen_index}:{rejected_index}"` — the three fields
+> `mined_pairs.jsonl` already carries. Asserted unique across the dataset.
+
+**Row schema, exact:**
+
+| field | value |
 |---|---|
-| `pair_id` | stable identifier of the source pair — **the linkage key**, not `prompt_id` alone |
-| `prompt_id` | the ledger prompt it derives from |
-| `prompt` | the exact conversational turns preceding the target, roles intact |
-| `completion` | the assistant completion (chosen or rejected) |
-| `label` | `true` = desirable, `false` = undesirable |
-| `error_type` | carried through for the split cell key |
+| `pair_id` | as defined above — **the linkage key** |
+| `prompt_id` | the source `prompt_id` |
+| `prompt` | **exactly the pair's `prompt_messages` list**, unmodified |
+| `completion` | **exactly** `[{"role": "assistant", "content": <chosen or rejected>}]` |
+| `label` | `bool` — `true` desirable, `false` undesirable |
+| `error_type` | **`= rejected_reason`** from the pair row. The miner emits `rejected_reason`; there is no `error_type` field. **A null or unrecognised value fails the conversion** |
 
 **Asserted before the arm starts, fail-closed:** every `pair_id` appears exactly
 twice with opposite labels; **no `pair_id` and no `prompt_id` appears in both
@@ -72,10 +77,15 @@ batch**, and requires `train_sampling_strategy='sequential'`. **With actual batc
 2, two adjacent rows from the same pair would pair a prompt with its own
 completion and destroy the mismatched-prompt KL estimate.**
 
-> **Required:** deterministic batch construction in which the two rows of any
-> actual batch carry **distinct `prompt_id`s** and balanced labels; sequential
-> sampling; **single-GPU, fail-closed** if more than one device is visible, since
-> multi-device batching would silently change the KL construction.
+> **Required, as an algorithm rather than a property.** For an ordered split of
+> `N` pairs `p[0..N-1]`, **actual batch `i` = `[desirable(p_i), undesirable(p_(i+1 mod N))]`**,
+> with `train_sampling_strategy='sequential'`. Every batch is balanced, carries
+> two **distinct** `pair_id`s and `prompt_id`s, and there is no singleton
+> remainder. **Requires `N >= 2` distinct pairs in each split.**
+>
+> **Pinned `CUDA_VISIBLE_DEVICES` world size = 1**, asserted at start — not
+> merely "one device visible" — since any multi-device batching would change the
+> KL construction silently.
 
 ## A4.5 — batch size, in the correct unit
 
@@ -84,17 +94,28 @@ rows are unpaired, so the same number would halve the source pairs per step and
 double the step count.
 
 > **Pair-equivalent match:** actual batch **2** × gradient accumulation **16** =
-> **32 unpaired rows = 16 source pairs per optimizer step**, one epoch.
+> **32 unpaired rows = 16 source-pair *equivalents* per optimizer step**, one
+> epoch. *(Equivalents, not exactly 16 unique pairs: the cyclic cross-prompt
+> ordering means an accumulation window need not contain 16 distinct pairs.)*
 > `total_steps = ceil(train_rows / 32)` where `train_rows = 2 × train_pairs`.
 
 ## A4.6 — the rest of the configuration, fixed before the run
 
-`beta` 0.1 · `desirable_weight` 1.0 · `undesirable_weight` 1.0 · training seed 42
-· split seed 42 · bf16 · LR, scheduler and warmup **as §3.4's common settings** ·
-max sequence length as §3.4 · gradient checkpointing and dropout as §3.4 ·
-`precompute_ref_log_probs` recorded · **`sync_ref_model=False`** · library
-versions pinned in the run artifact · **asserted: the reference model is the
-shipped SFT adapter**.
+| | |
+|---|---|
+| `beta` | 0.1 |
+| `desirable_weight` / `undesirable_weight` | 1.0 / 1.0 |
+| LR · schedule · warmup | **`5e-6`** · cosine · `warmup_ratio = 0.03` — §3.4(b), **not** §3.4 common, which carries none of these |
+| batch | per-device **2**, grad-accum **16**, eval batch 2 |
+| precision | bf16, gradient checkpointing **on**, `max_length = 2048` |
+| LoRA | `r = 64`, `alpha = 128`, `dropout = 0.05`, targets `["q_proj","k_proj","v_proj","o_proj"]` — §3.4(b) by reference |
+| `disable_dropout` | **`True`** — matches the deterministic-eval posture of the other arms |
+| `precompute_ref_log_probs` | **`False`** |
+| `sync_ref_model` | **`False`** |
+| sampling | `train_sampling_strategy='sequential'` |
+| seeds | training 42, split 42 |
+| libraries | the frozen version table recorded in the run artifact, asserted at start |
+| reference model | **asserted equal to the shipped SFT adapter at step 0** |
 
 **Why both weights are 1.0:** A4.1's conversion is **exactly balanced**, and 1/1
 is the principled setting for that regime. *(Not "because TRL's defaults were
@@ -118,23 +139,33 @@ loss function.
 | 4 — dev health, absolute item margin | **applies unchanged** |
 | 5 — direction guard | **applies unchanged** |
 
-> **Rule 3 is replaced, not dropped:** the equivalent easy-data check is the
-> **pair-linked rate at which the desirable row's reward exceeds its own pair's
-> undesirable row, over the held-out pair split**, at the first eval, with the
-> same `>= 0.99` threshold. `pair_id` is what makes this computable — which is
-> why A4.3 makes it the linkage key.
+> **Rule 3 is replaced by a named, defined metric — `eval_pair_reward_accuracy`.**
+>
+> Per-row reward: `beta * (policy_completion_logp - ref_completion_logp)`.
+> For each `pair_id` in the held-out split, the pair counts toward the numerator
+> iff **`reward(desirable) > reward(undesirable)` strictly** — **ties count
+> false**. `eval_pair_reward_accuracy = numerator / denominator`, both committed
+> alongside the per-pair rows. **First-eval `>= 0.99` stops the arm**, the same
+> threshold rule 3 uses.
 
-**The exact emitted metric names and the kill-report fields are pinned in the run
-artifact**, so a renamed metric fails closed instead of silently disabling a kill
-line.
+**A missing or renamed metric fails before training or eval begins**, never
+silently disabling a kill line. **The kill report records** numerator,
+denominator, rate, threshold, the split digest, the look index and the optimizer
+step.
 
 ## A4.8 — scoring and analysis
 
 **Scored only after every launched arm's checkpoint is selected**, on `multiple`
-(n = 200), `simple_python` (n = 400) and MMLU. **Final sets may not influence
-launch or checkpoint selection.** Its `multiple` contrast versus shipped SFT
-joins the **exploratory Holm family**; retention and MMLU remain **bands outside
-any test family** (§4.1a, §4.5).
+(n = 200) and `simple_python` (n = 400). **Final sets may not influence launch or
+checkpoint selection.** Its `multiple` contrast versus shipped SFT joins the
+**exploratory Holm family**; `simple_python` retention stays a **band outside any
+test family** (§4.1a).
+
+**MMLU is deliberately excluded.** Frozen §4.5 runs MMLU *"only for a candidate
+that clears the primary contrast"*, and **A4-kto is permanently exploratory, so
+it can never clear it.** Including MMLU here would have required amending §4.5
+and paying ~90 minutes per candidate for a check the frozen text does not
+authorise for this arm.
 
 ## A4.9 — exploratory family size
 
@@ -159,8 +190,9 @@ verdict**, which §4.1 keeps as a family of one taking no adjustment.
 **Stated honestly: current §4.1 does not require this** — it defines family size
 from the arms actually launched, recorded before the analysis. **This is a
 stricter rule this amendment adopts for itself**, on the owner's instruction
-(msg 2625), because a family size settled before any yield is observed cannot be
-argued about afterwards.
+(msg 2625), because a family size settled **before the calibration artifact and its yield
+are observed** cannot be argued about afterwards. *(The pilot's yield is already
+observed; the calibration yield is the one that matters here.)*
 
 ## A4.11 — spend
 
@@ -174,7 +206,8 @@ step over the converted pair set, plus `L` dev looks × 258 greedy generations
 
 ## To adopt
 
-1. @codex review 2. owner adoption of the **final reviewed text**
+1. @codex review
+2. owner adoption of the **final reviewed text**
 3. folded in as record 5 / Amendment 4, with §4.1's superseded sentence **quoted
-verbatim and superseded by reference**, never edited in place
+   verbatim and superseded by reference**, never edited in place
 4. the record-vs-amendment numbering note extended so "Amendment 4" resolves
