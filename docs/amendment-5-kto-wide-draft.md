@@ -1,6 +1,6 @@
 # Amendment 5 — wide KTO arm — **CANDIDATE DRAFT, NOT ADOPTED**
 
-**Status: candidate draft, cycle 2.** Not in `docs/prereg-study2.md`, authorizes
+**Status: candidate draft, cycle 3.** Not in `docs/prereg-study2.md`, authorizes
 nothing, and no arm may run on it. Would be folded as **record 6 / numbered
 Amendment 5** only after review and explicit owner adoption.
 
@@ -23,8 +23,10 @@ it can be checked rather than trusted:
 > train and 16 source-pair equivalents per step, **`ceil(1793/16)` = 113 optimizer
 > steps**.
 
-About a fifth of study 1's DPO run. **Every number above is a projection from a
-100-prompt pilot, not a measurement from a calibration artifact.**
+**About a fifth of the 622-step study-1 DPO v1 full run** (`dpo_full.py`, stopped
+at 400/622) — **not** the ~150-step DPO v2 run, which 113 steps would be most of.
+**Every number above is a projection from a 100-prompt pilot, not a measurement
+from a calibration artifact.**
 
 **A null from an arm that short is hard to interpret.** "The objective doesn't
 help here" and "113 steps couldn't move anything" predict the same result, and
@@ -53,8 +55,10 @@ versus 18). **Row counts depend on A5.2's selection rule** and are not claimed h
 
 **Exploratory permanently**, never confirmatory or the structural secondary, no
 promotion after the fact (§4.1). **Permitted only on the `P_std >= 1000` branch**,
-inheriting §3.1 unchanged. Runs after A0 completes, under its own written
-estimate, agent agreement and explicit owner approval.
+inheriting §3.1 unchanged. **Runs only after A0 completes *or is killed*** —
+and **A5 may never be promoted to replace A0** as the confirmatory arm, whichever
+way A0 ends. Its own written estimate, agent agreement and explicit owner approval
+are required.
 
 ## A5.2 — exactly which rows enter, and how many
 
@@ -85,9 +89,18 @@ the ledger.**
   undesirable completion would train the model to **avoid the correct answer**.
   The undesirable text is the ledger's generation at the chosen index.
 
-**Reconciliation asserted before conversion, fail-closed:** the ledger, the
-summary's histogram, `mined_pairs.jsonl` and `sft_bucket.jsonl` must agree on the
-prompt-id sets for each class, and all four digests are recorded.
+**Reconciliation asserted before conversion, fail-closed. `mining_summary.json`
+holds histogram *counts*, not prompt IDs, so the checks differ by class:**
+
+| class | assertion |
+|---|---|
+| mixed (1–7 of 8) | ledger-derived ID set **equals** `mined_pairs.jsonl`'s ID set |
+| 0-of-8 | ledger-derived ID set **equals** `sft_bucket.jsonl`'s ID set |
+| 8-of-8 | **no second ID artifact exists** — verified by ledger-derived count **equal to** the summary's `histogram["8"]` |
+| all classes | each ledger-derived set's **size equals** the corresponding summary count |
+
+**All four digests recorded:** `ledger.jsonl`, `mining_summary.json`,
+`mined_pairs.jsonl`, `sft_bucket.jsonl`.
 
 **Row schema for solo rows:**
 
@@ -145,21 +158,34 @@ boundary.
 least one train and one eval prompt under the exact integer rule **fails the
 conversion**, rather than silently emptying an eval stratum.
 
-**Ordering under the KL constraint — the full algorithm, since "deterministic and
-recorded" leaves it selectable.**
+**Parity is resolved *before* ordering and before the weights are computed.**
 
-> 1. Sort rows by `(pair_id, label)`, both ascending — a total order, no ties.
+> **Within each split**, if the expanded row count is **odd**, exclude the
+> **lexicographically last eligible *solo* row** whose cell remains non-empty
+> afterwards. **A pair-derived row is never dropped.** The excluded row's
+> `pair_id`, `prompt_id`, cell and reason are recorded in the run artifact.
+> **If no eligible solo row exists, the conversion fails** rather than dropping a
+> pair row or emitting an odd split.
+>
+> **Training weights (A5.3) and eval denominators are computed from the
+> post-parity rows**, so the numbers that govern training match the rows that
+> actually exist.
+
+**Ordering under the KL constraint — an exact matching, not a retry loop.**
+
+> 1. Sort all rows by `(pair_id, label)` ascending — a total order, no ties.
 > 2. Split into `D` (desirable) and `U` (undesirable), each in that order.
-> 3. **Emit `min(|D|, |U|)` label-balanced batches**: batch `k` =
->    `[D[k], U[(k+1) mod |U|]]`, retrying the next index while both rows share a
->    `prompt_id`. This maximizes balanced batches.
-> 4. **Same-label leftovers** — the surplus of the larger class — are emitted
->    afterwards in their sorted order, paired **adjacently under the same
->    distinct-`prompt_id` rule**.
-> 5. **An odd row count leaves one row.** It is **carried into the next epoch's
->    position 0**; with one epoch it is **dropped, and the drop is recorded by
->    `pair_id` in the run artifact**. Never silently dropped, never duplicated to
->    pad.
+> 3. Let **minority** be the smaller class and **majority** the larger. Walk the
+>    minority in sorted order; each minority row is matched to the
+>    **lowest-sorted unconsumed majority row carrying a different `prompt_id`**.
+>    **Each majority row is consumed at most once** — it is never skipped-and-
+>    reused, so no row is duplicated or omitted.
+> 4. **If any minority row cannot be matched to a distinct-`prompt_id` majority
+>    row, the conversion fails.** It does not silently emit a same-prompt batch,
+>    which would corrupt the KL estimate.
+> 5. The **even same-label surplus** of the majority class is then emitted in
+>    exact sorted order, paired adjacently under the same distinct-`prompt_id`
+>    rule.
 > 6. Asserted: actual batch **2**, eval batch **2**, `world_size = 1`, **no
 >    singleton batch reaches the KL computation**.
 
@@ -238,8 +264,9 @@ than A4's arm in proportion to the row count, and it authorizes no spend.**
 
 ## A5.9 — no cap on the solo share
 
-**One solo row per admitted prompt, uncapped.** A cap would be another selectable
-design knob — its value would have to be chosen, and any choice would shape the
+**One solo row per admitted prompt, uncapped — meaning every solo prompt enters,
+except at most the pre-registered parity exclusion in A5.4.** A cap would be
+another selectable design knob — its value would have to be chosen, and any choice would shape the
 result. **The whole point of this arm is the full wide package**, so the
 composition is **reported, not constrained**: the run artifact records the
 realized desirable/undesirable and pair/solo shares.
