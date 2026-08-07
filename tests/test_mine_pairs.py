@@ -18,6 +18,7 @@ but wrong* artifact, because those are the failures that survive review:
 from __future__ import annotations
 
 import json
+import re
 from fractions import Fraction
 from pathlib import Path
 
@@ -48,6 +49,12 @@ def _prompt(pid: str = "p1", stratum: str = MULTI) -> Prompt:
     return Prompt(
         prompt_id=pid, stratum=stratum, system="sys", user="u", target=TARGET
     )
+
+
+_RECEIPT = {
+    "post_screen_id_sha256": "69d381413f8095d483b35c9bcd77e83bd6f72771edc9b4f192510f8e7392e5e3",
+    "survivors": {"multi": 8081, "single": 2990, "total": 11071},
+}
 
 
 def _generator(samples: list[str]):
@@ -283,10 +290,12 @@ def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path) -> N
     out = tmp_path / "mining_pilot"
     summary = mine_pairs.run(
         out_dir=out,
+        stage="pilot",
         n_prompts=4,
         generate_fn=generate_fn,
         prompts=prompts,
         survivor_counts={MULTI: 4, SINGLE: 4},
+        receipt=_RECEIPT,
     )
 
     assert summary["prompts_mined_total"] == 4
@@ -301,10 +310,12 @@ def test_a_run_writes_the_ledger_pairs_and_summary_and_can_resume(tmp_path) -> N
     first_pass = list(calls)
     mine_pairs.run(
         out_dir=out,
+        stage="pilot",
         n_prompts=4,
         generate_fn=generate_fn,
         prompts=prompts,
         survivor_counts={MULTI: 4, SINGLE: 4},
+        receipt=_RECEIPT,
     )
     assert calls == first_pass, "a resumed run must not re-sample paid-for work"
 
@@ -313,14 +324,16 @@ def test_the_pilot_summary_says_it_is_not_the_scientific_gate(tmp_path) -> None:
     prompts = [_prompt("m1", MULTI), _prompt("s1", SINGLE)]
     summary = mine_pairs.run(
         out_dir=tmp_path / "out",
+        stage="pilot",
         n_prompts=2,
         generate_fn=_generator([GOOD] * 4 + [BAD] * 4),
         prompts=prompts,
         survivor_counts={MULTI: 1, SINGLE: 1},
+        receipt=_RECEIPT,
     )
 
     assert "CALIBRATION" in summary["gate_note"]
-    assert "not the DPO-versus-3B" in summary["gate_note"]
+    assert "decision" not in summary, "a pilot must not emit a Phase 2 decision"
 
 
 def test_fresh_refuses_to_delete_an_existing_ledger(tmp_path) -> None:
@@ -331,10 +344,12 @@ def test_fresh_refuses_to_delete_an_existing_ledger(tmp_path) -> None:
     with pytest.raises(MinerError, match="evidence, not scratch space"):
         mine_pairs.run(
             out_dir=out,
+            stage="pilot",
             n_prompts=2,
             generate_fn=_generator([GOOD] * 8),
             prompts=[_prompt("m1", MULTI), _prompt("s1", SINGLE)],
             survivor_counts={MULTI: 1, SINGLE: 1},
+            receipt=_RECEIPT,
             fresh=True,
         )
 
@@ -405,3 +420,193 @@ def test_a_missing_artifact_refuses() -> None:
         mine_pairs.load_eligible_prompts(
             receipt_path=Path("mining/receipts/does_not_exist.json")
         )
+
+
+# --- Review cycle 1: run identity, derivatives, manifest, schema -------------
+
+
+def _run(out, stage="pilot", n=2, prompts=None, gen=None):
+    prompts = prompts or [_prompt("m1", MULTI), _prompt("s1", SINGLE)]
+    return mine_pairs.run(
+        out_dir=out,
+        stage=stage,
+        n_prompts=n,
+        generate_fn=gen or _generator([GOOD] * 4 + [BAD] * 4),
+        prompts=prompts,
+        survivor_counts={
+            MULTI: sum(1 for p in prompts if p.stratum == MULTI),
+            SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
+        },
+        receipt=_RECEIPT,
+    )
+
+
+def test_a_directory_will_not_accept_a_second_run_of_a_different_shape(tmp_path) -> None:
+    """Codex's repro: the same directory accepted n=2 then n=4 and produced one
+    four-record artifact that no stated design asked for."""
+    out = tmp_path / "out"
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(2)
+    ]
+    _run(out, n=2, prompts=prompts)
+
+    with pytest.raises(MinerError, match="describes a different run"):
+        _run(out, n=4, prompts=prompts)
+
+
+def test_a_pilot_directory_will_not_accept_a_calibration_run(tmp_path) -> None:
+    out = tmp_path / "out"
+    _run(out, stage="pilot", n=2)
+
+    with pytest.raises(MinerError, match=r"separate\s+evidence chains"):
+        _run(out, stage="calibration", n=2)
+
+
+def test_run_metadata_pins_every_input_that_could_move(tmp_path) -> None:
+    out = tmp_path / "out"
+    _run(out)
+    meta = json.loads((out / "run.json").read_text())
+
+    assert meta["stage"] == "pilot"
+    assert meta["pool_sha256"] == mine_pairs.POOL_SHA256
+    assert meta["manifest_sha256"] == mine_pairs.MANIFEST_SHA256
+    assert meta["decontamination_receipt_sha256"] == mine_pairs.DECON_SHA256
+    assert meta["weights"]["N"] == 11071
+    assert meta["adapter"]["revision"] == mine_pairs.SFT_ADAPTER_REVISION
+    assert meta["verifier_selftest_version"] == mine_pairs.VERIFIER_VERSION
+    assert meta["selected_id_sha256"]
+
+
+def test_a_rollback_re_materializes_the_derived_files(tmp_path) -> None:
+    """Codex's second repro: after redo_last(1) the files still reported the
+    rolled-back work, so the summary contradicted its own ledger."""
+    out = tmp_path / "out"
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(2)
+    ]
+    _run(out, n=4, prompts=prompts)
+    assert json.loads((out / "mining_summary.json").read_text())["pairs_total"] == 4
+
+    ledger = Ledger(out / "ledger.jsonl")
+    ledger.redo_last(1)
+    mine_pairs.write_derivatives(out, ledger, {MULTI: 2, SINGLE: 2}, "pilot")
+
+    summary = json.loads((out / "mining_summary.json").read_text())
+    assert summary["prompts_mined_total"] == 3
+    assert summary["pairs_total"] == 3
+    assert len((out / "mined_pairs.jsonl").read_text().strip().splitlines()) == 3
+
+
+def test_fresh_refuses_when_any_evidence_file_exists(tmp_path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "mining_summary.json").write_text("{}")
+
+    with pytest.raises(MinerError, match=re.escape("mining_summary.json")):
+        mine_pairs.run(
+            out_dir=out,
+            stage="pilot",
+            n_prompts=2,
+            generate_fn=_generator([GOOD] * 8),
+            prompts=[_prompt("m1", MULTI), _prompt("s1", SINGLE)],
+            survivor_counts={MULTI: 1, SINGLE: 1},
+            receipt=_RECEIPT,
+            fresh=True,
+        )
+
+
+def test_a3_5_requires_the_manifest_digest_checked_directly(monkeypatch) -> None:
+    monkeypatch.setattr(mine_pairs, "MANIFEST_SHA256", "0" * 64)
+
+    with pytest.raises(MinerError, match="amended manifest sha256"):
+        mine_pairs.load_eligible_prompts()
+
+
+def test_a_mined_pair_carries_the_prompt_the_trainer_needs(tmp_path) -> None:
+    """Producer -> consumer: every DPO loader in the repo keys on
+    `prompt_messages`. Two completion strings are not a trainable row."""
+    out = tmp_path / "out"
+    _run(out)
+    rows = [json.loads(x) for x in (out / "mined_pairs.jsonl").read_text().splitlines()]
+
+    assert rows
+    for row in rows:
+        assert [m["role"] for m in row["prompt_messages"]] == ["system", "user"]
+        assert all(m["content"] for m in row["prompt_messages"])
+        assert row["chosen"] and row["rejected"]
+
+
+def test_the_histogram_and_sft_bucket_are_recomputed_from_the_ledger(tmp_path) -> None:
+    """Phase 1.3 needs the pass histogram; prereg §3B consumes the 0-of-8 bucket."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        {**_record("m1", MULTI, pair=True), "prompt_messages": [], "target": "t"}
+    )
+    ledger.append(
+        {
+            "prompt_id": "m2",
+            "stratum": MULTI,
+            "generations": [BAD, BAD],
+            "verdicts": [{"accepted": False}, {"accepted": False}],
+            "prompt_messages": [{"role": "user", "content": "u"}],
+            "target": "the ground truth",
+        }
+    )
+    ledger.append(
+        {
+            "prompt_id": "s1",
+            "stratum": SINGLE,
+            "generations": [GOOD, GOOD],
+            "verdicts": [{"accepted": True}, {"accepted": True}],
+            "prompt_messages": [],
+            "target": "t",
+        }
+    )
+
+    summary = summarize(ledger, {MULTI: 1, SINGLE: 1})
+
+    assert summary["pass_histogram"]["0"] == 1
+    assert summary["pass_histogram"]["2"] == 1
+    assert summary["discarded_all_correct"] == 1, "8-of-8 prompts are discarded, not paired"
+    assert [r["prompt_id"] for r in summary["sft_bucket"]] == ["m2"]
+    assert summary["sft_bucket"][0]["target"] == "the ground truth"
+
+
+def test_the_gate_is_decided_on_the_exact_rational_not_the_float(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(_record("m1", MULTI, pair=True))
+    ledger.append(_record("s1", SINGLE, pair=True))
+
+    summary = summarize(ledger, {MULTI: 1, SINGLE: 1})
+    exact = summary["_P_std_fraction"]
+
+    assert isinstance(exact, Fraction)
+    assert exact == 10_000  # y_std == 1
+    assert gate_decision(exact) == gate_decision(Fraction(10_000))
+
+
+def test_a_failing_selftest_stops_the_run_before_any_generation(tmp_path, monkeypatch) -> None:
+    """§5.1: the fixture gate runs before every mining session."""
+
+    class Failed:
+        version = "onpolicy_verifier_v1"
+        pairs = 1600
+        pairs_passed = 1599
+        passed = False
+
+    monkeypatch.setattr(mine_pairs, "run_selftest", lambda: Failed())
+    called: list[str] = []
+
+    def generate_fn(prompt, n):
+        called.append(prompt.prompt_id)
+        return [GOOD] * 8
+
+    with pytest.raises(MinerError, match="fixture self-test failed"):
+        _run(tmp_path / "out", gen=generate_fn)
+
+    assert called == [], "no prompt may be sampled behind a failed gate"
+
+
+def test_an_unknown_stage_is_refused(tmp_path) -> None:
+    with pytest.raises(MinerError, match="stage must be one of"):
+        _run(tmp_path / "out", stage="exploratory")

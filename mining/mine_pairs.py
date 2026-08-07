@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -78,7 +79,18 @@ DECON_SHA256 = "3daaffa85a2097468f53845d1cddf996a0e68a3605916e26918891c2972732b3
 # merely not chosen.
 SUPERSEDED_DECON_SHA256 = "fb7a0200dbeeabb831006eeb800a23d3c92d89a468666c61b098ca1277231906"
 
+# A3.5 requires the miner to verify three digests before the first prompt is
+# mined: the amended manifest, the current receipt, and the post-screen id set.
+# Re-deriving survivors proves the last two transitively but never checks the
+# manifest directly — a manifest could drift and still screen to a set whose
+# digest matched, if the drift touched a file the screen does not read.
 MANIFEST_PATH = Path("eval/manifests/bfcl_v4_study2.json")
+MANIFEST_SHA256 = "542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0"
+
+# §2.4 fixes the shape of each stage. Binding them here stops a pilot ledger and
+# a calibration ledger from ever becoming one artifact.
+STAGES = {"pilot": 100, "calibration": 1000}
+RUN_METADATA_NAME = "run.json"
 
 # §2.1 required inputs (closes roadmap H1.1 — the owner supplies nothing further)
 SFT_ADAPTER_REPO = "centuriandip/llama-3.1-8b-tools-sft"
@@ -127,6 +139,8 @@ class PromptOutcome:
     stratum: str
     generations: list[str] = field(default_factory=list)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
+    prompt_messages: list[dict[str, str]] = field(default_factory=list)
+    target: str = ""
 
 
 def _sha256(payload: bytes) -> str:
@@ -204,6 +218,14 @@ def load_eligible_prompts(
         )
     receipt_bytes = _verify_pin(receipt_path, DECON_SHA256, "decontamination artifact")
     receipt = json.loads(receipt_bytes)
+
+    # A3.5's first required digest, checked directly rather than inferred.
+    _verify_pin(manifest_path, MANIFEST_SHA256, "amended manifest")
+    if receipt["manifest"]["sha256"] != MANIFEST_SHA256:
+        raise MinerError(
+            f"artifact was screened against manifest {receipt['manifest']['sha256']}, "
+            f"not the amended {MANIFEST_SHA256}"
+        )
 
     pool_bytes = _verify_pin(pool_path, POOL_SHA256, "mining pool")
     if receipt["source"]["sha256"] != POOL_SHA256:
@@ -335,6 +357,86 @@ def select_prompts(
     return chosen
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via temp + fsync + replace.
+
+    A derived file written in place can be observed half-written after a crash,
+    and a half-written `mining_summary.json` is a yield figure nobody can tell is
+    partial. The ledger already survives crashes this way; its derivatives have
+    to as well or the artifact set is only as trustworthy as its weakest file.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def run_metadata(
+    stage: str,
+    n_prompts: int,
+    selected: Sequence[Prompt],
+    receipt: dict[str, Any],
+    selftest_version: str,
+) -> dict[str, Any]:
+    """The immutable identity of a mining run.
+
+    Resume works by skipping prompt ids already in the ledger, which is only
+    safe if the resumed run is *the same run*. Without this, one directory
+    accepts `--n-prompts 2` and then `--n-prompts 4` and produces a single
+    four-record artifact that no stated design ever asked for.
+    """
+    return {
+        "stage": stage,
+        "n_prompts": n_prompts,
+        "selected_id_sha256": _id_digest(p.prompt_id for p in selected),
+        "pool_sha256": POOL_SHA256,
+        "decontamination_receipt_sha256": DECON_SHA256,
+        "manifest_sha256": MANIFEST_SHA256,
+        "post_screen_id_sha256": receipt["post_screen_id_sha256"],
+        "weights": {
+            "n_multi": WEIGHT_N_MULTI,
+            "n_single": WEIGHT_N_SINGLE,
+            "N": WEIGHT_N_TOTAL,
+        },
+        "sampling": {
+            "samples": SAMPLES_PER_PROMPT,
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P,
+            "max_new_tokens": MAX_NEW_TOKENS,
+            "seed": SEED,
+        },
+        "adapter": {
+            "repo": SFT_ADAPTER_REPO,
+            "subfolder": SFT_ADAPTER_SUBFOLDER,
+            "revision": SFT_ADAPTER_REVISION,
+        },
+        "verifier_version": VERIFIER_VERSION,
+        "verifier_selftest_version": selftest_version,
+    }
+
+
+def bind_run_metadata(out_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Create the run identity once, or prove the resumed run matches it."""
+    path = out_dir / RUN_METADATA_NAME
+    if not path.exists():
+        _atomic_write(path, json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        return metadata
+
+    existing = json.loads(path.read_text())
+    differing = sorted(
+        k for k in set(existing) | set(metadata) if existing.get(k) != metadata.get(k)
+    )
+    if differing:
+        raise MinerError(
+            f"{path} describes a different run; refusing to extend it. Differing "
+            f"fields: {differing}. A pilot and a calibration run are separate "
+            f"evidence chains and never share a directory"
+        )
+    return existing
+
+
 def materialize_pair(outcome: PromptOutcome) -> dict[str, Any] | None:
     """Deterministically build this prompt's preference pair, or None.
 
@@ -354,6 +456,10 @@ def materialize_pair(outcome: PromptOutcome) -> dict[str, Any] | None:
     return {
         "prompt_id": outcome.prompt_id,
         "stratum": outcome.stratum,
+        # The trainer consumes this file directly, and every DPO loader in the
+        # repo keys on `prompt_messages`. A pair carrying only two completion
+        # strings is not a trainable row — it is two strings.
+        "prompt_messages": outcome.prompt_messages,
         "chosen": outcome.generations[accepted],
         "rejected": outcome.generations[rejected],
         "chosen_index": accepted,
@@ -392,6 +498,11 @@ def mine_prompt(prompt: Prompt, generate_fn: Callable[[Prompt, int], list[str]])
         stratum=prompt.stratum,
         generations=generations,
         verdicts=verdicts,
+        prompt_messages=[
+            {"role": "system", "content": prompt.system},
+            {"role": "user", "content": prompt.user},
+        ],
+        target=prompt.target,
     )
 
 
@@ -418,17 +529,40 @@ def summarize(ledger: Ledger, survivor_counts: dict[str, int]) -> dict[str, Any]
     pairs = {MULTI: 0, SINGLE: 0}
     materialized: list[dict[str, Any]] = []
 
+    histogram: dict[str, int] = {str(k): 0 for k in range(SAMPLES_PER_PROMPT + 1)}
+    discarded_all_correct = 0
+    sft_bucket: list[dict[str, Any]] = []
+
     for record in active:
         stratum = record["stratum"]
         mined[stratum] += 1
-        pair = materialize_pair(
-            PromptOutcome(
-                prompt_id=record["prompt_id"],
-                stratum=stratum,
-                generations=record["generations"],
-                verdicts=record["verdicts"],
-            )
+        outcome = PromptOutcome(
+            prompt_id=record["prompt_id"],
+            stratum=stratum,
+            generations=record["generations"],
+            verdicts=record["verdicts"],
+            prompt_messages=record.get("prompt_messages", []),
+            target=record.get("target", ""),
         )
+
+        # Phase 1.3 requires the pass histogram; §3B consumes the 0-of-8 bucket.
+        # Both are recomputed here rather than counted during the run, for the
+        # same reason yield is: a number derived from the ledger is checkable.
+        n_accepted = sum(1 for v in outcome.verdicts if v["accepted"])
+        histogram[str(n_accepted)] += 1
+        if outcome.verdicts and n_accepted == len(outcome.verdicts):
+            discarded_all_correct += 1
+        if outcome.verdicts and n_accepted == 0:
+            sft_bucket.append(
+                {
+                    "prompt_id": outcome.prompt_id,
+                    "stratum": stratum,
+                    "prompt_messages": outcome.prompt_messages,
+                    "target": outcome.target,
+                }
+            )
+
+        pair = materialize_pair(outcome)
         if pair is not None:
             pairs[stratum] += 1
             materialized.append(pair)
@@ -450,6 +584,9 @@ def summarize(ledger: Ledger, survivor_counts: dict[str, int]) -> dict[str, Any]
 
     return {
         "verifier_version": VERIFIER_VERSION,
+        "pass_histogram": histogram,
+        "discarded_all_correct": discarded_all_correct,
+        "sft_bucket": sft_bucket,
         "prompts_mined": {s: mined[s] for s in mined},
         "pairs": {s: pairs[s] for s in pairs},
         "prompts_mined_total": mined[MULTI] + mined[SINGLE],
@@ -459,6 +596,9 @@ def summarize(ledger: Ledger, survivor_counts: dict[str, int]) -> dict[str, Any]
         "y_std": float(y_std) if y_std is not None else None,
         "P_std": float(p_std) if p_std is not None else None,
         "P_std_exact": f"{p_std.numerator}/{p_std.denominator}" if p_std is not None else None,
+        # The Fraction itself, for gate_decision(). Stripped before serialization
+        # so the artifact stays plain JSON; §2.6 must never see the float.
+        "_P_std_fraction": p_std,
         "weights": {
             "n_multi": WEIGHT_N_MULTI,
             "n_single": WEIGHT_N_SINGLE,
@@ -487,35 +627,100 @@ def gate_decision(p_std: float | Fraction | None) -> str:
     return "DO NOT run DPO. Go to Phase 3B (rejection-sampling SFT)"
 
 
+DERIVED_FILES = ("mined_pairs.jsonl", "mining_summary.json", "sft_bucket.jsonl")
+
+
+def write_derivatives(
+    out_dir: Path,
+    ledger: Ledger,
+    survivor_counts: dict[str, int],
+    stage: str,
+    allocation: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Re-materialize every derived file from the ledger's active records.
+
+    Called after a normal run *and* after `--redo-last`. A tombstone that does
+    not reach the derivatives leaves `mining_summary.json` reporting a yield the
+    ledger no longer supports — the artifact contradicting its own evidence,
+    which is worse than having no summary at all.
+    """
+    out_dir = Path(out_dir)
+    summary = summarize(ledger, survivor_counts)
+    summary["stage"] = stage
+    if allocation is not None:
+        summary["allocation"] = allocation
+
+    exact = summary.pop("_P_std_fraction")
+    if stage == "calibration":
+        # §2.6 is evaluated on the exact rational, never the serialized float.
+        summary["decision"] = gate_decision(exact)
+    else:
+        summary["gate_note"] = (
+            "§2.6's decision table decides on the committed CALIBRATION artifact "
+            "only. This is a pilot: an operational gate the owner reads a "
+            "histogram for. No Phase 2 decision is emitted here, because the "
+            "frozen text does not authorize one from 100 prompts."
+        )
+
+    pairs = summary.pop("materialized_pairs")
+    bucket = summary.pop("sft_bucket")
+    _atomic_write(out_dir / "mined_pairs.jsonl", "".join(json.dumps(p) + "\n" for p in pairs))
+    _atomic_write(out_dir / "sft_bucket.jsonl", "".join(json.dumps(r) + "\n" for r in bucket))
+    _atomic_write(out_dir / "mining_summary.json", json.dumps(summary, indent=2) + "\n")
+    summary["sft_bucket_rows"] = len(bucket)
+    return summary
+
+
 def run(
     out_dir: Path,
-    n_prompts: int,
+    stage: str,
     generate_fn: Callable[[Prompt, int], list[str]],
     prompts: Sequence[Prompt] | None = None,
     survivor_counts: dict[str, int] | None = None,
+    receipt: dict[str, Any] | None = None,
     fresh: bool = False,
+    n_prompts: int | None = None,
 ) -> dict[str, Any]:
-    """Mine `n_prompts`, resuming from any existing ledger, and write the summary."""
-    if prompts is None or survivor_counts is None:
-        prompts, _receipt = load_eligible_prompts()
+    """Mine one stage, resuming only into a run with the same identity."""
+    if stage not in STAGES:
+        raise MinerError(f"stage must be one of {sorted(STAGES)}, not {stage!r}")
+    n_prompts = STAGES[stage] if n_prompts is None else n_prompts
+
+    if prompts is None or survivor_counts is None or receipt is None:
+        prompts, receipt = load_eligible_prompts()
         survivor_counts = {
             MULTI: sum(1 for p in prompts if p.stratum == MULTI),
             SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
         }
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ledger_path = out_dir / "ledger.jsonl"
-    if fresh and ledger_path.exists():
+    # §5.1's last guardrail: the fixture gate runs before every mining session.
+    # Binding its version into the run identity is what makes "it passed" a
+    # property of this artifact rather than of somebody's shell history.
+    report = run_selftest()
+    if not report.passed:
         raise MinerError(
-            f"--fresh refuses to delete an existing ledger at {ledger_path}; "
-            f"move it aside deliberately. The ledger is evidence, not scratch space"
+            f"verifier fixture self-test failed ({report.pairs_passed}/{report.pairs}); "
+            f"no prompt may be mined against a verifier that cannot clear its own gate"
         )
 
-    ledger = Ledger(ledger_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = [name for name in (*DERIVED_FILES, "ledger.jsonl", RUN_METADATA_NAME)
+                if (out_dir / name).exists()]
+    if fresh and existing:
+        raise MinerError(
+            f"--fresh refuses to delete existing evidence in {out_dir}: {existing}. "
+            f"Move the directory aside deliberately; this is evidence, not scratch space"
+        )
+
     allocation = allocate(n_prompts, survivor_counts)
     selected = select_prompts(prompts, allocation)
+    bind_run_metadata(
+        out_dir,
+        run_metadata(stage, n_prompts, selected, receipt, report.version),
+    )
 
+    ledger = Ledger(out_dir / "ledger.jsonl")
     already = ledger.processed_ids()
     for prompt in selected:
         if prompt.prompt_id in already:
@@ -527,6 +732,8 @@ def run(
                 "stratum": outcome.stratum,
                 "generations": outcome.generations,
                 "verdicts": outcome.verdicts,
+                "prompt_messages": outcome.prompt_messages,
+                "target": outcome.target,
                 "verifier_version": VERIFIER_VERSION,
                 "sampling": {
                     "samples": SAMPLES_PER_PROMPT,
@@ -538,23 +745,7 @@ def run(
             }
         )
 
-    summary = summarize(ledger, survivor_counts)
-    summary["allocation"] = allocation
-    summary["n_prompts_requested"] = n_prompts
-    summary["decision_if_calibration"] = gate_decision(summary["P_std"])
-    summary["gate_note"] = (
-        "§2.6's decision table decides on the committed CALIBRATION artifact only. "
-        "A 100-prompt pilot is an operational gate — the owner reads its histogram "
-        "and approves continuing — and is explicitly not the DPO-versus-3B "
-        "scientific gate."
-    )
-
-    pairs = summary.pop("materialized_pairs")
-    (out_dir / "mined_pairs.jsonl").write_text(
-        "".join(json.dumps(p) + "\n" for p in pairs)
-    )
-    (out_dir / "mining_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    return summary
+    return write_derivatives(out_dir, ledger, survivor_counts, stage, allocation)
 
 
 def main() -> None:
@@ -563,7 +754,7 @@ def main() -> None:
                         help="run the verifier fixture gate and exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="load, screen, allocate and select at $0; generate nothing")
-    parser.add_argument("--n-prompts", type=int, default=100)
+    parser.add_argument("--stage", choices=sorted(STAGES), default="pilot")
     parser.add_argument("--out-dir", type=Path, default=Path("mining_pilot"))
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--redo-last", type=int, default=None,
@@ -576,8 +767,21 @@ def main() -> None:
         raise SystemExit(0 if report.passed else 1)
 
     if args.redo_last is not None:
-        ledger = Ledger(Path(args.out_dir) / "ledger.jsonl")
-        print(f"tombstoned {ledger.redo_last(args.redo_last)} records")
+        out_dir = Path(args.out_dir)
+        ledger = Ledger(out_dir / "ledger.jsonl")
+        tombstoned = ledger.redo_last(args.redo_last)
+        # Re-materialize, or the derivatives keep reporting the rolled-back work.
+        metadata = json.loads((out_dir / RUN_METADATA_NAME).read_text())
+        _prompts, receipt = load_eligible_prompts()
+        counts = {
+            MULTI: receipt["survivors"]["multi"],
+            SINGLE: receipt["survivors"]["single"],
+        }
+        summary = write_derivatives(out_dir, ledger, counts, metadata["stage"])
+        print(
+            f"tombstoned {tombstoned} records; re-materialized "
+            f"{summary['pairs_total']} pairs from {summary['prompts_mined_total']} prompts"
+        )
         raise SystemExit(0)
 
     prompts, receipt = load_eligible_prompts()
@@ -585,9 +789,10 @@ def main() -> None:
         MULTI: sum(1 for p in prompts if p.stratum == MULTI),
         SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
     }
-    allocation = allocate(args.n_prompts, counts)
+    n_prompts = STAGES[args.stage]
+    allocation = allocate(n_prompts, counts)
     print(f"post-screen survivors: {counts} (artifact: {receipt['survivors']})")
-    print(f"allocation for --n-prompts {args.n_prompts}: {allocation}")
+    print(f"allocation for stage {args.stage} (n={n_prompts}): {allocation}")
 
     if args.dry_run:
         selected = select_prompts(prompts, allocation)
