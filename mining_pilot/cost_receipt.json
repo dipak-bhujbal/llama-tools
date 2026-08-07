@@ -1,0 +1,15 @@
+{
+  "source": "runpodctl billing pods -o json",
+  "fetched_for": "2026-08-07 study-2 mining pilot",
+  "rows": [
+    {
+      "amount": 0.23272516997531056,
+      "diskSpaceBilledGb": 360,
+      "gpuId": "NVIDIA GeForce RTX 4090",
+      "time": "2026-08-07 00:00:00",
+      "timeBilledMs": 1118663
+    }
+  ],
+  "total_usd": 0.2327,
+  "note": "Provider billing record for the pilot day. Covers both pods created on 2026-08-07: the first (terminated during provisioning) and j6162rm6nbktab, which ran the pilot. RunPod aggregates them into one daily row per GPU type. Network-volume billing for the day returned no rows. This supersedes the $0.2131 balance-delta figure quoted in #general, which was an account-balance difference observed before billing settled, not a billed amount."
+}
