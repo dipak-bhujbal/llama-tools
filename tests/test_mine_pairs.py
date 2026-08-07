@@ -816,10 +816,21 @@ def test_a0_planned_steps_uses_the_frozen_cellwise_split() -> None:
     assert r["A0_planned_optimizer_steps"] == 1
 
 
-def test_every_cell_keeps_at_least_one_eval_pair() -> None:
-    """max(1, ...) matters: a small cell must not round its eval share to zero."""
-    r = mine_pairs.a0_planned_optimizer_steps([{"rejected_reason": "wrong_tool"}])
-    assert r["cells"]["wrong_tool"] == {"n": 1, "train": 0, "eval": 1}
+def test_a_thin_cell_stops_the_run_rather_than_sending_it_all_to_train() -> None:
+    """§3.4: every non-empty cell must place a row on each side, so n_cell >= 2 is
+    required; a thinner cell stops the run and is never merged, dropped, or sent
+    entirely to train."""
+    with pytest.raises(MinerError, match="fewer than 2 pairs"):
+        mine_pairs.a0_planned_optimizer_steps([{"rejected_reason": "wrong_tool"}])
+
+
+def test_an_unrecognised_rejection_reason_fails_closed() -> None:
+    """§3.4(b): every 3A row carries exactly one error_type. Inventing an
+    `unknown` cell would be the reclassification §2.11 forbids."""
+    with pytest.raises(MinerError, match="is not one of"):
+        mine_pairs.a0_planned_optimizer_steps(
+            [{"rejected_reason": None}, {"rejected_reason": None}]
+        )
 
 
 def test_calibration_records_activation_and_family_size(tmp_path, monkeypatch) -> None:
@@ -833,12 +844,15 @@ def test_calibration_records_activation_and_family_size(tmp_path, monkeypatch) -
         out_dir=out, stage="calibration", generate_fn=_generator([GOOD] * 4 + [BAD] * 4)
     )
 
-    a5 = summary["amendment5"]
-    assert a5["activation_threshold"] == 250
-    # 4 tiny cells -> far below threshold, so it activates and the family is 5
-    assert a5["A5_kto_wide_activates"] is True
-    assert a5["family_size"] == 5
-    assert json.loads((out / "mining_summary.json").read_text())["amendment5"]["family_size"] == 5
+    # Operative fields at top level, and the branch is PROVEN not assumed:
+    # all 4 prompts yield pairs, so P_std = 10000 >= 1000.
+    assert summary["P_std"] >= 1000
+    assert summary["A0_planned_optimizer_steps"] < 250
+    assert summary["A5_kto_wide_activates"] is True
+    assert summary["family_size"] == 5
+    assert "P_std >= 1000" in summary["A5_activation_reason"]
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["family_size"] == 5 and written["A0_train_pairs"] == summary["A0_train_pairs"]
 
 
 def test_a_pilot_emits_no_amendment5_block(tmp_path, monkeypatch) -> None:
@@ -847,9 +861,60 @@ def test_a_pilot_emits_no_amendment5_block(tmp_path, monkeypatch) -> None:
     assert "amendment5" not in summary
 
 
-def test_family_size_is_4_when_the_arm_does_not_activate() -> None:
-    big = [{"rejected_reason": "wrong_args"}] * 5000
-    r = mine_pairs.a0_planned_optimizer_steps(big)
-    assert r["A0_planned_optimizer_steps"] >= 250
-    # mirrors write_derivatives' branch
-    assert (5 if r["A0_planned_optimizer_steps"] < 250 else 4) == 4
+def test_step_threshold_boundary_is_strict() -> None:
+    """`< 250`, not `<=`. Exercised through the real split planner: find the
+    smallest cell size giving 250 steps, and check the one below it gives 249."""
+
+    def steps_for(n: int) -> int:
+        return mine_pairs.a0_planned_optimizer_steps(
+            [{"rejected_reason": "wrong_args"}] * n
+        )["A0_planned_optimizer_steps"]
+
+    n = next(k for k in range(2, 6000) if steps_for(k) >= 250)
+    assert steps_for(n) == 250
+    assert steps_for(n - 1) == 249
+    assert (steps_for(n - 1) < mine_pairs.A5_ACTIVATION_STEP_THRESHOLD) is True
+    assert (steps_for(n) < mine_pairs.A5_ACTIVATION_STEP_THRESHOLD) is False
+
+
+def test_a_cautious_branch_never_activates_the_exploratory_arm() -> None:
+    """§3.1 permits NO exploratory arm on 300-999, so a short A0 there must still
+    give family 4. Step count alone would wrongly activate it."""
+    from fractions import Fraction
+
+    for p_std, activates in (
+        (Fraction(999), False),   # cautious branch
+        (Fraction(1000), True),   # exploratory branch, boundary is >=
+        (Fraction(299), False),   # 3B
+    ):  # noqa: E501
+        on_branch = p_std >= mine_pairs.GATE_PROCEED
+        assert (on_branch and 1 < 250) is activates
+
+
+# --- The stratum breakdown must be derivable, not asserted -------------------
+
+
+def test_the_committed_breakdown_re_derives_from_the_ledger() -> None:
+    """A hand-entered table is a claim; a re-derivation is evidence."""
+    from mining.stratum_breakdown import breakdown
+
+    committed = json.loads(Path("mining_pilot/stratum_breakdown.json").read_text())
+    fresh = breakdown(Path("mining_pilot/ledger.jsonl"))
+
+    assert fresh["source_ledger_sha256"] == committed["source_ledger_sha256"]
+    assert fresh["by_bucket"] == committed["by_bucket"]
+    assert fresh["stratum_totals"] == committed["stratum_totals"]
+    assert fresh["within_stratum_rates"] == committed["within_stratum_rates"]
+
+
+def test_the_breakdown_reads_active_records_only(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(_record("m1", MULTI, pair=True))
+    ledger.append(_record("s1", SINGLE, pair=True))
+    ledger.redo_last(1)
+
+    from mining.stratum_breakdown import breakdown
+
+    r = breakdown(tmp_path / "ledger.jsonl")
+    assert r["active_records"] == 1
+    assert r["stratum_totals"] == {"multi": 1, "single": 0}

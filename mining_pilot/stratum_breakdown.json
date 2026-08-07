@@ -1,17 +1,43 @@
 {
-  "source": "recomputed from mining_pilot/ledger.jsonl",
+  "source_ledger": "mining_pilot/ledger.jsonl",
+  "source_ledger_sha256": "4b2835ccd798f817d98e84b07e6b282e7578f2e58761824a148a8938fcb5e065",
+  "active_records": 100,
+  "by_bucket": {
+    "pair": {
+      "multi": 10,
+      "single": 8,
+      "total": 18
+    },
+    "all_correct": {
+      "multi": 53,
+      "single": 16,
+      "total": 69
+    },
+    "zero_correct": {
+      "multi": 10,
+      "single": 3,
+      "total": 13
+    }
+  },
+  "stratum_totals": {
+    "multi": 73,
+    "single": 27
+  },
+  "within_stratum_rates": {
+    "multi": {
+      "pair": 0.137,
+      "all_correct": 0.726,
+      "zero_correct": 0.137
+    },
+    "single": {
+      "pair": 0.2963,
+      "all_correct": 0.5926,
+      "zero_correct": 0.1111
+    }
+  },
   "question": "is multi-tool near-mastered or failing outright?",
   "answer": "near-mastered, and bimodal",
-  "by_bucket": {
-    "pair":         {"multi": 10, "single": 8,  "total": 18},
-    "all_correct":  {"multi": 53, "single": 16, "total": 69},
-    "zero_correct": {"multi": 10, "single": 3,  "total": 13}
-  },
-  "stratum_totals": {"multi": 73, "single": 27},
-  "within_stratum_rates": {
-    "multi":  {"pair": 0.1370, "all_correct": 0.7260, "zero_correct": 0.1370},
-    "single": {"pair": 0.2963, "all_correct": 0.5926, "zero_correct": 0.1111}
-  },
-  "finding": "Multi-tool is not failing: 53/73 = 72.6% of multi prompts are answered correctly on all 8 samples, against 16/27 = 59.3% for single. But multi is also more often wrong outright (13.7% vs 11.1% zero-correct). The pair-producing middle band is therefore much thinner for multi (13.7%) than single (29.6%), which is why y_multi (0.137) is less than half y_single (0.296). Multi's lower yield is a bimodality effect, not a competence deficit.",
-  "consequence": "The frozen weights make multi 73% of every sample, so the calibration run will be dominated by the stratum with the thinner middle band. Expect calibration y_std near the pilot's 0.180 rather than near y_single."
+  "finding": "Multi-tool is not failing: 53/73 = 72.6% of multi prompts are answered correctly on all 8 samples, against 16/27 = 59.3% for single. But multi is also wrong outright more often (13.7% vs 11.1% zero-correct), so the pair-producing middle band is much thinner for multi (13.7%) than single (29.6%). That is why y_multi 0.137 is less than half y_single 0.296. Multi's lower yield is a bimodality effect, not a competence deficit.",
+  "planning_inference_not_measurement": "The frozen weights make multi 73% of every sample, so calibration will be dominated by the stratum with the thinner middle band. On that basis one would EXPECT calibration y_std nearer the pilot's 0.180 than y_single's 0.296. This is an inference from a 100-prompt pilot, not a measurement; only the committed calibration artifact settles it.",
+  "derivation": "python -m mining.stratum_breakdown mining_pilot/ledger.jsonl"
 }

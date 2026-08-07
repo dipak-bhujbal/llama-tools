@@ -918,10 +918,32 @@ def a0_planned_optimizer_steps(pairs: Sequence[dict[str, Any]]) -> dict[str, Any
     The cell key for a 3A arm is the pair's `rejected_reason` (§3.4's
     track-specific key; the miner emits `rejected_reason`, not `error_type`).
     """
+    from mining.verifier import REASONS
+
     cells: dict[str, int] = {}
     for pair in pairs:
-        reason = pair.get("rejected_reason") or "unknown"
+        reason = pair.get("rejected_reason")
+        # §3.4(b): "every 3A row IS a preference pair and carries exactly one"
+        # error_type. A missing or unrecognised value is not bucketable, and
+        # inventing an `unknown` cell would be the reclassification §2.11 forbids.
+        if reason not in REASONS:
+            raise MinerError(
+                f"{pair.get('pair_id') or pair.get('prompt_id')}: rejected_reason "
+                f"{reason!r} is not one of {sorted(REASONS)}; A0 split planning "
+                f"cannot bucket it"
+            )
         cells[reason] = cells.get(reason, 0) + 1
+
+    # §3.4: "Every non-empty cell must place at least one row on each side of the
+    # split. Therefore n_cell >= 2 is required for every 3A and B0 cell; a thinner
+    # cell stops the run with the track and cell named."
+    thin = sorted(r for r, n in cells.items() if n < 2)
+    if thin:
+        raise MinerError(
+            f"track 3A: split cell(s) {thin} have fewer than 2 pairs; §3.4 fails "
+            f"closed on thin cells rather than merging, dropping, or sending them "
+            f"entirely to train"
+        )
 
     train = 0
     per_cell: dict[str, dict[str, int]] = {}
@@ -992,16 +1014,46 @@ def write_derivatives(
         # hand later. Both are pre-result numbers: they depend only on the mined
         # pair count and the frozen split rule, never on any arm's outcome.
         planning = a0_planned_optimizer_steps(summary["materialized_pairs"])
-        activates = planning["A0_planned_optimizer_steps"] < A5_ACTIVATION_STEP_THRESHOLD
+        steps = planning["A0_planned_optimizer_steps"]
+
+        # A5-kto-wide is exploratory, and §3.1 permits exploratory arms ONLY on
+        # the `P_std >= 1000` branch. The step threshold alone would activate it
+        # on a cautious or 3B branch where no exploratory arm may run at all.
+        # Decided on the EXACT rational, never the serialized float (§2.6).
+        on_exploratory_branch = exact is not None and exact >= GATE_PROCEED
+        below_threshold = steps < A5_ACTIVATION_STEP_THRESHOLD
+        activates = on_exploratory_branch and below_threshold
+        if not on_exploratory_branch:
+            reason = (
+                "P_std < 1000: §3.1 permits no exploratory arm on this branch"
+                if exact is not None
+                else "P_std undefined: a stratum has no mined prompts"
+            )
+        elif not below_threshold:
+            reason = f"A0_planned_optimizer_steps {steps} >= {A5_ACTIVATION_STEP_THRESHOLD}"
+        else:
+            reason = (
+                f"P_std >= 1000 and A0_planned_optimizer_steps {steps} < "
+                f"{A5_ACTIVATION_STEP_THRESHOLD}"
+            )
+
+        # Operative fields at top level: these are what the activation rule reads.
+        summary["A0_train_pairs"] = planning["A0_train_pairs"]
+        summary["A0_planned_optimizer_steps"] = steps
+        summary["A5_kto_wide_activates"] = activates
+        summary["A5_activation_reason"] = reason
+        summary["family_size"] = 5 if activates else 4
         summary["amendment5"] = {
             **planning,
             "activation_threshold": A5_ACTIVATION_STEP_THRESHOLD,
-            "A5_kto_wide_activates": activates,
-            "family_size": 5 if activates else 4,
+            "requires_P_std_at_least": GATE_PROCEED,
+            "on_exploratory_branch": on_exploratory_branch,
             "note": (
-                "Amendment 5 A5.5/A5.6. Computed from this artifact alone, before "
-                "any arm runs. family_size is 4 when A5-kto-wide does not activate "
-                "and 5 when it does; it is not widened by adoption."
+                "Amendment 5 A5.5/A5.6, resolved from this artifact alone before "
+                "any arm runs. A5-kto-wide activates iff P_std >= 1000 (§3.1's "
+                "exploratory branch) AND A0_planned_optimizer_steps < 250. "
+                "family_size is 4 when it does not activate and 5 when it does; "
+                "adoption alone does not widen it."
             ),
         }
     else:
@@ -1090,15 +1142,6 @@ def _mine_selected(
         if prompt.prompt_id in already:
             continue  # resume: already paid for, never re-sampled
         outcome = mine_prompt(prompt, generate_fn)
-        done += 1
-        # A silent log for the whole run is indistinguishable from a hang, which
-        # is exactly how the pilot looked for 3.5 minutes. flush=True because
-        # stdout is redirected to a file and would otherwise block-buffer.
-        print(
-            f"[{done}/{total}] {prompt.prompt_id} "
-            f"({sum(1 for v in outcome.verdicts if v['accepted'])}/{SAMPLES_PER_PROMPT} accepted)",
-            flush=True,
-        )
         ledger.append(
             {
                 "prompt_id": outcome.prompt_id,
@@ -1116,6 +1159,16 @@ def _mine_selected(
                     "seed": SEED,
                 },
             }
+        )
+        done += 1
+        # Printed only AFTER the ledger append returns, so the log never claims
+        # work that is not yet durable. flush=True because stdout is redirected
+        # to a file and would otherwise block-buffer — a silent log for the whole
+        # run is indistinguishable from a hang, which is how the pilot looked.
+        print(
+            f"[{done}/{total}] {prompt.prompt_id} "
+            f"({sum(1 for v in outcome.verdicts if v['accepted'])}/{SAMPLES_PER_PROMPT} accepted)",
+            flush=True,
         )
 
 
