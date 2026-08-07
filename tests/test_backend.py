@@ -104,16 +104,19 @@ def test_direct_model_stage_requires_external_launcher(monkeypatch, tmp_path) ->
 
 
 def test_adapter_metadata_is_resolved_before_weights(monkeypatch) -> None:
+    import mining.backend as backend
+
     expected = object()
 
     class Config:
         @classmethod
         def from_pretrained(cls, repo, subfolder):
             assert repo == "centuriandip/llama-3.1-8b-tools-sft"
-            assert subfolder == "adapter/"
+            assert subfolder == "adapter"
             return expected
 
     monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(PeftConfig=Config))
+    assert backend.SFT_ADAPTER_SUBFOLDER == "adapter/", "frozen identity remains unchanged"
     assert preflight_adapter() is expected
 
 

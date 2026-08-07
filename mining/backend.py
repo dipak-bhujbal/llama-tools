@@ -173,7 +173,7 @@ def load_policy_with(
     model = PeftModel.from_pretrained(
         base,
         SFT_ADAPTER_REPO,
-        subfolder=SFT_ADAPTER_SUBFOLDER,
+        subfolder=SFT_ADAPTER_SUBFOLDER.rstrip("/"),
         revision=SFT_ADAPTER_REVISION,
     ).eval()
 
@@ -214,7 +214,7 @@ def preflight_adapter() -> Any:
 
     try:
         return PeftConfig.from_pretrained(
-            SFT_ADAPTER_REPO, subfolder=SFT_ADAPTER_SUBFOLDER
+            SFT_ADAPTER_REPO, subfolder=SFT_ADAPTER_SUBFOLDER.rstrip("/")
         )
     except Exception as exc:
         raise BackendError(
