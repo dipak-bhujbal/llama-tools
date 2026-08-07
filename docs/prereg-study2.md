@@ -1974,12 +1974,24 @@ counts, not IDs): ledger-derived mixed IDs **equal** `mined_pairs.jsonl`'s; ledg
 0-of-8 IDs **equal** `sft_bucket.jsonl`'s; 8-of-8 is verified by ledger count **equal to**
 `histogram["8"]`; every set size equals its summary count. All four digests recorded.
 
-**Solo row schema:** `pair_id = f"{prompt_id}:solo"`, asserted disjoint from A4's
-`prompt_id:chosen_index:rejected_index`; plus `source_index` (0), `bucket`
-(`all_correct` / `zero_correct`), `accepted_count`, `prompt` (the ledger record's
-`prompt_messages`), `completion`, `label`, `stratum`, `verifier_version` asserted
-`onpolicy_verifier_v1`. **Amendment 4's "every `pair_id` appears exactly twice" is superseded
-for this arm:** solo `pair_id`s appear exactly once; pair-derived ones still appear twice.
+**Solo row schema — exact, so this section is implementable without the drafting history:**
+
+| field | value |
+|---|---|
+| `pair_id` | `f"{prompt_id}:solo"` — **asserted disjoint** from Amendment 4's `prompt_id:chosen_index:rejected_index` form |
+| `prompt_id` | the ledger record's `prompt_id` |
+| `source_index` | the ledger generation index used — **`0`** |
+| `bucket` | **`all_correct`** or **`zero_correct`** |
+| `accepted_count` | the prompt's accepted count from the ledger — **`8`** for `all_correct`, **`0`** for `zero_correct` |
+| `prompt` | **the ledger record's `prompt_messages`, copied unmodified** |
+| `completion` | **exactly** `[{"role": "assistant", "content": <ledger generation at source_index>}]` |
+| `label` | `bool` — **`true`** for `all_correct`, **`false`** for `zero_correct` |
+| `stratum` | **copied unchanged from the ledger record** |
+| `verifier_version` | **asserted exactly `onpolicy_verifier_v1`**; any other value fails the conversion |
+
+**Amendment 4's assertion that "every `pair_id` appears exactly twice with opposite labels" is
+superseded for this arm:** solo `pair_id`s appear **exactly once**; pair-derived `pair_id`s
+still appear exactly twice.
 
 #### A5.3 Weights are this arm's own, not Amendment 4's
 
@@ -2005,7 +2017,9 @@ transfer**, because solo prompts have no `rejected_reason`; the key is
 **Parity is resolved before ordering and before the weights are computed.** If a split's
 expanded row count is odd, exclude the **lexicographically last eligible solo row** whose
 cell remains non-empty, recording `pair_id`, `prompt_id`, cell and reason. **A pair-derived
-row is never dropped**; if no eligible solo row exists, the conversion fails.
+row is never dropped**; if no eligible solo row exists, the conversion fails. **The training
+weights (A5.3) and the eval denominators are computed from the post-parity rows**, so the
+numbers that govern training and evaluation match the rows that actually exist.
 
 **Batch order is an exact matching, not a retry loop.** Sort all rows by `(pair_id, label)`
 ascending. **Set `minority = D` and `majority = U` when `|D| <= |U|`, otherwise the
