@@ -63,13 +63,21 @@ def test_committed_manifest_is_valid_json() -> None:
     assert manifest["default_source_revision"] == (
         "9d8416a96d1d69975493f1b6d60ff07d12a1726a"
     )
-    assert len(manifest["files"]) == 8
+    # 10 since owner Decision C (#general msg 2244) added the live_multiple
+    # questions and answer key as the study-2 development set.
+    assert len(manifest["files"]) == 10
     assert all("source_revision" in spec for spec in manifest["files"])
     # Every category carrying pinned files is classified, so the standing
     # preflight can never pass a category over for lack of an opinion.
     assert set(manifest["categories"]) == {
         spec["category"] for spec in manifest["files"]
     }
+    # And every category states what study 2 may do with it, so "is this a
+    # scoring set or a selection set" is a manifest fact rather than a habit.
+    assert all("study2_role" in entry for entry in manifest["categories"].values())
+    assert manifest["categories"]["live_multiple"]["study2_role"] == (
+        "development_selection_only"
+    )
 
 
 def test_the_release_commit_answer_key_is_pinned_at_the_release_revision() -> None:

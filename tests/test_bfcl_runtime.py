@@ -532,3 +532,88 @@ def test_manifest_write_failure_does_not_mask_the_real_error(tmp_path, monkeypat
     assert "disk full" in capsys.readouterr().out
     assert manifest["status"] == "incomplete"
     assert manifest["rows_written"] == 3
+
+
+# ---------------------------------------------------------------------------
+# 12. Development subset: main() restricts BOTH files before reconciling ids.
+#
+# This is the integration the gate's own tests never covered. The first version
+# of the scorer filtered the questions and left the answer key at parent size,
+# so main() aborted on its id-equality check and no development run could ever
+# complete. Testing the gate in isolation could not see that; only driving
+# main() can.
+# ---------------------------------------------------------------------------
+
+
+def _patch_dev_category_paths(monkeypatch, tmp_path: Path, *, pinned, extras) -> Path:
+    """A synthetic `live_multiple` parent = pinned ids + extras that must never
+    be scored, with the pin loader returning only `pinned`."""
+    questions_path, answer_path = _write_bfcl_data(tmp_path, [*pinned, *extras])
+    out_dir = tmp_path / "out"
+
+    def fake_resolve(repo_root, category):
+        return CategoryPaths(
+            questions=questions_path,
+            answer_key=answer_path,
+            default_output=out_dir,
+            is_development_subset=True,
+        )
+
+    monkeypatch.setattr(bfcl_simple, "resolve_category_paths", fake_resolve)
+    monkeypatch.setattr(bfcl_simple, "load_dev_subset_ids", lambda repo_root: list(pinned))
+    return out_dir
+
+
+def test_development_run_completes_and_scores_only_the_pinned_ids(
+    tmp_path, monkeypatch, fake_model_stack
+):
+    pinned = [f"live_multiple_{i}" for i in range(3)]
+    # An excluded collision id and a plain extra: both are in the parent files
+    # and neither may reach a generation row.
+    extras = ["live_multiple_190-84-0", "live_multiple_spare"]
+    out_dir = _patch_dev_category_paths(monkeypatch, tmp_path, pinned=pinned, extras=extras)
+    install_fake_generate(monkeypatch)
+
+    # --sft-only is the §3.3 shape: shipped SFT scored once on D.
+    argv = [
+        "bfcl_simple.py",
+        "--category", "live_multiple",
+        "--out-dir", str(out_dir),
+        "--sft-only",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    # Against the questions-only version this raises ValueError on the id
+    # reconciliation, because the answer key still holds every parent row.
+    bfcl_simple.main()
+
+    rows = _read_jsonl(out_dir / "generations.jsonl")
+    assert {r["id"] for r in rows} == set(pinned)
+    assert len(rows) == len(pinned)
+    for excluded in extras:
+        assert all(r["id"] != excluded for r in rows)
+
+    manifest = _read_manifest(out_dir)
+    assert manifest["status"] == "complete"
+
+
+def test_development_run_refuses_a_partial_run_via_num_prompts(
+    tmp_path, monkeypatch, fake_model_stack
+):
+    """A truncated development run is not comparable to the frozen baseline, so
+    the flag combination is refused before any model loads."""
+    pinned = [f"live_multiple_{i}" for i in range(3)]
+    out_dir = _patch_dev_category_paths(monkeypatch, tmp_path, pinned=pinned, extras=[])
+    install_fake_generate(monkeypatch)
+
+    argv = [
+        "bfcl_simple.py",
+        "--category", "live_multiple",
+        "--out-dir", str(out_dir),
+        "--sft-only",
+        "--num-prompts", "2",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit, match="num-prompts"):
+        bfcl_simple.main()

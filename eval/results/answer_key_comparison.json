@@ -203,10 +203,10 @@
       "verified_against": "eval/results/evidence.json"
     },
     "manifest": {
-      "bytes": 9288,
-      "git_blob_sha1": "864c4939f2cec7a2f36008f186e758bf9b91a00c",
+      "bytes": 11282,
+      "git_blob_sha1": "9fbfe150d9daeef2698767c7112265ec563f3f0c",
       "path": "eval/manifests/bfcl_v4_study2.json",
-      "sha256": "7f5289c48d0c7cfe4d71181a5ed10842cbc90ac45249bab6458260d7132a1c64"
+      "sha256": "542d407d434655487daa3faa0da69666cc5e5fa47c8ff67ab9771acc512fe3a0"
     },
     "pinned_key": {
       "bytes": 63627,

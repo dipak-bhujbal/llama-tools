@@ -18,8 +18,10 @@ Usage:
 
 import argparse
 import json
+import math
 from math import comb
 from pathlib import Path
+from statistics import NormalDist
 
 
 def exact_mcnemar_p(b: int, c: int) -> float:
@@ -68,6 +70,89 @@ def holm_adjust(p_values: list) -> list:
     return adjusted
 
 
+# Bisection tolerance for the interval endpoints. Deliberately not a parameter:
+# a caller passing something coarse would get a confidently-wrong interval back,
+# and no caller has a reason to want a looser one.
+_ENDPOINT_TOLERANCE = 1e-12
+
+
+def _constrained_p21(b: int, c: int, n: int, delta: float) -> float:
+    """Constrained ML estimate of `p21` under H0: difference = `delta`.
+
+    The positive root of `2n·q² + B·q + C = 0` with
+    `B = -b - c + (2n - c + b)·delta` and `C = -b·delta·(1 - delta)`.
+    """
+    a = 2 * n
+    quad_b = -b - c + (2 * n - c + b) * delta
+    quad_c = -b * delta * (1.0 - delta)
+    discriminant = quad_b * quad_b - 4 * a * quad_c
+    return (math.sqrt(max(discriminant, 0.0)) - quad_b) / (2 * a)
+
+
+def tango_score(b: int, c: int, n: int, delta: float) -> float:
+    """Tango's score statistic for H0: (candidate - reference) difference = `delta`.
+
+    Positive when the candidate leads the null value, negative when it trails, and
+    monotonically decreasing in `delta` — which is what makes the interval below a
+    simple bracketed root-find rather than a search.
+    """
+    variance = n * (2 * _constrained_p21(b, c, n, delta) + delta * (1.0 - delta))
+    if variance <= 0:
+        return math.inf if (c - b - n * delta) > 0 else -math.inf
+    return (c - b - n * delta) / math.sqrt(variance)
+
+
+def tango_interval(b: int, c: int, n: int, conf_level: float = 0.95) -> tuple[float, float]:
+    """Tango's score confidence interval for the paired difference of proportions.
+
+    **Direction convention, stated because sign errors here are silent:** `b` is
+    the count where the *reference* is correct and the candidate is not, `c` the
+    reverse, matching `exact_mcnemar_p`. The interval is therefore for
+    **candidate - reference**, and its point estimate is `(c - b) / n`.
+
+    Method: Tango (1998), *Statistics in Medicine* 17:891-908 — the interval is
+    the set of `delta` the score test does not reject, `{delta : |z(delta)| <= z_crit}`.
+    Its endpoints are found here by bisection on `tango_score`, which is
+    monotone decreasing, to a tolerance far tighter than any reported figure.
+
+    Degenerate cases follow the method's documented behaviour: with `b == n` every
+    discordant item favours the reference, so the lower endpoint is the boundary
+    value -1; with `c == n`, the upper endpoint is +1.
+    """
+    # Counts, not measurements. A fractional `b` would sail through the algebra
+    # and return a confident-looking number for an input that cannot exist.
+    for label, value in (("b", b), ("c", c), ("n", n)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{label} must be an integer count, got {value!r}")
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    if b < 0 or c < 0:
+        raise ValueError(f"b and c must be non-negative, got b={b}, c={c}")
+    if b + c > n:
+        raise ValueError(f"discordant count {b + c} exceeds n={n}")
+    if not 0.0 < conf_level < 1.0:
+        raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
+
+    z_crit = NormalDist().inv_cdf(1.0 - (1.0 - conf_level) / 2.0)
+    point = (c - b) / n
+
+    def _root(low: float, high: float, target: float) -> float:
+        """Bisect for `tango_score == target` on a bracket where it is monotone."""
+        for _ in range(200):
+            mid = 0.5 * (low + high)
+            if tango_score(b, c, n, mid) > target:
+                low = mid
+            else:
+                high = mid
+            if high - low < _ENDPOINT_TOLERANCE:
+                break
+        return 0.5 * (low + high)
+
+    lower = -1.0 if b == n else _root(-1.0, point, z_crit)
+    upper = 1.0 if c == n else _root(point, 1.0, -z_crit)
+    return lower, upper
+
+
 def compare(by_candidate: dict, reference: str) -> list:
     """Paired comparison of every candidate against `reference`."""
     if reference not in by_candidate:
@@ -101,6 +186,7 @@ def compare(by_candidate: dict, reference: str) -> list:
                 "candidate_only_correct": c,
                 "discordant": b + c,
                 "p_exact_mcnemar": exact_mcnemar_p(b, c),
+                "tango_ci_95": list(tango_interval(b, c, len(shared))),
             }
         )
     for row, adjusted in zip(
@@ -126,7 +212,8 @@ def main() -> None:
 
     header = (
         f"{'candidate':16s} {'marg':>6s} {'ref-only':>9s} "
-        f"{'cand-only':>10s} {'p_raw':>8s} {'p_holm':>8s}  verdict"
+        f"{'cand-only':>10s} {'p_raw':>8s} {'p_holm':>8s} "
+        f"{'95% Tango CI':>22s}  verdict"
     )
     print(header)
     print("-" * len(header))
@@ -138,14 +225,24 @@ def main() -> None:
             "differs" if r["p_holm_adjusted"] < args.alpha
             else "not distinguishable"
         )
+        low, high = r["tango_ci_95"]
+        interval = f"[{100 * low:+7.2f}, {100 * high:+7.2f}]pp"
         print(
             f"{r['candidate']:16s} {r['marginal_delta']:+6d} "
             f"{r['reference_only_correct']:9d} {r['candidate_only_correct']:10d} "
-            f"{r['p_exact_mcnemar']:8.4f} {r['p_holm_adjusted']:8.4f}  {verdict}"
+            f"{r['p_exact_mcnemar']:8.4f} {r['p_holm_adjusted']:8.4f} "
+            f"{interval:>22s}  {verdict}"
         )
     print(
         f"\nfamily size = {len(results)} contrasts against '{args.reference}'; "
         f"verdicts use Holm-adjusted p at alpha={args.alpha}."
+    )
+    print(
+        "Tango score intervals are nominal, unadjusted 95% intervals for "
+        "candidate - reference, in percentage points. Prereg A1.4 reports them "
+        "regardless of direction or significance, and they never determine the "
+        "verdict: verdicts use the Holm-adjusted p-values above. An unadjusted "
+        "interval can exclude zero while the adjusted test does not reject."
     )
 
     if args.out:

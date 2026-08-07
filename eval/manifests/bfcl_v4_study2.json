@@ -13,7 +13,7 @@
     "criterion_id": "pinned-and-preflight-valid/v1",
     "criterion_id_note": "Owned by eval/answer_key_comparison.py:CANONICAL_CRITERION. The `rule` and `validity_check` text below must match that constant byte-for-byte or the report refuses to build, so this manifest cannot state one rule while the code applies another.",
     "rule": "canonical = pinned AND valid; when two pinned keys disagree, the executable answer-name preflight decides",
-    "validity_check": "eval/bfcl_scoring.py:preflight_key_names — every name an answer key expects must be among the tools that item actually presented to the model",
+    "validity_check": "eval/bfcl_scoring.py:preflight_key_names \u2014 every name an answer key expects must be among the tools that item actually presented to the model",
     "outcome_independent": "The rule is stated without reference to which key scores higher. Had the preflight failed on the data-fix key instead, the same rule would select the release key and the headline would be 368/400 = 92.0%.",
     "adjudicated_by": "Dipak (owner)",
     "adjudicated_on": "2026-08-05",
@@ -21,8 +21,8 @@
     "selected": "pinned_key",
     "selected_source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
     "measured_outcome": {
-      "pinned_key": "consistent — 400/400 items checked",
-      "release_key": "inconsistent — simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
+      "pinned_key": "consistent \u2014 400/400 items checked",
+      "release_key": "inconsistent \u2014 simple_python_363 expects find_closest; the item presents only restaurant_search.find_closest"
     },
     "scope_of_the_choice": "The two keys differ at exactly one row of 400. Every candidate emits the qualified name at that item, so it is concordant across candidates: all paired contrasts, every McNemar input, and the DPO kill decision are byte-identical under either key. The choice moves one headline number (369/400 vs 368/400) and nothing else.",
     "verified_by": "eval/answer_key_comparison.py re-derives this selection from the measured preflight outcomes and fails if the recorded selection is not what the rule produces"
@@ -30,19 +30,28 @@
   "categories": {
     "simple_python": {
       "answer_key_policy": "required",
-      "note": "Study-1 primary. Answer key carries ground_truth per item."
+      "note": "Study-1 primary. Answer key carries ground_truth per item.",
+      "study2_role": "final_scoring"
     },
     "multiple": {
       "answer_key_policy": "required",
-      "note": "Study-2 co-primary. Several tools per prompt, so the qualified-name class of defect that produced simple_python_363 is most likely here; the standing preflight covers it."
+      "note": "Study-2 co-primary. Several tools per prompt, so the qualified-name class of defect that produced simple_python_363 is most likely here; the standing preflight covers it.",
+      "study2_role": "final_scoring"
     },
     "live_simple": {
       "answer_key_policy": "required",
-      "note": "Exposure/secondary set. Answer key carries ground_truth per item."
+      "note": "Exposure/secondary set. Answer key carries ground_truth per item.",
+      "study2_role": "declared_not_scored"
     },
     "irrelevance": {
       "answer_key_policy": "none_by_schema",
-      "note": "Irrelevance items are scored on whether the model declines to call any function, so upstream ships no possible_answer file for this category. Declared here so the standing preflight records it as deliberately keyless rather than silently skipping a category that merely happens to be absent from the manifest."
+      "note": "Irrelevance items are scored on whether the model declines to call any function, so upstream ships no possible_answer file for this category. Declared here so the standing preflight records it as deliberately keyless rather than silently skipping a category that merely happens to be absent from the manifest.",
+      "study2_role": "declared_not_scored"
+    },
+    "live_multiple": {
+      "answer_key_policy": "required",
+      "study2_role": "development_selection_only",
+      "note": "Study-2 development set (owner Decision C, #general msg 2244). Presents 2-37 tools per item, so it can measure the ranking skill under test. Because it selects checkpoints, the ENTIRE parent category -- not merely the pinned look subset -- is barred from final or endpoint reporting (WORKING-AGREEMENT \u00a76). The look subset is pinned in mining/receipts/study2_dev_look_subset.json under criterion study2-dev-look-subset/v1."
     }
   },
   "files": [
@@ -129,6 +138,30 @@
       "row_count": 258,
       "unique_id_count": 258,
       "sorted_id_sha256": "aa668d6c39d5c7ca6080eced2e43a4573a30b506db7fa84a6d91bd7d6fd05ce3"
+    },
+    {
+      "category": "live_multiple",
+      "role": "questions",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_multiple.json",
+      "local_path": "eval/bfcl_data/BFCL_v4_live_multiple.json",
+      "git_blob_sha1": "b7c108f2edc86563fd3e1363e5f6fd961452d142",
+      "sha256": "fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8",
+      "row_count": 1053,
+      "unique_id_count": 1053,
+      "sorted_id_sha256": "96d9015b2f01ea9a9a090afa8bd8638d81dccccd07d6632379dfc79a35c213ae"
+    },
+    {
+      "category": "live_multiple",
+      "role": "answer_key",
+      "source_revision": "9d8416a96d1d69975493f1b6d60ff07d12a1726a",
+      "upstream_path": "berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_multiple.json",
+      "local_path": "eval/bfcl_data/possible_answer/BFCL_v4_live_multiple.json",
+      "git_blob_sha1": "b2f4c71547d3a534e2e40231db14943bfa81cc74",
+      "sha256": "97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084",
+      "row_count": 1053,
+      "unique_id_count": 1053,
+      "sorted_id_sha256": "96d9015b2f01ea9a9a090afa8bd8638d81dccccd07d6632379dfc79a35c213ae"
     },
     {
       "category": "simple_python",

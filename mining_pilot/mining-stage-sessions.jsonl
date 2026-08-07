@@ -1,0 +1,6 @@
+{"event": "session_start", "max_stage_seconds": 6140, "provider_terminate_seconds": 6140, "session": "s1786137976880518", "started_at": 1786137976.8805187}
+{"elapsed_seconds": 0.0429169200360775, "ended_at": 1786137976.9752953, "event": "session_end", "returncode": 1, "session": "s1786137976880518"}
+{"event": "session_start", "max_stage_seconds": 6083, "provider_terminate_seconds": 6083, "session": "s1786138033663125", "started_at": 1786138033.6631255}
+{"elapsed_seconds": 0.05505980737507343, "ended_at": 1786138033.7513049, "event": "session_end", "returncode": 1, "session": "s1786138033663125"}
+{"event": "session_start", "max_stage_seconds": 5936, "provider_terminate_seconds": 5936, "session": "s1786138180761512", "started_at": 1786138180.7615128}
+{"elapsed_seconds": 205.8414704464376, "ended_at": 1786138386.6375518, "event": "session_end", "returncode": 0, "session": "s1786138180761512"}

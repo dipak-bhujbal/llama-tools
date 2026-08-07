@@ -176,8 +176,8 @@ Legend: [A] agent-executable end to end, [H] human required,
   `docs/prereg-study2.md`).
 - [A] 2.3 Audit prep regardless of branch:
   `shuf -n 50 mining_out/mined_pairs.jsonl > mining_out/audit_read_me.jsonl`
-  and surface the `ambiguous_review.jsonl` row count.
-- [H] 2.4 Human reads the 50-pair audit + all ambiguous rows. Checks:
+  and surface `mining_summary.json`'s guardrail diagnostics.
+- [H] 2.4 Human reads the 50-pair audit + diagnostics. Checks:
   (a) every "chosen" is actually correct (>3-5% verifier error poisons the
   signal), (b) rejected rows are genuinely wrong, not
   acceptable-but-different. Any verifier change requires re-running the
@@ -302,9 +302,9 @@ a parallel ablation arm later)
 - [x] P0.7 remote-history decision                  [H] *(moot - never committed)*
 - [x] Paper: prereg Amendments 1 + 2 adopted        [A+H]
 - [x] Paper: §2 decisions taken (weights, population, exclusion)  [H]
-- [ ] **NEXT** exclusion-aware decontamination CLI + artifact  [A]  <- satisfies A2.2
-- [ ] §2.5 weights derived from that artifact; §2 frozen  [A+H]
-- [ ] Mining rewrite: **build** production `mining/mine_pairs.py` around ledger/
+- [x] exclusion-aware decontamination CLI + artifact  [A] *(A2.2 satisfied)*
+- [x] §2.5 weights (8173, 2997, 11170) derived; **§2 FROZEN** and published  [A+H]
+- [ ] **NEXT** Mining rewrite: **build** production `mining/mine_pairs.py` around ledger/
       decontaminate/pool_strata. The quarantined copy is **reference-only and must
       not be promoted unchanged** — it assigns `no_call` ground truth on parse
       failure, which mints inverted preference pairs.  [A]
@@ -327,13 +327,22 @@ preregistration is one document, amended in place, not written per phase.*
 
 ## 5. Appendix
 
-### 5.1 Guardrails already encoded in mine_pairs.py (do not relax)
+### 5.1 Mining guardrails and owner resolution
+
+Owner decision A+C, #general msg 2379, made before any study-2 generation:
+`onpolicy_verifier_v1`'s binary accepted/rejected verdict remains the operative
+pair rule. The historical ambiguous-verdict class is not recreated. The 40%
+length-gap reference (with call-vs-text exemptions) and 5% malformed-syntax
+reference are reported as diagnostics and filter no pair. Applying either in a
+later run requires a preregistration amendment before that run. This resolves
+the older "do not relax" notes below, which described the quarantined miner and
+are not operative filters.
+
 - 8/8-correct prompts discarded; 0/8 -> SFT bucket; 1-7 -> pairs
 - chosen AND rejected are model generations (on-policy)
-- ambiguous verdicts (unverifiable optional params) excluded from BOTH
-  sides, logged to ambiguous_review.jsonl
-- similarity floor: length gap <=40% (call-vs-text error types exempt)
-- malformed-syntax pairs capped at 5% of the set
+- historical only: ambiguous verdicts were excluded from both sides
+- diagnostic only: length gap >40% (call-vs-text error types exempt)
+- diagnostic only: malformed-syntax share against a 5% reference
 - one pair per prompt; dedup on user text at pool build
 - BFCL decontamination: 13-gram overlap + function name+signature match
 - every meta field measured; verifier version stamped; fixture self-test

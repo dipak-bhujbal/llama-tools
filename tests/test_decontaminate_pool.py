@@ -106,7 +106,9 @@ def test_the_artifact_binds_the_screened_question_files(tmp_path: Path) -> None:
     art = build_artifact(pool, MANIFEST, _preflight(tmp_path, pool))
 
     screened = art["screened_question_files"]
-    assert len(screened) == 4
+    # 5 since Decision C added live_multiple to the manifest: the pool is
+    # screened against every set that will ever be scored *or selected on*.
+    assert len(screened) == 5
     for entry in screened:
         assert entry["role"] == "questions"
         assert len(entry["sha256"]) == 64
@@ -171,10 +173,17 @@ def test_a_failed_preflight_refuses_to_screen(tmp_path: Path) -> None:
         build_artifact(pool, MANIFEST, preflight)
 
 
-def test_the_committed_artifact_regenerates_exactly() -> None:
+def test_the_current_artifact_regenerates_exactly() -> None:
     """Arithmetic self-consistency is not enough: a hand-edited but coherent
-    receipt would pass. Regenerate from the pinned inputs and compare."""
-    path = REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_decontamination.json"
+    receipt would pass. Regenerate from the pinned inputs and compare.
+
+    The *current* artifact is the live_multiple one: Decision C added a fifth
+    screened category, so the pool the miner consumes is the re-screened pool.
+    """
+    path = (
+        REPO_ROOT / "mining" / "receipts"
+        / "sft_dedup_v2_decontamination_with_live_multiple.json"
+    )
     committed = json.loads(path.read_text())
     regenerated = build_artifact(
         REPO_ROOT / "data" / "processed" / "sft_dedup_v2.jsonl",
@@ -182,6 +191,38 @@ def test_the_committed_artifact_regenerates_exactly() -> None:
         REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_target_preflight.json",
     )
     assert regenerated == committed
+
+
+def test_the_superseded_artifact_is_kept_and_is_visibly_superseded() -> None:
+    """The pre-Decision-C artifact stays on disk, byte-for-byte, forever.
+
+    It is evidence of what was screened when §2 was frozen, and it is *not*
+    regenerable from today's manifest -- which is the honest state of affairs
+    and must be detectable rather than inferred. If its recorded manifest digest
+    ever equals the current one, either it was edited or the supersession was
+    undone; both are defects.
+    """
+    superseded = json.loads(
+        (REPO_ROOT / "mining" / "receipts" / "sft_dedup_v2_decontamination.json").read_text()
+    )
+    current = json.loads(
+        (
+            REPO_ROOT / "mining" / "receipts"
+            / "sft_dedup_v2_decontamination_with_live_multiple.json"
+        ).read_text()
+    )
+
+    assert superseded["criterion_id"] == current["criterion_id"] == CRITERION_ID
+    assert superseded["manifest"]["sha256"] != current["manifest"]["sha256"]
+    assert len(superseded["screened_question_files"]) == 4
+    assert len(current["screened_question_files"]) == 5
+    # The weights the amendment moves, stated as data rather than as prose.
+    def triple(artifact: dict) -> tuple[int, int, int]:
+        weights = artifact["weights"]
+        return weights["n_multi"], weights["n_single"], weights["N"]
+
+    assert triple(superseded) == (8173, 2997, 11170)
+    assert triple(current) == (8081, 2990, 11071)
 
 
 def test_the_committed_artifact_reconciles(tmp_path: Path) -> None:

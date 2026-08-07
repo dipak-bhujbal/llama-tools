@@ -1,0 +1,30 @@
+{
+  "verifier_version": "onpolicy_verifier_v1",
+  "gate": "every fixture chosen accepted, every fixture rejected rejected for its labelled reason",
+  "implementation": {
+    "path": "mining/verifier.py",
+    "sha256": "dbbb48ef00d1dee281ac60ca066cfa51259f113e0d341fd1fb622f1571f99333"
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/fixture_pairs_train.jsonl",
+      "sha256": "83e12a3e2f374d3e440b1e61c7d3b71cb50c7f2379bf2ef51b0b2be1c9e1ac0c",
+      "rows": 1440,
+      "synthetic": true
+    },
+    {
+      "path": "tests/fixtures/fixture_pairs_eval.jsonl",
+      "sha256": "f4228bacce224dff52be7e0bb53524dcf7019b94c09ce0fc3ef0cad0a9b10b87",
+      "rows": 160,
+      "synthetic": true
+    }
+  ],
+  "fixture_provenance": "Template-generated synthetic pairs (tests/fixtures/REPRODUCTION.md). NOT model generations. This receipt measures the verifier's agreement with labelled injected defects; it is not evidence about any model.",
+  "pairs": 1600,
+  "pairs_passed": 1600,
+  "misses": [],
+  "false_positives": [],
+  "reason_mismatches": [],
+  "refusals": [],
+  "passed": true
+}
