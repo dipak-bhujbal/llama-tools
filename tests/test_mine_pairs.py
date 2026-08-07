@@ -794,3 +794,62 @@ def test_redo_refuses_identity_drift_before_appending_a_tombstone(
         mine_pairs.redo_run(out, 1)
 
     assert Ledger(out / "ledger.jsonl").records() == before
+
+
+# --- Amendment 5: activation and family size resolved at calibration time ----
+
+
+def test_a0_planned_steps_uses_the_frozen_cellwise_split() -> None:
+    """§3.4 splits 90/10 within every non-empty cell; §3.11 states the train count
+    exactly. The cell key for a 3A arm is the pair's rejected_reason."""
+    pairs = (
+        [{"rejected_reason": "wrong_args"}] * 16 + [{"rejected_reason": "wrong_tool"}] * 2
+    )
+
+    r = mine_pairs.a0_planned_optimizer_steps(pairs)
+
+    # wrong_args: eval = max(1, ceil(1.6)) = 2 -> train 14
+    # wrong_tool: eval = max(1, ceil(0.2)) = 1 -> train 1
+    assert r["cells"]["wrong_args"] == {"n": 16, "train": 14, "eval": 2}
+    assert r["cells"]["wrong_tool"] == {"n": 2, "train": 1, "eval": 1}
+    assert r["A0_train_pairs"] == 15
+    assert r["A0_planned_optimizer_steps"] == 1
+
+
+def test_every_cell_keeps_at_least_one_eval_pair() -> None:
+    """max(1, ...) matters: a small cell must not round its eval share to zero."""
+    r = mine_pairs.a0_planned_optimizer_steps([{"rejected_reason": "wrong_tool"}])
+    assert r["cells"]["wrong_tool"] == {"n": 1, "train": 0, "eval": 1}
+
+
+def test_calibration_records_activation_and_family_size(tmp_path, monkeypatch) -> None:
+    """A5.5/A5.6: both must be in the artifact, not derived by hand afterwards."""
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(2)
+    ]
+    _install_fake_pool(monkeypatch, prompts, "calibration", 4)
+    out = tmp_path / "cal"
+    summary = mine_pairs.run(
+        out_dir=out, stage="calibration", generate_fn=_generator([GOOD] * 4 + [BAD] * 4)
+    )
+
+    a5 = summary["amendment5"]
+    assert a5["activation_threshold"] == 250
+    # 4 tiny cells -> far below threshold, so it activates and the family is 5
+    assert a5["A5_kto_wide_activates"] is True
+    assert a5["family_size"] == 5
+    assert json.loads((out / "mining_summary.json").read_text())["amendment5"]["family_size"] == 5
+
+
+def test_a_pilot_emits_no_amendment5_block(tmp_path, monkeypatch) -> None:
+    """The fields belong to the calibration artifact; a pilot decides nothing."""
+    summary = _run(tmp_path / "out", monkeypatch)
+    assert "amendment5" not in summary
+
+
+def test_family_size_is_4_when_the_arm_does_not_activate() -> None:
+    big = [{"rejected_reason": "wrong_args"}] * 5000
+    r = mine_pairs.a0_planned_optimizer_steps(big)
+    assert r["A0_planned_optimizer_steps"] >= 250
+    # mirrors write_derivatives' branch
+    assert (5 if r["A0_planned_optimizer_steps"] < 250 else 4) == 4

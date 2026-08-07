@@ -56,7 +56,13 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--stage", choices=("pilot", "calibration"), default="pilot")
     parser.add_argument("--max-stage-seconds", type=int, required=True)
-    parser.add_argument("--provider-terminate-seconds", type=int, required=True)
+    parser.add_argument(
+        "--provider-terminate-seconds", type=int, required=True,
+        help=("the provider-side auto-termination already ARMED for this pod. For "
+              "calibration create the pod with `runpodctl pod create "
+              "--terminate-after <UTC datetime>` so the timer is enforced by the "
+              "provider and survives this machine sleeping; a Mac-side sleep timer "
+              "is not an adequate backstop for an hours-long run"))
     parser.add_argument(
         "--attest-durable-root", action="store_true", required=True,
         help="explicitly attest that persistent-root survives provider termination",

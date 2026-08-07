@@ -901,6 +901,45 @@ def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Amendment 5 A5.5/A5.6: the wide KTO arm activates iff
+# A0_planned_optimizer_steps < 250, and the exploratory Holm family is 4 when it
+# does not activate and 5 when it does. Both must be *computed and recorded at
+# calibration time* — an activation rule derived by hand afterwards is not
+# mechanical, and a family size settled after the fact is the defect §4.1 forbids.
+A5_ACTIVATION_STEP_THRESHOLD = 250
+A0_PAIRS_PER_OPTIMIZER_STEP = 16
+
+
+def a0_planned_optimizer_steps(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """§3.4's cellwise 90/10 split applied to the mined pairs, then §3.11's step rule.
+
+    Per §3.4 the split targets 90/10 within **every non-empty cell**, and §3.11
+    states the train count exactly: `sum(n_cell - max(1, ceil(0.10 * n_cell)))`.
+    The cell key for a 3A arm is the pair's `rejected_reason` (§3.4's
+    track-specific key; the miner emits `rejected_reason`, not `error_type`).
+    """
+    cells: dict[str, int] = {}
+    for pair in pairs:
+        reason = pair.get("rejected_reason") or "unknown"
+        cells[reason] = cells.get(reason, 0) + 1
+
+    train = 0
+    per_cell: dict[str, dict[str, int]] = {}
+    for reason, n in sorted(cells.items()):
+        n_eval = max(1, -(-n // 10))          # ceil(0.10 * n)
+        n_train = n - n_eval
+        train += n_train
+        per_cell[reason] = {"n": n, "train": n_train, "eval": n_eval}
+
+    steps = -(-train // A0_PAIRS_PER_OPTIMIZER_STEP)  # ceil(train / 16)
+    return {
+        "A0_train_pairs": train,
+        "A0_planned_optimizer_steps": steps,
+        "cells": per_cell,
+        "rule": "train = sum(n_cell - max(1, ceil(0.10*n_cell))); steps = ceil(train/16)",
+    }
+
+
 def gate_decision(p_std: float | Fraction | None) -> str:
     """§2.6's table, applied to the exact value. No rounding at any boundary."""
     if p_std is None:
@@ -948,6 +987,23 @@ def write_derivatives(
     if stage == "calibration":
         # §2.6 is evaluated on the exact rational, never the serialized float.
         summary["decision"] = gate_decision(exact)
+
+        # Amendment 5's activation and family size, resolved here rather than by
+        # hand later. Both are pre-result numbers: they depend only on the mined
+        # pair count and the frozen split rule, never on any arm's outcome.
+        planning = a0_planned_optimizer_steps(summary["materialized_pairs"])
+        activates = planning["A0_planned_optimizer_steps"] < A5_ACTIVATION_STEP_THRESHOLD
+        summary["amendment5"] = {
+            **planning,
+            "activation_threshold": A5_ACTIVATION_STEP_THRESHOLD,
+            "A5_kto_wide_activates": activates,
+            "family_size": 5 if activates else 4,
+            "note": (
+                "Amendment 5 A5.5/A5.6. Computed from this artifact alone, before "
+                "any arm runs. family_size is 4 when A5-kto-wide does not activate "
+                "and 5 when it does; it is not widened by adoption."
+            ),
+        }
     else:
         summary["gate_note"] = (
             "§2.6's decision table decides on the committed CALIBRATION artifact "
@@ -1028,10 +1084,21 @@ def _mine_selected(
     already: set[str],
     generate_fn: Callable[[Prompt, int], list[str]],
 ) -> None:
+    total = len(preflight.selected)
+    done = sum(1 for p in preflight.selected if p.prompt_id in already)
     for prompt in preflight.selected:
         if prompt.prompt_id in already:
             continue  # resume: already paid for, never re-sampled
         outcome = mine_prompt(prompt, generate_fn)
+        done += 1
+        # A silent log for the whole run is indistinguishable from a hang, which
+        # is exactly how the pilot looked for 3.5 minutes. flush=True because
+        # stdout is redirected to a file and would otherwise block-buffer.
+        print(
+            f"[{done}/{total}] {prompt.prompt_id} "
+            f"({sum(1 for v in outcome.verdicts if v['accepted'])}/{SAMPLES_PER_PROMPT} accepted)",
+            flush=True,
+        )
         ledger.append(
             {
                 "prompt_id": outcome.prompt_id,
