@@ -64,6 +64,10 @@ MAX_WALL_CLOCK_SECONDS = 2 * 60 * 60
 # operator transcription of that decision, not a place to raise it.
 APPROVED_CAP_USD = 1.00
 
+# Sample index the batched path seeds from. Named rather than a bare 0 so the
+# batch and per-sample paths cannot silently coincide on sample 0's seed.
+BATCH_SEED_INDEX = -1
+
 
 class BackendError(MinerError):
     """Generation cannot proceed safely, so it does not proceed."""
@@ -179,6 +183,8 @@ def make_generate_fn(
     tokenizer: Any,
     guard: SpendGuard,
     generate_once: Callable[[Any, Any, str, int, float, float, int], str],
+    generate_batch: Callable[[Any, Any, str, int, float, float, int, int], list[str]]
+    | None = None,
 ) -> Callable[[Prompt, int], list[str]]:
     """Assemble the miner's `generate_fn` from an already-loaded model.
 
@@ -190,7 +196,32 @@ def make_generate_fn(
     def generate_fn(prompt: Prompt, samples: int) -> list[str]:
         guard.check("prompt")
         rendered = build_chat_prompt(tokenizer, prompt)
-        outputs: list[str] = []
+
+        if generate_batch is not None:
+            # The approved estimate assumed batched sampling, so this is the
+            # path that matches it. The batch is seeded once per prompt rather
+            # than once per sample: reproducibility is preserved because the
+            # ledger records whole prompts and a resume never re-enters one
+            # mid-way, and the seed still derives from identity, not call order.
+            outputs = generate_batch(
+                model,
+                tokenizer,
+                rendered,
+                MAX_NEW_TOKENS,
+                TEMPERATURE,
+                TOP_P,
+                derive_prompt_seed(prompt.prompt_id, BATCH_SEED_INDEX),
+                samples,
+            )
+            if len(outputs) != samples:
+                raise BackendError(
+                    f"{prompt.prompt_id}: batch returned {len(outputs)} of "
+                    f"{samples} requested samples"
+                )
+            guard.samples_started += samples
+            return outputs
+
+        outputs = []
         for index in range(samples):
             # Per sample, not per prompt: a prompt is 8 generations, and a bound
             # that is only consulted between prompts does not bound them.
@@ -366,7 +397,9 @@ def sampling_receipt(hourly_rate_usd: float, cap_usd: float) -> dict[str, Any]:
     }
 
 
-def verify_persistent_root(out_dir: Path, persistent_root: Path | None) -> Path:
+def verify_persistent_root(
+    out_dir: Path, persistent_root: Path | None, attested: bool = False
+) -> Path:
     """Refuse a container-local output directory for a billed run.
 
     A pilot whose only copy of the ledger lives on the pod's container disk is
@@ -382,6 +415,16 @@ def verify_persistent_root(out_dir: Path, persistent_root: Path | None) -> Path:
     root = Path(persistent_root).resolve()
     if not root.is_dir():
         raise BackendError(f"--persistent-root {root} is not an existing directory")
+    # An ordinary writable directory is not durability. A real mount has a
+    # different device id from the container root; without this check the
+    # container-local path the flag exists to reject passes it.
+    if not attested and os.stat(root).st_dev == os.stat("/").st_dev:
+        raise BackendError(
+            f"--persistent-root {root} is on the same device as the container "
+            f"root, so it is container-local and erased on stop. Point it at a "
+            f"mounted volume, or pass --attest-durable-root to state on the "
+            f"record that this path survives pod termination"
+        )
     probe = root / ".mine_pairs_write_probe"
     try:
         probe.write_text("probe\n")
@@ -398,6 +441,40 @@ def verify_persistent_root(out_dir: Path, persistent_root: Path | None) -> Path:
     return resolved
 
 
+def bind_execution_identity(
+    out_dir: Path,
+    session: str,
+    rate_usd: float,
+    cap_usd: float,
+    budget_usd: float,
+    provider_terminate_seconds: int | None,
+) -> None:
+    """Append this session's execution identity before any weights load.
+
+    Append-only and per session, so a resume under a different backend build or
+    a different rate is visible in the artifact rather than overwritten by
+    whichever invocation finished last.
+    """
+    from mining.mine_pairs import RUN_METADATA_NAME
+
+    record = {
+        "session": session,
+        "backend_sha256": _sha256_of_backend(),
+        "seed_derivation": "sha256(seed:prompt_id:sample_index) >> 1",
+        "batch_seed_index": BATCH_SEED_INDEX,
+        "rate_usd_per_hour": rate_usd,
+        "cap_usd": cap_usd,
+        "budget_usd": budget_usd,
+        "provider_auto_terminate_seconds": provider_terminate_seconds,
+        "run_metadata": RUN_METADATA_NAME,
+    }
+    path = Path(out_dir) / "execution_identity.jsonl"
+    with path.open("a") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def execute_paid_stage(
     out_dir: Path,
     stage: str,
@@ -406,6 +483,8 @@ def execute_paid_stage(
     persistent_root: Path | None,
     fresh: bool = False,
     now: Callable[[], float] | None = None,
+    attested: bool = False,
+    provider_terminate_seconds: int | None = None,
 ) -> dict[str, Any]:
     """The one billable entry point, with every bound applied in order.
 
@@ -418,32 +497,60 @@ def execute_paid_stage(
     from mining.mine_pairs import RUN_METADATA_NAME, preflight_stage, run
     from mining.spend_ledger import close_session, open_session
 
+    if provider_terminate_seconds is None:
+        raise BackendError(
+            "--provider-terminate-seconds is required: a Python check cannot stop "
+            "a provider billing a hung process, so the pod's own auto-termination "
+            "value must be armed and recorded before launch"
+        )
+    total = compute_deadline_seconds(cap_usd, hourly_rate_usd)
+    if provider_terminate_seconds > total:
+        raise BackendError(
+            f"provider auto-termination at {provider_terminate_seconds}s is longer "
+            f"than the {total}s the ${cap_usd:.2f} cap buys at "
+            f"${hourly_rate_usd:.2f}/hr; the backstop must bind before the budget "
+            f"does or it is not a backstop"
+        )
+
     clock = now or time.time
-    resolved_out = verify_persistent_root(out_dir, persistent_root)
-    total_seconds = compute_deadline_seconds(cap_usd, hourly_rate_usd)
+    resolved_out = verify_persistent_root(out_dir, persistent_root, attested)
+    compute_deadline_seconds(cap_usd, hourly_rate_usd)  # validates cap and rate
+    budget_usd = cap_usd - STORAGE_RESERVE_USD
 
     with RunLock(resolved_out):
         session, allowance = open_session(
-            resolved_out, total_seconds, hourly_rate_usd, cap_usd, clock()
+            resolved_out, budget_usd, hourly_rate_usd, cap_usd, clock()
+        )
+        # Anchored to the session's own start, so setup — tokenizer load, chat
+        # preflight, weight load — is billed against the allowance like anything
+        # else. Starting the timer after setup omits the time the pod was held.
+        session_started = time.monotonic()
+        remaining = min(
+            allowance.remaining_seconds,
+            MAX_WALL_CLOCK_SECONDS,
         )
         print(
-            f"stage allowance {total_seconds}s; already consumed "
-            f"{allowance.consumed_seconds:.0f}s across {allowance.sessions} session(s); "
-            f"{allowance.remaining_seconds:.0f}s remain at ${hourly_rate_usd:.2f}/hr"
+            f"stage budget ${budget_usd:.2f}; already spent "
+            f"${allowance.consumed_usd:.4f} across {allowance.sessions} session(s); "
+            f"{remaining:.0f}s remain at ${hourly_rate_usd:.2f}/hr"
+        )
+
+        guard = SpendGuard(
+            deadline_seconds=remaining,
+            monotonic=time.monotonic,
+            started_at=session_started,
         )
 
         exit_reason = "unknown"
         try:
             preflight = preflight_stage(stage)
+            bind_execution_identity(
+                resolved_out, session, hourly_rate_usd, cap_usd, budget_usd,
+                provider_terminate_seconds,
+            )
             tokenizer = load_tokenizer()
             rendered = preflight_chat_template(tokenizer, preflight.selected)
             print(f"chat-template preflight rendered {rendered} prompts before model load")
-
-            guard = SpendGuard(
-                deadline_seconds=total_seconds,
-                monotonic=time.monotonic,
-                consumed_before=allowance.consumed_seconds,
-            )
             generate_fn = load_policy_with(tokenizer, guard)
             summary = run(out_dir=resolved_out, stage=stage, generate_fn=generate_fn)
             exit_reason = "completed"

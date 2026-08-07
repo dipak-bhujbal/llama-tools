@@ -273,10 +273,8 @@ def test_the_template_preflight_passes_when_every_row_renders() -> None:
 def test_two_processes_cannot_bill_against_one_stage(tmp_path) -> None:
     from mining.backend import RunLock
 
-    with RunLock(tmp_path):
-        with pytest.raises(BackendError, match="is held by"):
-            with RunLock(tmp_path):
-                pass
+    with RunLock(tmp_path), pytest.raises(BackendError, match="is held by"), RunLock(tmp_path):
+        pass
 
 
 def test_the_lock_is_released_on_exit(tmp_path) -> None:
@@ -298,6 +296,15 @@ def test_a_paid_run_refuses_container_local_output(tmp_path) -> None:
         verify_persistent_root(tmp_path / "out", None)
 
 
+def test_an_ordinary_writable_directory_is_not_durability(tmp_path) -> None:
+    """Codex's finding: the first version accepted tmp_path, so the exact
+    container-local storage the flag exists to reject passed it."""
+    from mining.backend import verify_persistent_root
+
+    with pytest.raises(BackendError, match="same device as the container root"):
+        verify_persistent_root(tmp_path / "pilot", tmp_path)
+
+
 def test_the_out_dir_must_live_inside_the_durable_mount(tmp_path) -> None:
     from mining.backend import verify_persistent_root
 
@@ -307,6 +314,56 @@ def test_the_out_dir_must_live_inside_the_durable_mount(tmp_path) -> None:
     elsewhere.mkdir()
 
     with pytest.raises(BackendError, match="not inside"):
-        verify_persistent_root(elsewhere, root)
+        verify_persistent_root(elsewhere, root, attested=True)
 
-    assert verify_persistent_root(root / "pilot", root) == (root / "pilot").resolve()
+    assert (
+        verify_persistent_root(root / "pilot", root, attested=True)
+        == (root / "pilot").resolve()
+    )
+
+
+
+# --- Batched sampling (finding 7): matches the approved estimate's basis -----
+
+
+def test_the_batched_path_seeds_once_per_prompt_and_returns_every_sample() -> None:
+    guard = SpendGuard(deadline_seconds=100, monotonic=lambda: 0.0)
+    seen: list[tuple[int, int]] = []
+
+    def generate_batch(model, tok, rendered, mx, temp, top_p, seed, samples):
+        seen.append((seed, samples))
+        return [f"gen-{i}" for i in range(samples)]
+
+    generate_fn = make_generate_fn(
+        object(), FakeTokenizer(), guard, _unused_once, generate_batch
+    )
+    outputs = generate_fn(_prompt("p1"), 8)
+
+    assert outputs == [f"gen-{i}" for i in range(8)]
+    assert seen == [(derive_prompt_seed("p1", -1), 8)], "one seeded call, not eight"
+    assert guard.samples_started == 8
+
+
+def test_a_short_batch_is_refused_rather_than_padded() -> None:
+    guard = SpendGuard(deadline_seconds=100, monotonic=lambda: 0.0)
+
+    def short_batch(model, tok, rendered, mx, temp, top_p, seed, samples):
+        return ["only-one"]
+
+    generate_fn = make_generate_fn(
+        object(), FakeTokenizer(), guard, _unused_once, short_batch
+    )
+
+    with pytest.raises(BackendError, match="batch returned 1 of 8"):
+        generate_fn(_prompt("p1"), 8)
+
+
+def test_the_batch_seed_differs_from_every_per_sample_seed() -> None:
+    batch_seed = derive_prompt_seed("p1", -1)
+    per_sample = {derive_prompt_seed("p1", i) for i in range(8)}
+
+    assert batch_seed not in per_sample
+
+
+def _unused_once(model, tok, rendered, mx, temp, top_p, seed):  # pragma: no cover
+    raise AssertionError("the batched path must not fall back to per-sample calls")

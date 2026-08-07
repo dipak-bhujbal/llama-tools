@@ -39,37 +39,86 @@ class SpendLedgerError(RuntimeError):
 
 @dataclass(frozen=True)
 class StageAllowance:
-    """What remains of the approved ceiling for this stage."""
+    """What remains of the approved ceiling, denominated in dollars.
 
-    total_seconds: int
-    consumed_seconds: float
+    Seconds were the wrong unit. A stage that burns 6,000s at $0.53/hr and
+    resumes at $0.33/hr has spent $0.883 of a $0.92 compute budget, but a
+    seconds-based allowance would hand it another 1,200s — $0.11 more — pushing
+    the total past the ceiling and into the storage reserve. Money is what the
+    owner approved, so money is what is counted.
+    """
+
+    budget_usd: float
+    consumed_usd: float
     sessions: int
+    rate_usd_per_hour: float
+
+    @property
+    def remaining_usd(self) -> float:
+        return self.budget_usd - self.consumed_usd
 
     @property
     def remaining_seconds(self) -> float:
-        return self.total_seconds - self.consumed_seconds
+        """What the remaining dollars buy at *this session's* rate."""
+        if self.rate_usd_per_hour <= 0:
+            return 0.0
+        return max(0.0, self.remaining_usd / self.rate_usd_per_hour * 3600)
 
     @property
     def exhausted(self) -> bool:
-        return self.remaining_seconds <= 0
+        return self.remaining_usd <= 0
+
+
+REQUIRED_START_FIELDS = (
+    "session", "at", "rate_usd_per_hour", "cap_usd", "budget_usd",
+)
 
 
 def _read(path: Path) -> list[dict[str, Any]]:
+    """Parse the whole chain, or refuse.
+
+    A truncated final line is the normal shape of a crash, and the first version
+    of this silently skipped it — then the next append concatenated onto the
+    fragment, so the new session became invisible and the stage's consumed total
+    reset to zero. A spend record is not something to recover heuristically:
+    a damaged tail refuses until a human looks at it.
+    """
     if not path.exists():
         return []
+    payload = path.read_text()
+    if payload and not payload.endswith("\n"):
+        raise SpendLedgerError(
+            f"{path} ends mid-record, so a previous session was killed while "
+            f"writing. Its cost cannot be read and must not be guessed: inspect "
+            f"the file and repair it deliberately before billing more time"
+        )
+
     records: list[dict[str, Any]] = []
-    for index, line in enumerate(path.read_text().splitlines()):
+    for index, line in enumerate(payload.splitlines()):
         if not line.strip():
             continue
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError as exc:
-            # A truncated tail is the normal shape of a crash; anything else is
-            # not something a spend record may be guessed through.
-            if index == len(path.read_text().splitlines()) - 1:
-                break
-            raise SpendLedgerError(f"{path}: unparseable spend record at line {index+1}") from exc
+            raise SpendLedgerError(
+                f"{path}: unparseable spend record at line {index + 1}"
+            ) from exc
+        if record.get("event") == "session_start":
+            missing = [f for f in REQUIRED_START_FIELDS if f not in record]
+            if missing:
+                raise SpendLedgerError(
+                    f"{path}: session_start at line {index + 1} is missing {missing}"
+                )
+        records.append(record)
     return records
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _append(path: Path, record: dict[str, Any]) -> None:
@@ -79,63 +128,92 @@ def _append(path: Path, record: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
-def consumed_seconds(out_dir: Path, now: float) -> tuple[float, int]:
-    """Billable seconds already spent on this stage, and the session count."""
+def consumed_usd(out_dir: Path, now: float) -> tuple[float, int, float]:
+    """Dollars already spent on this stage, the session count, and the seconds.
+
+    Each session is priced at **its own recorded rate**. Pricing the whole
+    history at the latest rate is what let a resume at a cheaper rate report
+    $0.66 for time that actually cost $0.99.
+    """
     records = _read(Path(out_dir) / SPEND_LEDGER_NAME)
     starts = [r for r in records if r.get("event") == "session_start"]
     ends = {r.get("session"): r for r in records if r.get("event") == "session_end"}
 
-    total = 0.0
+    total_usd = 0.0
+    total_seconds = 0.0
     for position, start in enumerate(starts):
         end = ends.get(start.get("session"))
         if end is not None:
-            total += max(0.0, float(end["at"]) - float(start["at"]))
+            seconds = max(0.0, float(end["at"]) - float(start["at"]))
         elif position + 1 < len(starts):
             # Killed without an end record: charge up to the next start rather
             # than forgiving it. A hard kill must not be cheaper than a clean one.
-            total += max(0.0, float(starts[position + 1]["at"]) - float(start["at"]))
+            seconds = max(0.0, float(starts[position + 1]["at"]) - float(start["at"]))
         else:
-            total += max(0.0, now - float(start["at"]))
-    return total, len(starts)
+            seconds = max(0.0, now - float(start["at"]))
+        total_seconds += seconds
+        total_usd += seconds / 3600 * float(start["rate_usd_per_hour"])
+    return total_usd, len(starts), total_seconds
 
 
 def open_session(
     out_dir: Path,
-    total_seconds: int,
+    budget_usd: float,
     rate_usd: float,
     cap_usd: float,
     now: float,
 ) -> tuple[str, StageAllowance]:
     """Record the start of a billable session and return what is left.
 
-    Raises before writing anything if the stage's allowance is already spent, so
-    an exhausted stage cannot be restarted into a fresh window.
+    Raises before writing anything if the allowance is spent or if this session
+    disagrees with the stage's established identity, so neither a restart nor a
+    changed rate can widen a ceiling the owner set once.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    already, sessions = consumed_seconds(out_dir, now)
-    allowance = StageAllowance(total_seconds, already, sessions)
+    path = out_dir / SPEND_LEDGER_NAME
+
+    records = _read(path)
+    starts = [r for r in records if r.get("event") == "session_start"]
+    if starts:
+        first = starts[0]
+        drift = {
+            key: (first.get(key), value)
+            for key, value in (("cap_usd", cap_usd), ("budget_usd", budget_usd))
+            if first.get(key) != value
+        }
+        if drift:
+            raise SpendLedgerError(
+                f"this stage was opened under {dict((k, v[0]) for k, v in drift.items())} "
+                f"and is now being resumed under {dict((k, v[1]) for k, v in drift.items())}. "
+                f"A resume may not restate the ceiling it is spending against"
+            )
+
+    already_usd, sessions, already_seconds = consumed_usd(out_dir, now)
+    allowance = StageAllowance(budget_usd, already_usd, sessions, rate_usd)
     if allowance.exhausted:
         raise SpendLedgerError(
-            f"this stage has already consumed {already:.0f}s of its "
-            f"{total_seconds}s approved allowance across {sessions} session(s); "
-            f"a resume does not grant a new one. Raising the ceiling is an owner "
-            f"decision, not a restart"
+            f"this stage has already spent ${already_usd:.4f} of its "
+            f"${budget_usd:.2f} approved compute budget across {sessions} "
+            f"session(s) ({already_seconds:.0f}s); a resume does not grant a new "
+            f"one. Raising the ceiling is an owner decision, not a restart"
         )
 
     session = f"s{sessions + 1:04d}"
     _append(
-        out_dir / SPEND_LEDGER_NAME,
+        path,
         {
             "event": "session_start",
             "session": session,
             "at": now,
             "rate_usd_per_hour": rate_usd,
             "cap_usd": cap_usd,
-            "total_allowance_seconds": total_seconds,
-            "consumed_before_seconds": already,
+            "budget_usd": budget_usd,
+            "consumed_before_usd": already_usd,
+            "consumed_before_seconds": already_seconds,
         },
     )
+    _fsync_dir(out_dir)
     return session, allowance
 
 
@@ -144,14 +222,16 @@ def close_session(
 ) -> dict[str, Any]:
     """Record the end of a billable session and the cost it implies."""
     out_dir = Path(out_dir)
-    consumed, sessions = consumed_seconds(out_dir, now)
+    consumed, sessions, seconds = consumed_usd(out_dir, now)
     record = {
         "event": "session_end",
         "session": session,
         "at": now,
         "exit_reason": exit_reason,
-        "stage_consumed_seconds": consumed,
-        "stage_estimated_cost_usd": round(consumed / 3600 * rate_usd, 4),
+        "stage_consumed_seconds": seconds,
+        # Each session priced at its own rate, summed. Never the whole history
+        # at the latest rate — that under-reports a resume onto a cheaper pod.
+        "stage_cost_usd": round(consumed, 4),
         "sessions": sessions,
     }
     _append(out_dir / SPEND_LEDGER_NAME, record)

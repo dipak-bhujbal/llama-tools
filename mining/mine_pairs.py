@@ -1088,6 +1088,10 @@ def main() -> None:
                         help="required to bill: rate and cap alone are arithmetic")
     parser.add_argument("--persistent-root", type=Path, default=None,
                         help="verified durable mount the out-dir must live under")
+    parser.add_argument("--attest-durable-root", action="store_true",
+                        help="state on the record that the root survives termination")
+    parser.add_argument("--provider-terminate-seconds", type=int, default=None,
+                        help="the pod's ARMED provider-side auto-termination value")
     parser.add_argument("--redo-last", type=int, default=None,
                         help="tombstone the most recent N active records and exit")
     args = parser.parse_args()
@@ -1146,6 +1150,7 @@ def main() -> None:
     # base class are different objects and a bare `except MinerError` catches
     # nothing. Catching the backend's own class works under either entry point.
     from mining.backend import BackendError, execute_paid_stage
+    from mining.spend_ledger import SpendLedgerError
 
     try:
         summary = execute_paid_stage(
@@ -1155,8 +1160,10 @@ def main() -> None:
             cap_usd=args.cap_usd,
             persistent_root=args.persistent_root,
             fresh=args.fresh,
+            attested=args.attest_durable_root,
+            provider_terminate_seconds=args.provider_terminate_seconds,
         )
-    except (MinerError, BackendError) as exc:
+    except (MinerError, BackendError, SpendLedgerError) as exc:
         raise SystemExit(str(exc)) from exc
     print(
         f"mined {summary['prompts_mined_total']} prompts -> "
