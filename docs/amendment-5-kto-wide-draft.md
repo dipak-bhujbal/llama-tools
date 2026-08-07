@@ -1,6 +1,6 @@
 # Amendment 5 — wide KTO arm — **CANDIDATE DRAFT, NOT ADOPTED**
 
-**Status: candidate draft, cycle 4 (roles reversed).** Not in
+**Status: candidate draft, cycle 5 — owner's Option-1 rider applied.** Not in
 `docs/prereg-study2.md`, authorizes
 nothing, and no arm may run on it. Would be folded as **record 6 / numbered
 Amendment 5** only after review and explicit owner adoption.
@@ -43,6 +43,13 @@ the **data composition** (correct-only and incorrect-only prompts enter), and th
 > the write-up may not attribute it to dose alone. What it *can* do is show
 > whether a substantially larger, differently-composed training set moves the
 > endpoint at all — which is worth knowing and is currently unknowable.
+
+**What it does buy is asymmetric and real.** If A5 **moves** the endpoint, the
+endpoint is movable and **A0's null is probably a dose problem**. If A5 is **also
+null**, the interpretation is **bounded**: even five times the prompt coverage
+under a different objective failed to move it. **Both outcomes are more
+informative than A0's null standing alone** — which is the whole reason the arm
+exists.
 
 **Pilot composition, per 100 prompts, as a traceable fact:** 18 produced pairs · 69
 were 8-of-8 · 13 were 0-of-8. **Prompt coverage rises 5.56×** (100 usable prompt IDs
@@ -140,6 +147,12 @@ holds.
 > objective. Choosing them by hand after seeing curves would not be auditable;
 > recomputing them from the committed split is.
 
+**Explicitly: A5 pins its own weights and does not inherit A4.3's `1.0 / 1.0`.**
+A4.3's equal weights were justified by a dataset that is **exactly balanced by
+construction**; A5's runs near **2.8 : 1**, where equal weights are the wrong
+setting by KTO's own guidance. **A4.3 is superseded for this arm and only for this
+arm** — A4-kto keeps `1.0 / 1.0`, because its balance argument still holds.
+
 ## A5.4 — split, ordering and leakage
 
 **Split over prompts, not rows**, at 90/10 under §3.4's exact integer rule and
@@ -223,16 +236,36 @@ amendment does not claim it does.
 **(b) is the recommendation** — it fires exactly when the pool ceiling makes A0's
 run short, is computable before anything trains, and touches no final set.
 
-## A5.6 — family size
+## A5.6 — family size is conditional on **activation**, not on adoption
 
-If both A4-kto and A5-kto-wide are adopted, §4.1's exploratory family becomes
-**0 to 5** — superseding Amendment 4's `0 to 4` by reference, without editing
-either.
+> **`family_size = 4` when A5-kto-wide does not activate; `family_size = 5` when
+> it does.** The value is **fixed from the committed calibration artifact, before
+> any arm runs**, and recorded there.
 
-**The price is real and compounding:** with five possible exploratory arms, every
-exploratory contrast — A1, A2, A3 and both KTO arms — is Holm-corrected over up
-to five. **The confirmatory contrast and the structural secondary remain families
-of one and are untouched** (§4.1).
+**This clause is what makes Option 1 worth choosing** (owner, #general msg 2655).
+If adoption alone set the family to 5, Option 1 would pay Option 2's full
+statistical price while offering *less* availability — and Option 2 would then be
+strictly better. **Availability and family size are conditioned on the same
+pre-result number.**
+
+**Why conditioning on it is legitimate, stated so it survives scrutiny.**
+`A0_planned_optimizer_steps` is derived from **the same calibration artifact
+§2.6's own thresholds read**, it is a **pre-result number in exactly the sense
+those thresholds are**, and it is **fixed before any arm produces an outcome**.
+**A family size chosen from that is not a family size chosen with results in
+hand** — which is the thing §4.1 exists to forbid.
+
+**What it costs when it does activate:** every exploratory contrast — A1, A2, A3
+and both KTO arms — is Holm-corrected over five. **A1–A3 are protected in the
+case where calibration comes back rich and A5 never activates.** The confirmatory
+contrast and the structural secondary remain families of one, untouched (§4.1).
+
+**Expectation set honestly:** at the pilot's yield A0 lands near **113 steps**, so
+clearing 250 would need roughly **2.2× the pilot yield** — more than five standard
+errors away at n = 100. **A5 will almost certainly activate, and Options 1 and 2
+will very likely produce the same arm.** The reason to prefer 1 anyway is that it
+**puts the justification on the record in advance** rather than leaving "we added
+a fifth arm" unexplained, and it protects A1–A3 in the unlikely rich case.
 
 ## A5.7 — everything inherited unchanged from Amendment 4
 
