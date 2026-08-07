@@ -1300,12 +1300,16 @@ the superseded language verbatim and supersedes it by reference.
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
 | 4 | 2026-08-06 | §2.5, §2.9 | **Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C (#general msg 2244) and adopted the reviewed content (#general msg 2297); publication to the public remote still pending |
+| 5 | 2026-08-07 | §3.1, §3.4–§3.5, §3.7–§3.11, §4.1, §4.5 | **Amendment 4:** add the exploratory KTO arm `A4-kto`, trained on the materialized pairs only; widen §4.1's exploratory Holm family from `0 to 3` to `0 to 4` | Owner adopted (#general msg 2625) the reviewed content at `d28e9e1`; publication to the public remote pending |
+| 6 | 2026-08-07 | §3.1, §3.4–§3.5, §3.7–§3.11, §4.1, §4.5 | **Amendment 5:** add the exploratory wide KTO arm `A5-kto-wide` over pairs plus the 8-of-8 and 0-of-8 prompts, activated only when `A0_planned_optimizer_steps < 250`; exploratory Holm family becomes **4 when it does not activate, 5 when it does** | Owner adopted Option 1 with the family-size rider (#general msg 2655) on reviewed candidate `a4b1b39`; publication pending |
 
 **Note on this table's first column.** It is a chronological **record** number, not an
 amendment number, and the two do not line up. Records 1 and 2 carry numbered Amendments 1 and
 2; **record 3 is the §2 freeze, which is a freeze rather than a numbered amendment**; and
-numbered **Amendment 3 appears in record 4**. A citation of "Amendment 3" therefore means the
-body section of that name, found at record 4. The columns are left as they are rather than
+numbered **Amendment 3 appears in record 4**, and numbered **Amendment 4 appears in record
+5**. A citation of "Amendment 3" therefore means the body section of that name, found at
+record 4; "Amendment 4" means the body section of that name, found at record 5; and
+"Amendment 5" means the body section of that name, found at record 6. The columns are left as they are rather than
 renumbered, because records already cited elsewhere must keep the numbers they were cited by.
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
@@ -1752,3 +1756,359 @@ superseded input is a refusal, never a fallback to the four-file pool.
 Only after that ordering is satisfied may §3's Decision-C development design be adopted.
 Every later model or paid-compute stage still requires a written agent-agreed estimate and
 the owner's separate explicit approval. This amendment authorizes none.
+
+---
+
+### Amendment 4 — KTO comparison arm (2026-08-07) `[ADOPTED by the owner 2026-08-07, #general msg 2625 — reviewed content d28e9e1; publication pending]`
+
+Frozen §3.1 closes the arm list: *"An arm not listed in §3.5 or §3.6 requires an amendment
+before it runs. That includes the KTO arm sketched at roadmap Phase 4."* This amendment adds
+that arm. **It authorizes no run:** the arm needs its own written estimate, agent agreement
+and explicit owner approval, and it may run only on the branch §3.1 permits.
+
+#### A4.1 KTO trains on the materialized pairs only
+
+Each pair in `mining_out/mined_pairs.jsonl` contributes one **desirable** row (`chosen`) and
+one **undesirable** row (`rejected`). The 8-of-8 and 0-of-8 prompts the miner discards are
+**not** admitted.
+
+A0-versus-KTO compares *objectives*. Admitting the unpaired prompts would change data volume
+**and** composition at once, so a difference could not be attributed to the objective. A
+wider design admitting those buckets is a **separate candidate amendment**, not a variant of
+this one.
+
+#### A4.2 The arm, and where it is permitted
+
+Adds one row to §3.5:
+
+| id | role | `loss_type` | `beta` | other |
+|---|---|---|---|---|
+| **A4-kto** | **exploratory** | `kto` | 0.1 | unpaired objective over the converted pair set |
+
+**Permitted only on the `P_std >= 1000` branch.** §3.1 already states the `300–999` branch
+runs A0 only and that no exploratory arm may run there; `A4-kto` inherits that unchanged, and
+**this amendment widens no branch**. Run order is unchanged: A0 first, alone, to completion
+or kill.
+
+**`A4-kto` is exploratory permanently.** It may never be the confirmatory candidate or the
+structural secondary, and §4.1 forbids promotion after the fact.
+
+#### A4.3 Split first, then expand; the dataset contract
+
+The 90/10 split runs over **pairs**, under §3.4's exact integer rule, track-specific cell key
+and split seed `42` — *then* each pair expands into its two rows. Splitting after expansion
+would place a prompt's desirable and undesirable rows on opposite sides of the held-out
+boundary and leak it.
+
+> `pair_id = f"{prompt_id}:{chosen_index}:{rejected_index}"`, asserted unique.
+
+| field | value |
+|---|---|
+| `pair_id` | as above — the linkage key |
+| `prompt_id`, `chosen_index`, `rejected_index`, `stratum` | copied unchanged from the source pair |
+| `prompt` | exactly the pair's `prompt_messages` list |
+| `completion` | exactly `[{"role": "assistant", "content": <chosen or rejected>}]` |
+| `label` | `bool` — `true` desirable, `false` undesirable |
+| `verifier_version` | exactly `onpolicy_verifier_v1`; any other value fails the conversion |
+| `error_type` | `= rejected_reason`. The recognized set is exactly `mining.verifier.REASONS` under `onpolicy_verifier_v1`: `{invalid_json, missing_call, spurious_call, wrong_tool, wrong_args}`. Null or any other value fails |
+
+**Asserted fail-closed before the arm starts:** every `pair_id` appears exactly twice with
+opposite labels; no `pair_id` and no `prompt_id` appears in both splits; each split holds at
+least 2 pairs. The input file, the split receipt and both converted outputs are digested.
+
+#### A4.4 Row order is part of the objective
+
+TRL 1.8's KTO estimates its KL term by rotating completions within the actual batch and
+requires `train_sampling_strategy='sequential'`.
+
+> For an ordered split of `N` pairs `p[0..N-1]`, actual batch `i` =
+> `[desirable(p_i), undesirable(p_(i+1 mod N))]`. Every batch is balanced, carries two
+> distinct `pair_id`s and `prompt_id`s, and leaves no singleton remainder. Requires `N >= 2`.
+> **Distributed `world_size = 1`** with one selected CUDA device, asserted at start; the
+> physical GPU index is not pinned, the process topology is.
+
+#### A4.5 Batch size, in the correct unit
+
+§3.5's "effective batch 16" is a **pair** unit and does not transfer to unpaired rows.
+
+> Actual batch **2** × gradient accumulation **16** = **32 unpaired rows = 16 source-pair
+> equivalents per optimizer step**, one epoch. `total_steps = ceil(train_rows / 32)` where
+> `train_rows = 2 × train_pairs`. *Equivalents, not exactly 16 distinct pairs: the cyclic
+> cross-prompt ordering means an accumulation window need not contain 16 unique pairs.*
+
+#### A4.6 The rest of the configuration
+
+Inherits §3.4(a) — base `meta-llama/Llama-3.1-8B-Instruct` revision
+`0e9e39f249a16976918f6564b8830bc894c89659`, init from the shipped SFT adapter revision
+`b6f4da479f8c6fc044ee8b802a92f47780f970c5`, LoRA `r = 64` / `alpha = 128` / `dropout = 0.05`
+on the same four targets, bf16, gradient checkpointing on, `max_length = 2048` — and §3.4's
+pinned library table, asserted for exact equality at start.
+
+| | |
+|---|---|
+| `beta` | 0.1 |
+| `desirable_weight` / `undesirable_weight` | 1.0 / 1.0 |
+| LR · schedule · warmup | `5e-6` · cosine · `warmup_ratio = 0.03` |
+| epochs · batch | 1 epoch; per-device 2, grad-accum 16, eval batch 2 |
+| `disable_dropout` | `True` — the adapter config retains `dropout = 0.05`; TRL disables the dropout modules for this run |
+| `precompute_ref_log_probs` | `False` |
+| `sync_ref_model` | `False` |
+| sampling | `train_sampling_strategy='sequential'` |
+| seeds | training 42, split 42 |
+| reference model | frozen `ref` adapter copied from the shipped SFT adapter; parameter-hash equality asserted at step 0 |
+
+**Both weights are 1.0 because A4.1's conversion is exactly balanced**, and 1/1 is the
+principled setting for that regime.
+
+**Environment scope, since the two pinned tables in this repository are easy to
+confuse.** §3.4's library table governs **training arms** and is what this arm asserts
+against. `requirements-probe.txt` scopes itself to the **§0 qualification probe** and does
+not supersede it — its deliberately-unpinned-Torch policy applies to §0 inference, not to §3.
+The mining pilot's measured `torch 2.8.0+cu128` is a **mining** runtime and is not an arm
+pin. **Changing any arm pin requires a separate amendment to §3.4**, not a sentence here.
+
+**Matching `beta` removes one difference; it does not make the objective the only
+difference.** KTO's unpaired loss and its in-batch KL construction differ mechanically from
+DPO's paired loss even on identical source pairs. The contrast is objective-package versus
+objective-package, and the write-up may not describe it as an isolated change of loss
+function.
+
+#### A4.7 Kill lines, inherited selectively
+
+§3.7 rules 1, 2, 4 and 5 apply unchanged. **Rule 3 cannot:** TRL's KTO trainer emits no
+`eval_rewards/accuracies`.
+
+> **Rule 3 is replaced by `eval_pair_reward_accuracy`.** Per-row reward is
+> `beta * (policy_completion_logp - ref_completion_logp)`. A `pair_id` in the held-out split
+> counts toward the numerator iff `reward(desirable) > reward(undesirable)` **strictly**;
+> **ties count false**. The rate is `numerator / denominator`, both committed with the
+> per-pair rows. **First-eval `>= 0.99` stops the arm**, the same threshold rule 3 uses.
+
+A missing or renamed metric fails before training or eval begins, never silently disabling a
+kill line. The kill report records numerator, denominator, rate, threshold, split digest,
+look index and optimizer step.
+
+#### A4.8 Scoring and analysis
+
+Scored only after every launched arm's checkpoint is selected, on `multiple` (n = 200) and
+`simple_python` (n = 400). **Final sets may not influence launch or checkpoint selection.**
+The `multiple` contrast versus shipped SFT joins the exploratory Holm family; `simple_python`
+retention stays a band outside any test family (§4.1a).
+
+**MMLU is excluded.** §4.5 runs MMLU *"only for a candidate that clears the primary
+contrast"*, and `A4-kto` is permanently exploratory, so it can never clear it. Including MMLU
+would require amending §4.5.
+
+#### A4.9 Exploratory family size
+
+§4.1 currently reads:
+
+> *"Family size = the number of exploratory arms launched (0 to 3), recorded before the
+> analysis runs"*
+
+**Superseded, by reference and without editing that text, to:** *family size = the number of
+exploratory arms launched, **0 to 4**, recorded before the analysis runs*, Holm-corrected
+over exactly that count.
+
+**The price, accepted by the owner (#general msg 2625):** a fourth possible exploratory arm
+widens the correction for A1–A3, which have nothing to do with KTO. It is accepted because
+exploratory contrasts can never be promoted to the result, so what is lost is sensitivity in
+reporting which exploratory contrasts look individually notable — **not any part of the
+confirmatory verdict**, which §4.1 keeps as a family of one taking no adjustment.
+
+#### A4.10 Timing
+
+**This amendment's own stricter rule: it is adopted before the calibration artifact and its
+yield are observed.** Current §4.1 does not require this — it defines family size from the
+arms actually launched, recorded before the analysis — but a family size settled before any
+calibration yield exists cannot be argued about afterwards.
+
+#### A4.11 Spend
+
+Adds to §3.11: *one KTO arm — 1 epoch of KTO at 32 unpaired rows per optimizer step over the
+converted pair set, plus `L` dev looks × 258 greedy generations (`L` per §3.8).*
+
+**This amendment authorizes no spend.**
+
+---
+
+### Amendment 5 — wide KTO arm (2026-08-07) `[ADOPTED by the owner 2026-08-07, #general msg 2655 — Option 1 with the family-size rider, reviewed candidate a4b1b39; publication pending]`
+
+Adds a second exploratory KTO arm that admits the prompts the pair miner discards.
+**Amendment 4's `A4-kto` trains on materialized pairs only, so that A0-versus-KTO compares
+objectives; this arm deliberately does the opposite.** They answer different questions and
+both may exist. **This amendment authorizes no run and no spend.**
+
+#### A5.1 The arm
+
+| id | role | `loss_type` | `beta` | other |
+|---|---|---|---|---|
+| **A5-kto-wide** | **exploratory** | `kto` | 0.1 | unpaired objective over pairs **plus** the 8-of-8 and 0-of-8 prompts |
+
+**Exploratory permanently** — never the confirmatory candidate or the structural secondary,
+and never promoted after the fact (§4.1). **Permitted only on the `P_std >= 1000` branch**,
+inheriting §3.1 unchanged. **Runs only after A0 completes *or is killed*, and may never
+replace A0** whichever way A0 ends. Requires its own written estimate, agent agreement and
+explicit owner approval.
+
+#### A5.2 Which rows enter
+
+**One row per admitted prompt — the lowest-index generation of the qualifying kind — not
+eight.** Eight near-duplicate completions of one input inflate the set without adding
+information and would let a handful of prompts dominate the gradient.
+
+| source | rows | label |
+|---|---|---|
+| pair prompts (1–7 of 8) | 2, as Amendment 4's conversion | one `true`, one `false` |
+| 8-of-8 prompts | 1, generation index 0 | `true` |
+| 0-of-8 prompts | 1, generation index 0 | `false` |
+
+**Both solo classes are read from `mining_out/ledger.jsonl` and only from there.** 8-of-8
+prompts appear in no other artifact. **`sft_bucket.jsonl` cannot supply the 0-of-8
+completions:** its schema is `{prompt_id, prompt_messages, stratum, target}`, it stores **no
+generations**, and `target` is the **ground-truth answer** — using it as an undesirable
+completion would train the model to avoid the correct answer.
+
+**Reconciliation asserted before conversion, fail-closed** (`mining_summary.json` holds
+counts, not IDs): ledger-derived mixed IDs **equal** `mined_pairs.jsonl`'s; ledger-derived
+0-of-8 IDs **equal** `sft_bucket.jsonl`'s; 8-of-8 is verified by ledger count **equal to**
+`histogram["8"]`; every set size equals its summary count. All four digests recorded.
+
+**Solo row schema — exact, so this section is implementable without the drafting history:**
+
+| field | value |
+|---|---|
+| `pair_id` | `f"{prompt_id}:solo"` — **asserted disjoint** from Amendment 4's `prompt_id:chosen_index:rejected_index` form |
+| `prompt_id` | the ledger record's `prompt_id` |
+| `source_index` | the ledger generation index used — **`0`** |
+| `bucket` | **`all_correct`** or **`zero_correct`** |
+| `accepted_count` | the prompt's accepted count from the ledger — **`8`** for `all_correct`, **`0`** for `zero_correct` |
+| `prompt` | **the ledger record's `prompt_messages`, copied unmodified** |
+| `completion` | **exactly** `[{"role": "assistant", "content": <ledger generation at source_index>}]` |
+| `label` | `bool` — **`true`** for `all_correct`, **`false`** for `zero_correct` |
+| `stratum` | **copied unchanged from the ledger record** |
+| `verifier_version` | **asserted exactly `onpolicy_verifier_v1`**; any other value fails the conversion |
+
+**Amendment 4's assertion that "every `pair_id` appears exactly twice with opposite labels" is
+superseded for this arm:** solo `pair_id`s appear **exactly once**; pair-derived `pair_id`s
+still appear exactly twice.
+
+#### A5.3 Weights are this arm's own, not Amendment 4's
+
+**A4.3's `1.0 / 1.0` is superseded for this arm and only this arm.** A4's equal weights were
+justified by a dataset **balanced by construction**; this arm runs near **2.8 : 1** at pilot
+composition, where equal weights are the wrong setting by KTO's own guidance. **A4-kto keeps
+`1.0 / 1.0`.**
+
+> Computed from the realized **post-parity training** split, before the arm runs:
+> `desirable_weight = 1.0`; `undesirable_weight = n_desirable_train / n_undesirable_train`
+> **as an exact rational**, converted faithfully to float and passed in that form. The run
+> artifact records the two counts, the rational and the float. **A rounded display value may
+> be reported but never governs training. Fails if either count is zero.**
+
+#### A5.4 Split, parity, and batch order
+
+**Split over prompts at 90/10** under §3.4's exact integer rule and split seed `42`, **then**
+expand — no prompt's rows may straddle the held-out boundary. **§3.4's cell key does not
+transfer**, because solo prompts have no `rejected_reason`; the key is
+`(pair, stratum, rejected_reason)` · `(all_correct, stratum)` · `(zero_correct, stratum)`.
+**A cell that cannot yield at least one train and one eval prompt fails the conversion.**
+
+**Parity is resolved before ordering and before the weights are computed.** If a split's
+expanded row count is odd, exclude the **lexicographically last eligible solo row** whose
+cell remains non-empty, recording `pair_id`, `prompt_id`, cell and reason. **A pair-derived
+row is never dropped**; if no eligible solo row exists, the conversion fails. **The training
+weights (A5.3) and the eval denominators are computed from the post-parity rows**, so the
+numbers that govern training and evaluation match the rows that actually exist.
+
+**Batch order is an exact matching, not a retry loop.** Sort all rows by `(pair_id, label)`
+ascending. **Set `minority = D` and `majority = U` when `|D| <= |U|`, otherwise the
+reverse** — this makes the equal-size case explicit and deterministic. Walk the minority in
+sorted order; match each to the **lowest-sorted unconsumed majority row with a different
+`prompt_id`**, **each majority row consumed at most once**. **If any minority row cannot be
+matched, the conversion fails** rather than emitting a same-prompt batch that would corrupt
+the KL estimate. The even same-label surplus follows in exact sorted order under the same
+rule. Asserted: actual batch 2, eval batch 2, `world_size = 1`, **no singleton batch reaches
+the KL computation**. The realized per-window label ratio is written to the run artifact.
+
+#### A5.5 Activation — threshold only
+
+> **Activated iff, from the committed calibration artifact alone,**
+> `A0_planned_optimizer_steps < 250`, where
+> `A0_planned_optimizer_steps = ceil(A0_train_pairs / 16)`.
+
+**This arm may not be launched because another arm's result was disappointing.** Launching in
+response to a final-set outcome would require opening the final sets before a launch
+decision, which §4 forbids and which would make every downstream contrast outcome-adaptive.
+
+**This is a pre-registered short-run operational threshold, not a power calculation.** Below
+250 steps A0 gets at most five 50-step looks (§3.8) — a thin trajectory to select a checkpoint
+from. **Step count alone cannot establish statistical underpowering, and this amendment does
+not claim it does.**
+
+#### A5.6 Family size is conditional on activation, not on adoption
+
+> **`family_size = 4` when A5-kto-wide does not activate; `family_size = 5` when it does**,
+> fixed from the committed calibration artifact **before any arm runs** and recorded there.
+
+**This clause is the reason Option 1 was chosen over Option 2** (owner, #general msg 2655). If
+adoption alone set the family to 5, Option 1 would pay Option 2's full statistical price while
+offering less availability. **Availability and family size turn on the same pre-result
+number.**
+
+**Why conditioning on it is legitimate:** `A0_planned_optimizer_steps` is derived from **the
+same calibration artifact §2.6's own thresholds read**, it is a pre-result number **in exactly
+the sense those thresholds are**, and it is **fixed before any arm produces an outcome**. A
+family size chosen from that is **not** a family size chosen with results in hand.
+
+When it activates, every exploratory contrast — A1, A2, A3 and both KTO arms — is
+Holm-corrected over five. **A1–A3 are protected in the case where calibration comes back rich
+and A5 never activates.** The confirmatory contrast and the structural secondary remain
+families of one (§4.1).
+
+#### A5.7 What this arm can and cannot show
+
+**It moves objective, composition and dose together, so it can never attribute a positive
+result to any one of them.** The write-up may not describe it as a dose experiment.
+
+**Its value is asymmetric and real.** If A5 moves the endpoint, the endpoint is movable and
+**A0's null is probably a dose problem**. If A5 is also null, the interpretation is
+**bounded**: even five times the prompt coverage under a different objective failed to move
+it. **Both outcomes are more informative than A0's null standing alone.**
+
+**Planning inference, not a measurement.** At the pilot's yield A0 lands near **113 optimizer
+steps**, so clearing 250 would require roughly **2.2× the pilot yield** — more than five
+standard errors at n = 100. **A5 will therefore almost certainly activate.** Derivation:
+post-screen population **11,071** (A3.3) × pilot `P_std = 39280300000/21820941 ≈ 1800.1194`
+per 10,000 ≈ **1,992.9 projected pairs**; `ceil(1793/16) = 113`. **Every figure here is a
+projection from a 100-prompt pilot, not a calibration measurement.**
+
+#### A5.8 Everything else inherited
+
+Model, revisions and LoRA from §3.4(a) · §3.4's pinned library table asserted for exact
+equality · LR `5e-6`, cosine, `warmup_ratio 0.03`, `max_length 2048`, bf16, gradient
+checkpointing on · `disable_dropout=True` · `precompute_ref_log_probs=False` ·
+`sync_ref_model=False` · sequential sampling · seeds 42 · ref adapter parameter-hash equality
+at step 0 · scoring per A4.8 with **MMLU excluded** for §4.5's reason · **one solo row per
+admitted prompt, uncapped** except at most the A5.4 parity exclusion; composition is reported,
+not constrained.
+
+**Kill lines: §3.7 rules 1, 2, 4 and 5 as A4.7. Rule 3's replacement differs.**
+A4.7's `eval_pair_reward_accuracy` reads only the pair rows, which are the **minority** here,
+so it could kill this arm for failing at what it is not optimising.
+
+> **Replaced by `eval_label_direction_accuracy` over *all* held-out rows:** a row counts toward
+> the numerator iff `reward > 0` for a desirable row or `reward < 0` for an undesirable one,
+> **ties count false**, reward as A4.7. **First-eval `>= 0.99` stops the arm.** Per-row values
+> committed. `eval_pair_reward_accuracy` is still reported **as a diagnostic that kills
+> nothing**.
+
+#### A5.9 Timing, run order, and spend
+
+**This amendment is adopted before the calibration run.** Launch eligibility then resolves
+**mechanically from the calibration artifact**, never from another arm's result. **If both KTO
+arms become eligible the run order is fixed here: A0 → A4-kto → A5-kto-wide.**
+
+Adds to §3.11: *one wide KTO arm — 1 epoch over the expanded set at 32 unpaired rows per
+optimizer step, plus `L` dev looks × 258 greedy generations.* **This amendment authorizes no
+spend.**
