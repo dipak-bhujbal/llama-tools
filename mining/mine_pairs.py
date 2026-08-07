@@ -52,6 +52,7 @@ from mining.verifier import (
     VERIFIER_VERSION,
     ParserDisagreementError,
     TargetUnreadableError,
+    extract_calls,
     run_selftest,
     verify,
 )
@@ -616,6 +617,59 @@ def summarize(ledger: Ledger, survivor_counts: dict[str, int]) -> dict[str, Any]
     }
 
 
+# Owner decision, #general msg 2379: option A with C. HANDOFF §5.1's length-gap
+# floor and malformed-syntax cap are **measured and reported, never applied**.
+# Applying them would change which pairs materialize, therefore P_std, therefore
+# the §2.6 gate — using thresholds that are not in the frozen preregistration.
+# Reporting them costs nothing and answers, from the pilot's own data, whether
+# they would have mattered enough to be worth an amendment before calibration.
+LENGTH_GAP_REFERENCE = 0.40
+MALFORMED_CAP_REFERENCE = 0.05
+
+
+def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Measure HANDOFF §5.1's two caps against the mined set. Filters nothing."""
+    if not pairs:
+        return {
+            "pairs": 0,
+            "length_gap_over_reference": 0,
+            "length_gap_share": None,
+            "malformed_rejected": 0,
+            "malformed_share": None,
+            "would_either_cap_have_bound": False,
+            "note": "measured only; no pair was excluded by either reference value",
+        }
+
+    over_gap = 0
+    malformed = 0
+    for pair in pairs:
+        chosen, rejected = pair["chosen"], pair["rejected"]
+        longest = max(len(chosen), len(rejected))
+        if longest and abs(len(chosen) - len(rejected)) / longest > LENGTH_GAP_REFERENCE:
+            over_gap += 1
+        if extract_calls(rejected)[0] == "unreadable":
+            malformed += 1
+
+    gap_share = over_gap / len(pairs)
+    malformed_share = malformed / len(pairs)
+    return {
+        "pairs": len(pairs),
+        "length_gap_reference": LENGTH_GAP_REFERENCE,
+        "length_gap_over_reference": over_gap,
+        "length_gap_share": gap_share,
+        "malformed_cap_reference": MALFORMED_CAP_REFERENCE,
+        "malformed_rejected": malformed,
+        "malformed_share": malformed_share,
+        "would_either_cap_have_bound": bool(over_gap) or malformed_share > MALFORMED_CAP_REFERENCE,
+        "note": (
+            "Measured against HANDOFF §5.1's reference values and NOT applied. "
+            "These thresholds are absent from frozen §2; applying them would move "
+            "the §2.6 gate on unregistered rules. If either would have bound "
+            "materially, register it by amendment before the calibration run."
+        ),
+    }
+
+
 def gate_decision(p_std: float | Fraction | None) -> str:
     """§2.6's table, applied to the exact value. No rounding at any boundary."""
     if p_std is None:
@@ -651,6 +705,7 @@ def write_derivatives(
         summary["allocation"] = allocation
 
     exact = summary.pop("_P_std_fraction")
+    summary["guardrail_diagnostics"] = pair_diagnostics(summary["materialized_pairs"])
     if stage == "calibration":
         # §2.6 is evaluated on the exact rational, never the serialized float.
         summary["decision"] = gate_decision(exact)

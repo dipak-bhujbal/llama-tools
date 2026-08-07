@@ -43,6 +43,7 @@ from mining.mine_pairs import (
 TARGET = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 1}}\n</tool_call>'
 GOOD = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 1}}\n</tool_call>'
 BAD = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 99}}\n</tool_call>'
+MALFORMED = '<tool_call>\n{"name": "do_thing", "arguments": {"x": 1}\n</tool_call>'
 
 
 def _prompt(pid: str = "p1", stratum: str = MULTI) -> Prompt:
@@ -610,3 +611,39 @@ def test_a_failing_selftest_stops_the_run_before_any_generation(tmp_path, monkey
 def test_an_unknown_stage_is_refused(tmp_path) -> None:
     with pytest.raises(MinerError, match="stage must be one of"):
         _run(tmp_path / "out", stage="exploratory")
+
+
+# --- Owner decision A+C: guardrails measured, never applied ------------------
+
+
+def test_the_guardrail_caps_are_measured_and_never_filter(tmp_path) -> None:
+    """Option C. If these ever start excluding pairs they move the §2.6 gate on
+    thresholds that are not in the frozen preregistration."""
+    long_chosen = (
+        '<tool_call>\n{"name": "do_thing", "arguments": {"x": ' + "1" * 400 + "}}\n</tool_call>"
+    )
+    outcome_pairs = [
+        {"chosen": long_chosen, "rejected": BAD},          # length gap way over 40%
+        # Genuinely malformed syntax (unclosed brace), near-identical length so
+        # it trips the malformed check alone. Plain prose would be a `no_call`,
+        # which is a different thing entirely.
+        {"chosen": GOOD, "rejected": MALFORMED},
+        {"chosen": GOOD, "rejected": BAD},                  # unremarkable
+    ]
+
+    diagnostics = mine_pairs.pair_diagnostics(outcome_pairs)
+
+    assert diagnostics["pairs"] == 3, "every pair is still present; nothing was filtered"
+    assert diagnostics["length_gap_over_reference"] == 1
+    assert diagnostics["malformed_rejected"] == 1
+    assert diagnostics["would_either_cap_have_bound"] is True
+    assert "NOT applied" in diagnostics["note"]
+
+
+def test_diagnostics_ride_along_with_the_summary_without_changing_yield(tmp_path) -> None:
+    out = tmp_path / "out"
+    summary = _run(out)
+
+    assert summary["guardrail_diagnostics"]["pairs"] == summary["pairs_total"]
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["guardrail_diagnostics"]["length_gap_reference"] == 0.40
