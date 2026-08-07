@@ -1300,7 +1300,7 @@ the superseded language verbatim and supersedes it by reference.
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
 | 4 | 2026-08-06 | §2.5, §2.9 | **Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C (#general msg 2244) and adopted the reviewed content (#general msg 2297); publication to the public remote still pending |
-| 5 | 2026-08-07 | §3.1, §3.5, §4.1, §3.11 | **Amendment 4:** add the exploratory KTO arm `A4-kto`, trained on the materialized pairs only; widen §4.1's exploratory Holm family from `0 to 3` to `0 to 4` | Owner adopted (#general msg 2625) the reviewed content at `d28e9e1`; publication to the public remote pending |
+| 5 | 2026-08-07 | §3.1, §3.4–§3.5, §3.7–§3.11, §4.1, §4.5 | **Amendment 4:** add the exploratory KTO arm `A4-kto`, trained on the materialized pairs only; widen §4.1's exploratory Holm family from `0 to 3` to `0 to 4` | Owner adopted (#general msg 2625) the reviewed content at `d28e9e1`; publication to the public remote pending |
 
 **Note on this table's first column.** It is a chronological **record** number, not an
 amendment number, and the two do not line up. Records 1 and 2 carry numbered Amendments 1 and
@@ -1858,6 +1858,13 @@ pinned library table, asserted for exact equality at start.
 **Both weights are 1.0 because A4.1's conversion is exactly balanced**, and 1/1 is the
 principled setting for that regime.
 
+**Environment scope, since the two pinned tables in this repository are easy to
+confuse.** §3.4's library table governs **training arms** and is what this arm asserts
+against. `requirements-probe.txt` scopes itself to the **§0 qualification probe** and does
+not supersede it — its deliberately-unpinned-Torch policy applies to §0 inference, not to §3.
+The mining pilot's measured `torch 2.8.0+cu128` is a **mining** runtime and is not an arm
+pin. **Changing any arm pin requires a separate amendment to §3.4**, not a sentence here.
+
 **Matching `beta` removes one difference; it does not make the objective the only
 difference.** KTO's unpaired loss and its in-batch KL construction differ mechanically from
 DPO's paired loss even on identical source pairs. The contrast is objective-package versus
@@ -1920,4 +1927,3 @@ Adds to §3.11: *one KTO arm — 1 epoch of KTO at 32 unpaired rows per optimize
 converted pair set, plus `L` dev looks × 258 greedy generations (`L` per §3.8).*
 
 **This amendment authorizes no spend.**
-
