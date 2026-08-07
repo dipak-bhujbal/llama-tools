@@ -1,13 +1,12 @@
-# Amendment 4 — KTO comparison arm — **DRAFT, NOT ADOPTED**
+# Amendment 4 — KTO comparison arm — **SUPERSEDED BY THE PREREGISTRATION**
 
-**Status: draft for review, cycle-3 role-reversal fix.** Not in
-`docs/prereg-study2.md`, authorizes nothing, and no arm may run on it. To be
-folded in as **record 5 / numbered Amendment 4** once reviewed and adopted in its
-final reviewed form.
-
-**Owner decisions already recorded (#general msg 2625) and preserved unchanged
-through this revision:** A4.1 pairs-only · A4.3 equal weights · A4.5 Holm
-widening accepted · adoption before calibration.
+> **This draft is no longer authoritative.** Amendment 4 was adopted by the owner
+> (#general msg 2625) on the reviewed content at `d28e9e1` and is now **folded
+> into `docs/prereg-study2.md` as record 5 / Amendment 4**. **Read it there.**
+>
+> This file is kept only as the drafting history — the four review cycles and the
+> role reversal that produced the adopted text. **If the two ever disagree, the
+> preregistration governs**, and this file is the one that is wrong.
 
 **Why it exists.** Frozen §3.1: *"An arm not listed in §3.5 or §3.6 requires an
 amendment before it runs. That includes the KTO arm sketched at roadmap Phase 4."*

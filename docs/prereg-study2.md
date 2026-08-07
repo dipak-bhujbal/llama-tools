@@ -1300,12 +1300,14 @@ the superseded language verbatim and supersedes it by reference.
 | 2 | 2026-08-05 | §0.2, §1 | Yield denominator pinned to active-ledger records; Phase 2 gate reads the committed artifact, not this document's quotation; function-name matching pinned as exact-as-presented with a fail-closed preflight | Owner, #general msg 2075 |
 | 3 | 2026-08-05 | §2 | Mining section frozen: strata, allocation, sampling, exclusion criterion, artifact-derived weights, yield gate arithmetic | Owner, #general msg 2181 |
 | 4 | 2026-08-06 | §2.5, §2.9 | **Amendment 3:** add `live_multiple` to the screen and replace the mining artifact/weights before mining | Owner selected Decision C (#general msg 2244) and adopted the reviewed content (#general msg 2297); publication to the public remote still pending |
+| 5 | 2026-08-07 | §3.1, §3.5, §4.1, §3.11 | **Amendment 4:** add the exploratory KTO arm `A4-kto`, trained on the materialized pairs only; widen §4.1's exploratory Holm family from `0 to 3` to `0 to 4` | Owner adopted (#general msg 2625) the reviewed content at `d28e9e1`; publication to the public remote pending |
 
 **Note on this table's first column.** It is a chronological **record** number, not an
 amendment number, and the two do not line up. Records 1 and 2 carry numbered Amendments 1 and
 2; **record 3 is the §2 freeze, which is a freeze rather than a numbered amendment**; and
-numbered **Amendment 3 appears in record 4**. A citation of "Amendment 3" therefore means the
-body section of that name, found at record 4. The columns are left as they are rather than
+numbered **Amendment 3 appears in record 4**, and numbered **Amendment 4 appears in record
+5**. A citation of "Amendment 3" therefore means the body section of that name, found at
+record 4; "Amendment 4" means the body section of that name, found at record 5. The columns are left as they are rather than
 renumbered, because records already cited elsewhere must keep the numbers they were cited by.
 
 **Note on Amendment 2's scope.** A2.3 pins *function-name* matching only.
@@ -1752,3 +1754,170 @@ superseded input is a refusal, never a fallback to the four-file pool.
 Only after that ordering is satisfied may §3's Decision-C development design be adopted.
 Every later model or paid-compute stage still requires a written agent-agreed estimate and
 the owner's separate explicit approval. This amendment authorizes none.
+
+---
+
+### Amendment 4 — KTO comparison arm (2026-08-07) `[ADOPTED by the owner 2026-08-07, #general msg 2625 — reviewed content d28e9e1; publication pending]`
+
+Frozen §3.1 closes the arm list: *"An arm not listed in §3.5 or §3.6 requires an amendment
+before it runs. That includes the KTO arm sketched at roadmap Phase 4."* This amendment adds
+that arm. **It authorizes no run:** the arm needs its own written estimate, agent agreement
+and explicit owner approval, and it may run only on the branch §3.1 permits.
+
+#### A4.1 KTO trains on the materialized pairs only
+
+Each pair in `mining_out/mined_pairs.jsonl` contributes one **desirable** row (`chosen`) and
+one **undesirable** row (`rejected`). The 8-of-8 and 0-of-8 prompts the miner discards are
+**not** admitted.
+
+A0-versus-KTO compares *objectives*. Admitting the unpaired prompts would change data volume
+**and** composition at once, so a difference could not be attributed to the objective. A
+wider design admitting those buckets is a **separate candidate amendment**, not a variant of
+this one.
+
+#### A4.2 The arm, and where it is permitted
+
+Adds one row to §3.5:
+
+| id | role | `loss_type` | `beta` | other |
+|---|---|---|---|---|
+| **A4-kto** | **exploratory** | `kto` | 0.1 | unpaired objective over the converted pair set |
+
+**Permitted only on the `P_std >= 1000` branch.** §3.1 already states the `300–999` branch
+runs A0 only and that no exploratory arm may run there; `A4-kto` inherits that unchanged, and
+**this amendment widens no branch**. Run order is unchanged: A0 first, alone, to completion
+or kill.
+
+**`A4-kto` is exploratory permanently.** It may never be the confirmatory candidate or the
+structural secondary, and §4.1 forbids promotion after the fact.
+
+#### A4.3 Split first, then expand; the dataset contract
+
+The 90/10 split runs over **pairs**, under §3.4's exact integer rule, track-specific cell key
+and split seed `42` — *then* each pair expands into its two rows. Splitting after expansion
+would place a prompt's desirable and undesirable rows on opposite sides of the held-out
+boundary and leak it.
+
+> `pair_id = f"{prompt_id}:{chosen_index}:{rejected_index}"`, asserted unique.
+
+| field | value |
+|---|---|
+| `pair_id` | as above — the linkage key |
+| `prompt_id`, `chosen_index`, `rejected_index`, `stratum` | copied unchanged from the source pair |
+| `prompt` | exactly the pair's `prompt_messages` list |
+| `completion` | exactly `[{"role": "assistant", "content": <chosen or rejected>}]` |
+| `label` | `bool` — `true` desirable, `false` undesirable |
+| `verifier_version` | exactly `onpolicy_verifier_v1`; any other value fails the conversion |
+| `error_type` | `= rejected_reason`. The recognized set is exactly `mining.verifier.REASONS` under `onpolicy_verifier_v1`: `{invalid_json, missing_call, spurious_call, wrong_tool, wrong_args}`. Null or any other value fails |
+
+**Asserted fail-closed before the arm starts:** every `pair_id` appears exactly twice with
+opposite labels; no `pair_id` and no `prompt_id` appears in both splits; each split holds at
+least 2 pairs. The input file, the split receipt and both converted outputs are digested.
+
+#### A4.4 Row order is part of the objective
+
+TRL 1.8's KTO estimates its KL term by rotating completions within the actual batch and
+requires `train_sampling_strategy='sequential'`.
+
+> For an ordered split of `N` pairs `p[0..N-1]`, actual batch `i` =
+> `[desirable(p_i), undesirable(p_(i+1 mod N))]`. Every batch is balanced, carries two
+> distinct `pair_id`s and `prompt_id`s, and leaves no singleton remainder. Requires `N >= 2`.
+> **Distributed `world_size = 1`** with one selected CUDA device, asserted at start; the
+> physical GPU index is not pinned, the process topology is.
+
+#### A4.5 Batch size, in the correct unit
+
+§3.5's "effective batch 16" is a **pair** unit and does not transfer to unpaired rows.
+
+> Actual batch **2** × gradient accumulation **16** = **32 unpaired rows = 16 source-pair
+> equivalents per optimizer step**, one epoch. `total_steps = ceil(train_rows / 32)` where
+> `train_rows = 2 × train_pairs`. *Equivalents, not exactly 16 distinct pairs: the cyclic
+> cross-prompt ordering means an accumulation window need not contain 16 unique pairs.*
+
+#### A4.6 The rest of the configuration
+
+Inherits §3.4(a) — base `meta-llama/Llama-3.1-8B-Instruct` revision
+`0e9e39f249a16976918f6564b8830bc894c89659`, init from the shipped SFT adapter revision
+`b6f4da479f8c6fc044ee8b802a92f47780f970c5`, LoRA `r = 64` / `alpha = 128` / `dropout = 0.05`
+on the same four targets, bf16, gradient checkpointing on, `max_length = 2048` — and §3.4's
+pinned library table, asserted for exact equality at start.
+
+| | |
+|---|---|
+| `beta` | 0.1 |
+| `desirable_weight` / `undesirable_weight` | 1.0 / 1.0 |
+| LR · schedule · warmup | `5e-6` · cosine · `warmup_ratio = 0.03` |
+| epochs · batch | 1 epoch; per-device 2, grad-accum 16, eval batch 2 |
+| `disable_dropout` | `True` — the adapter config retains `dropout = 0.05`; TRL disables the dropout modules for this run |
+| `precompute_ref_log_probs` | `False` |
+| `sync_ref_model` | `False` |
+| sampling | `train_sampling_strategy='sequential'` |
+| seeds | training 42, split 42 |
+| reference model | frozen `ref` adapter copied from the shipped SFT adapter; parameter-hash equality asserted at step 0 |
+
+**Both weights are 1.0 because A4.1's conversion is exactly balanced**, and 1/1 is the
+principled setting for that regime.
+
+**Matching `beta` removes one difference; it does not make the objective the only
+difference.** KTO's unpaired loss and its in-batch KL construction differ mechanically from
+DPO's paired loss even on identical source pairs. The contrast is objective-package versus
+objective-package, and the write-up may not describe it as an isolated change of loss
+function.
+
+#### A4.7 Kill lines, inherited selectively
+
+§3.7 rules 1, 2, 4 and 5 apply unchanged. **Rule 3 cannot:** TRL's KTO trainer emits no
+`eval_rewards/accuracies`.
+
+> **Rule 3 is replaced by `eval_pair_reward_accuracy`.** Per-row reward is
+> `beta * (policy_completion_logp - ref_completion_logp)`. A `pair_id` in the held-out split
+> counts toward the numerator iff `reward(desirable) > reward(undesirable)` **strictly**;
+> **ties count false**. The rate is `numerator / denominator`, both committed with the
+> per-pair rows. **First-eval `>= 0.99` stops the arm**, the same threshold rule 3 uses.
+
+A missing or renamed metric fails before training or eval begins, never silently disabling a
+kill line. The kill report records numerator, denominator, rate, threshold, split digest,
+look index and optimizer step.
+
+#### A4.8 Scoring and analysis
+
+Scored only after every launched arm's checkpoint is selected, on `multiple` (n = 200) and
+`simple_python` (n = 400). **Final sets may not influence launch or checkpoint selection.**
+The `multiple` contrast versus shipped SFT joins the exploratory Holm family; `simple_python`
+retention stays a band outside any test family (§4.1a).
+
+**MMLU is excluded.** §4.5 runs MMLU *"only for a candidate that clears the primary
+contrast"*, and `A4-kto` is permanently exploratory, so it can never clear it. Including MMLU
+would require amending §4.5.
+
+#### A4.9 Exploratory family size
+
+§4.1 currently reads:
+
+> *"Family size = the number of exploratory arms launched (0 to 3), recorded before the
+> analysis runs"*
+
+**Superseded, by reference and without editing that text, to:** *family size = the number of
+exploratory arms launched, **0 to 4**, recorded before the analysis runs*, Holm-corrected
+over exactly that count.
+
+**The price, accepted by the owner (#general msg 2625):** a fourth possible exploratory arm
+widens the correction for A1–A3, which have nothing to do with KTO. It is accepted because
+exploratory contrasts can never be promoted to the result, so what is lost is sensitivity in
+reporting which exploratory contrasts look individually notable — **not any part of the
+confirmatory verdict**, which §4.1 keeps as a family of one taking no adjustment.
+
+#### A4.10 Timing
+
+**This amendment's own stricter rule: it is adopted before the calibration artifact and its
+yield are observed.** Current §4.1 does not require this — it defines family size from the
+arms actually launched, recorded before the analysis — but a family size settled before any
+calibration yield exists cannot be argued about afterwards.
+
+#### A4.11 Spend
+
+Adds to §3.11: *one KTO arm — 1 epoch of KTO at 32 unpaired rows per optimizer step over the
+converted pair set, plus `L` dev looks × 258 greedy generations (`L` per §3.8).*
+
+**This amendment authorizes no spend.**
+
