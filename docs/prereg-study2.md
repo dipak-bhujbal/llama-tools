@@ -4,11 +4,29 @@
 govern and may not be changed afterwards. Sections marked `[PENDING]` are not yet
 committed and must be filled before the corresponding stage runs.
 
-**As of 2026-08-06 every section is `[FROZEN]`** — §0 and §1 before mining was designed, §2 on
-2026-08-05, §3 and §4 on 2026-08-06 — and all four amendment records are adopted. The document
-was completed **before any study-2 model output, evaluation result, probe score, mined pair,
-or yield number existed**, at $0 of model spend. Everything after this point is execution
+**As of 2026-08-07 every section is `[FROZEN]`** — §0 and §1 before mining was designed, §2 on
+2026-08-05, and §3 and §4 owner-adopted on 2026-08-06 and frozen on 2026-08-07 when this exact-
+content commit cleared the required review — and all four amendment records are adopted. The
+document was completed **before any study-2 model output, evaluation result, probe score, mined
+pair, or yield number existed**, at $0 of model spend. Everything after this point is execution
 against text that can no longer move without an amendment.
+
+**Freeze/review ordering.** When the owner authorizes adoption before the required exact-
+content review is complete, the adoption status may be recorded immediately, but the freeze
+attaches to the first exact content commit that clears that review. Until sign-off, correcting
+review findings completes the adoption package rather than amending operative text. After
+sign-off, every content change requires an amendment under the rule below. This keeps an
+unreviewed status-label commit from freezing defects that were already in review.
+
+**Audit note — premature freeze label, 2026-08-06.** Codex's cycle-2 review reported the §3.7
+scope defect and §3.9 fractional-to-integral inference at 13:51, before commit `f0e9f79`
+applied the `[FROZEN]` labels at approximately 13:54 without incorporating those findings.
+The stale §3.2 selection consequence was identified after that commit. No study-2 run or
+model call occurred, and `f0e9f79` never reached `origin`. The wording corrections in the
+first review-cleared exact-content commit complete the adoption under the ordering rule above;
+they do not create an amendment record. The 2026-08-07 freeze date is prospective in this
+candidate commit and becomes effective only at exact-content sign-off; if sign-off occurs on
+a later date, the date must be corrected before the freeze attaches.
 
 Governing rule: *if a threshold is not in this file before the run, it cannot be used to
 select results after.*
@@ -506,7 +524,7 @@ became a `no_call` ground truth. **That fallback is replaced by a refusal, never
 reclassification** — a row the miner cannot read is a stop condition, not a row it gets to
 reinterpret.
 
-## 3. Training arms `[FROZEN — adopted by the owner 2026-08-06, #general msg 2297]`
+## 3. Training arms `[FROZEN — owner-adopted 2026-08-06; exact-content review cleared 2026-08-07]`
 
 > **Adoption line.** Adopted by the owner on 2026-08-06 (#general msg 2297):
 >
@@ -599,10 +617,12 @@ answer rows, and refuse missing, duplicate, excluded, or extra ids.
 plan's 258 generations per look, but it deliberately gives up resolution versus all 1,052
 eligible items. At 10% discordance and §3.8's exact two-sided `α = 0.0025`, an observed
 258-item comparison with `m = 26` discordances needs at least a 21/5 split (net 16 = 6.20
-points) to separate a checkpoint from the leader; the full eligible set at `m = 105` needs
-69/36 (net 33 = 3.14 points). This is an illustrative exact rejection threshold, not a power
-guarantee. The consequence is intentional: smaller differences remain in §3.9's top set and
-are broken toward more optimizer steps rather than noise-ranked.
+points) for its recorded McNemar diagnostic to cross that display threshold; the full
+eligible set at `m = 105` needs 69/36 (net 33 = 3.14 points). These are illustrative exact
+rejection thresholds, not power guarantees, and after Decision A they govern neither kill nor
+selection. They document the subset's sensitivity cost and why the retired significance rule
+was too wide for tie detection. Actual selection uses §3.9's item rule: gaps of at most three
+items tie, while a gap of four or more lets accuracy win outright.
 
 **The whole parent category is spent.** The manifest and subset receipt both label
 `live_multiple` as `development_selection_only`. Because its subset selects checkpoints,
@@ -871,8 +891,9 @@ control** (ADR-007's lesson, retained).
 **Exact McNemar against the frozen baseline is still computed at every look and recorded** —
 `b`, `c`, and the p-value against `α_look` (§3.8) — as a **reported diagnostic**. It triggers
 no kill, and since Decision A (§3.9) **no McNemar comparison of any kind has authority over
-selection either**: the tie set is an absolute item cap. Every McNemar figure in this study is
-now a recorded number that governs nothing.
+selection either**: the tie set is an absolute item cap. Every **per-look McNemar diagnostic
+in §3** is therefore a recorded number that governs neither kill nor selection. This does not
+apply to §4's final-analysis McNemar tests, which govern the study's inferential verdicts.
 
 A killed arm keeps every artifact it produced, is reported as killed (§4.7), and is **not**
 silently replaced by another arm or another seed.
@@ -962,12 +983,12 @@ apart"**.
 It is also anchored to measured data rather than intuition, with the arithmetic stated
 exactly rather than rounded in our favour. Study 1's checkpoint-to-checkpoint spreads,
 recomputed from `eval/results/study1_bfcl_simple_generations.jsonl`, were **0.25 to 1.25
-points on 400 items**. Carried across to a 258-item subset that is **0.65 to 3.23 items** — so
-`K = 3` covers most of that range but **not all of it**: a 1.25-point analogue lands just
-above the cap and would win on merit rather than tie. That is stated plainly because the
-tempting version of this sentence ("past-like noise spreads all tie") is false by a quarter of
-an item, and a preregistration that rounds in its own favour at the boundary is worth less
-than one that names the boundary. At the cap, **4 items = 1.55 points wins outright**.
+points on 400 items**. Carried across to a 258-item subset, those effect sizes are **0.65 to
+3.23 item-equivalents**. An observed 258-item gap must be integral, so the 1.25-point endpoint
+has no exact realization there: it falls between a **3-item gap (1.16 points), which ties**,
+and a **4-item gap (1.55 points), which wins on merit**. The historical range motivates the
+location of the boundary but cannot decide which side a future observed count occupies; in
+particular, the preregistration makes no claim that every past-like spread must tie.
 
 `K = 5` was offered as an explicitly conservative alternative and is **not** taken: a wider
 band re-introduces the step-count bias this rule exists to remove, and the argument for
@@ -1068,7 +1089,7 @@ arm's inference cost. The cadence is the knob if the written estimate comes back
 the owner wants to spend — changed by amendment to §3.8 **before** the arm runs, never after
 seeing a curve.
 
-## 4. Final analysis `[FROZEN — adopted by the owner 2026-08-06, #general msg 2297]`
+## 4. Final analysis `[FROZEN — owner-adopted 2026-08-06; exact-content review cleared 2026-08-07]`
 
 > **Adoption line.** Adopted by the owner on 2026-08-06 (#general msg 2297), in the same
 > instruction that adopted §3: *"Adopt §3 and §4, publish Amendment 3, unblock the miner, and
