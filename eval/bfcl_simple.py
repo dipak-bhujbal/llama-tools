@@ -42,6 +42,7 @@ from pathlib import Path
 import torch
 from bfcl_category_config import SUPPORTED_CATEGORIES, resolve_category_paths
 from bfcl_scoring import preflight_key_names, score
+from dev_subset_gate import load_dev_subset_ids, restrict_to_dev_subset
 from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -434,6 +435,27 @@ def main() -> None:
     print(f"Loading BFCL prompts: {category_paths.questions}")
     prompts_raw = load_jsonl(category_paths.questions)
     gt_raw = load_jsonl(category_paths.answer_key)
+
+    if category_paths.is_development_subset:
+        # Only the pinned 258 are ever scored. Every kill line and eligibility
+        # test is denominated in items against exactly this set, so scoring the
+        # full 1,053-row parent — or any other subset — would silently move every
+        # threshold that referenced the frozen baseline (prereg §3.2, §3.3).
+        #
+        # Both sides are restricted, not just the questions: §3.2 requires the
+        # runner to match "the same 258 answer rows", and the id reconciliation
+        # below compares the two sets for equality.
+        if args.num_prompts is not None:
+            raise SystemExit(
+                "--num-prompts cannot be combined with the development set: the "
+                "subset is pinned at 258 items and a partial run is not comparable "
+                "to the frozen baseline"
+            )
+        prompts_raw, gt_raw = restrict_to_dev_subset(
+            prompts_raw, gt_raw, load_dev_subset_ids(REPO_ROOT)
+        )
+        print(f"Development subset gate: {len(prompts_raw)} pinned items")
+
     gt_by_id = {r["id"]: r["ground_truth"][0] for r in gt_raw}
     prompt_ids = {row["id"] for row in prompts_raw}
     if prompt_ids != set(gt_by_id):
