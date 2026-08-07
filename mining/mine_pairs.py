@@ -49,6 +49,8 @@ from mining.pool_strata import (
     stratum_of,
 )
 from mining.verifier import (
+    MISSING_CALL,
+    SPURIOUS_CALL,
     VERIFIER_VERSION,
     ParserDisagreementError,
     TargetUnreadableError,
@@ -100,6 +102,9 @@ BASE_MODEL_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
 MINER_SOURCE = Path("mining/mine_pairs.py")
 VERIFIER_SOURCE = Path("mining/verifier.py")
 VERIFIER_SELFTEST_RECEIPT = Path("mining/receipts/verifier_selftest.json")
+VERIFIER_SELFTEST_RECEIPT_SHA256 = (
+    "3e0f921e607fd112555c35aaa1cd9f16f54841cfed46ddda9c20066a0474cf7f"
+)
 
 # §2.1 required inputs (closes roadmap H1.1 — the owner supplies nothing further)
 SFT_ADAPTER_REPO = "centuriandip/llama-3.1-8b-tools-sft"
@@ -418,15 +423,88 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
     # Without this the rename itself can be lost on power failure, leaving the
     # old bytes behind a durable-looking write.
-    dir_fd = os.open(path.parent, os.O_RDONLY)
+    _fsync_directory(path.parent)
+
+
+def _digest_of(path: Path) -> str:
+    return _sha256((REPO_ROOT / path).read_bytes())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a directory-entry update durable, not merely atomic in memory."""
+    dir_fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
 
 
-def _digest_of(path: Path) -> str:
-    return _sha256((REPO_ROOT / path).read_bytes())
+def verify_selftest_receipt(report: Any) -> dict[str, Any]:
+    """Bind the gate that ran to the committed verifier and fixture bytes.
+
+    Merely recording the receipt's hash does not prove the running self-test used
+    what that receipt names. A verifier and fixture set can drift together and
+    still pass 1,600/1,600. This check refuses that coherent-but-unregistered
+    drift before generation.
+    """
+    payload = _verify_pin(
+        VERIFIER_SELFTEST_RECEIPT,
+        VERIFIER_SELFTEST_RECEIPT_SHA256,
+        "verifier self-test receipt",
+    )
+    receipt = json.loads(payload)
+
+    implementation = receipt.get("implementation", {})
+    implementation_path = Path(implementation.get("path", ""))
+    if implementation_path != VERIFIER_SOURCE:
+        raise MinerError(
+            f"self-test receipt names verifier {implementation_path}, not {VERIFIER_SOURCE}"
+        )
+    actual_implementation = _digest_of(VERIFIER_SOURCE)
+    if implementation.get("sha256") != actual_implementation:
+        raise MinerError(
+            "verifier implementation bytes do not match the committed self-test receipt"
+        )
+
+    fixture_evidence: list[dict[str, Any]] = []
+    for fixture in receipt.get("fixtures", []):
+        fixture_path = Path(fixture.get("path", ""))
+        resolved = REPO_ROOT / fixture_path
+        if not resolved.exists():
+            raise MinerError(f"self-test fixture is missing at {fixture_path}")
+        actual_sha = _sha256(resolved.read_bytes())
+        actual_rows = sum(1 for line in resolved.read_text().splitlines() if line.strip())
+        if fixture.get("sha256") != actual_sha or fixture.get("rows") != actual_rows:
+            raise MinerError(
+                f"self-test fixture {fixture_path} does not match the committed receipt"
+            )
+        fixture_evidence.append(
+            {"path": str(fixture_path), "sha256": actual_sha, "rows": actual_rows}
+        )
+
+    result_fields = {
+        "verifier_version": report.version,
+        "pairs": report.pairs,
+        "pairs_passed": report.pairs_passed,
+        "misses": report.misses,
+        "false_positives": report.false_positives,
+        "reason_mismatches": report.reason_mismatches,
+        "refusals": report.refusals,
+        "passed": report.passed,
+    }
+    differing = sorted(k for k, value in result_fields.items() if receipt.get(k) != value)
+    if differing:
+        raise MinerError(
+            "running verifier self-test disagrees with the committed receipt in "
+            f"fields: {differing}"
+        )
+
+    return {
+        "receipt_sha256": VERIFIER_SELFTEST_RECEIPT_SHA256,
+        "pairs": report.pairs,
+        "pairs_passed": report.pairs_passed,
+        "fixtures": fixture_evidence,
+    }
 
 
 def run_metadata(
@@ -436,6 +514,7 @@ def run_metadata(
     receipt: dict[str, Any],
     selftest_version: str,
     allocation: dict[str, int],
+    selftest_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     """The immutable identity of a mining run.
 
@@ -483,7 +562,7 @@ def run_metadata(
             "version": VERIFIER_VERSION,
             "selftest_version": selftest_version,
             "module_sha256": _digest_of(VERIFIER_SOURCE),
-            "selftest_receipt_sha256": _digest_of(VERIFIER_SELFTEST_RECEIPT),
+            "selftest": selftest_evidence,
         },
     }
 
@@ -505,6 +584,7 @@ def bind_run_metadata(out_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            _fsync_directory(path.parent)
             return metadata
 
     existing = json.loads(path.read_text())
@@ -518,6 +598,59 @@ def bind_run_metadata(out_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]
             f"evidence chains and never share a directory"
         )
     return existing
+
+
+@dataclass(frozen=True)
+class StagePreflight:
+    """Everything verified before a stage may sample or mutate its ledger."""
+
+    stage: str
+    prompts: list[Prompt]
+    survivor_counts: dict[str, int]
+    allocation: dict[str, int]
+    selected: list[Prompt]
+    metadata: dict[str, Any]
+
+
+def preflight_stage(stage: str) -> StagePreflight:
+    """Run the one production preflight used by mining and rollback alike."""
+    if stage not in STAGES:
+        raise MinerError(f"stage must be one of {sorted(STAGES)}, not {stage!r}")
+    n_prompts = STAGES[stage]
+
+    prompts, receipt = load_eligible_prompts()
+    survivor_counts = {
+        MULTI: sum(1 for p in prompts if p.stratum == MULTI),
+        SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
+    }
+
+    report = run_selftest()
+    if not report.passed:
+        raise MinerError(
+            f"verifier fixture self-test failed ({report.pairs_passed}/{report.pairs}); "
+            f"no prompt may be mined against a verifier that cannot clear its own gate"
+        )
+    selftest_evidence = verify_selftest_receipt(report)
+
+    allocation = allocate(n_prompts, survivor_counts)
+    selected = select_prompts(prompts, allocation)
+    metadata = run_metadata(
+        stage,
+        n_prompts,
+        selected,
+        receipt,
+        report.version,
+        allocation,
+        selftest_evidence,
+    )
+    return StagePreflight(
+        stage=stage,
+        prompts=prompts,
+        survivor_counts=survivor_counts,
+        allocation=allocation,
+        selected=selected,
+        metadata=metadata,
+    )
 
 
 def materialize_pair(outcome: PromptOutcome) -> dict[str, Any] | None:
@@ -700,10 +833,11 @@ def summarize(ledger: Ledger, survivor_counts: dict[str, int]) -> dict[str, Any]
 # floor and malformed-syntax cap are **measured and reported, never applied**.
 # Applying them would change which pairs materialize, therefore P_std, therefore
 # the §2.6 gate — using thresholds that are not in the frozen preregistration.
-# Reporting them costs nothing and answers, from the pilot's own data, whether
-# they would have mattered enough to be worth an amendment before calibration.
+# Computing them adds no model calls to an already-approved run; observing pilot
+# values still requires the separately estimated and owner-approved paid pilot.
 LENGTH_GAP_REFERENCE = 0.40
 MALFORMED_CAP_REFERENCE = 0.05
+LENGTH_GAP_EXEMPT_REASONS = frozenset({MISSING_CALL, SPURIOUS_CALL})
 
 
 def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -711,8 +845,11 @@ def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
     if not pairs:
         return {
             "pairs": 0,
+            "length_gap_reference": LENGTH_GAP_REFERENCE,
             "length_gap_over_reference": 0,
+            "length_gap_exempt_call_vs_text": 0,
             "length_gap_share": None,
+            "malformed_cap_reference": MALFORMED_CAP_REFERENCE,
             "malformed_rejected": 0,
             "malformed_share": None,
             "would_either_cap_have_bound": False,
@@ -720,12 +857,20 @@ def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
         }
 
     over_gap = 0
+    gap_exempt = 0
     malformed = 0
     for pair in pairs:
         chosen, rejected = pair["chosen"], pair["rejected"]
         longest = max(len(chosen), len(rejected))
-        if longest and abs(len(chosen) - len(rejected)) / longest > LENGTH_GAP_REFERENCE:
-            over_gap += 1
+        over_reference = (
+            bool(longest)
+            and abs(len(chosen) - len(rejected)) / longest > LENGTH_GAP_REFERENCE
+        )
+        if over_reference:
+            if pair.get("rejected_reason") in LENGTH_GAP_EXEMPT_REASONS:
+                gap_exempt += 1
+            else:
+                over_gap += 1
         if extract_calls(rejected)[0] == "unreadable":
             malformed += 1
 
@@ -735,6 +880,7 @@ def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "pairs": len(pairs),
         "length_gap_reference": LENGTH_GAP_REFERENCE,
         "length_gap_over_reference": over_gap,
+        "length_gap_exempt_call_vs_text": gap_exempt,
         "length_gap_share": gap_share,
         "malformed_cap_reference": MALFORMED_CAP_REFERENCE,
         "malformed_rejected": malformed,
@@ -830,25 +976,7 @@ def run(
     pinned digests — evidence asserting a preflight that never ran. Tests
     substitute the loader itself, so the production path has one route in.
     """
-    if stage not in STAGES:
-        raise MinerError(f"stage must be one of {sorted(STAGES)}, not {stage!r}")
-    n_prompts = STAGES[stage]
-
-    prompts, receipt = load_eligible_prompts()
-    survivor_counts = {
-        MULTI: sum(1 for p in prompts if p.stratum == MULTI),
-        SINGLE: sum(1 for p in prompts if p.stratum == SINGLE),
-    }
-
-    # §5.1's last guardrail: the fixture gate runs before every mining session.
-    # Binding its version into the run identity is what makes "it passed" a
-    # property of this artifact rather than of somebody's shell history.
-    report = run_selftest()
-    if not report.passed:
-        raise MinerError(
-            f"verifier fixture self-test failed ({report.pairs_passed}/{report.pairs}); "
-            f"no prompt may be mined against a verifier that cannot clear its own gate"
-        )
+    preflight = preflight_stage(stage)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -860,16 +988,11 @@ def run(
             f"Move the directory aside deliberately; this is evidence, not scratch space"
         )
 
-    allocation = allocate(n_prompts, survivor_counts)
-    selected = select_prompts(prompts, allocation)
-    bind_run_metadata(
-        out_dir,
-        run_metadata(stage, n_prompts, selected, receipt, report.version, allocation),
-    )
+    bind_run_metadata(out_dir, preflight.metadata)
 
     ledger = Ledger(out_dir / "ledger.jsonl")
     already = ledger.processed_ids()
-    for prompt in selected:
+    for prompt in preflight.selected:
         if prompt.prompt_id in already:
             continue  # resume: already paid for, never re-sampled
         outcome = mine_prompt(prompt, generate_fn)
@@ -892,7 +1015,44 @@ def run(
             }
         )
 
-    return write_derivatives(out_dir, ledger, survivor_counts, stage, allocation)
+    return write_derivatives(
+        out_dir,
+        ledger,
+        preflight.survivor_counts,
+        stage,
+        preflight.allocation,
+    )
+
+
+def redo_run(out_dir: Path, count: int) -> tuple[int, dict[str, Any]]:
+    """Tombstone work only after re-verifying the run's complete identity."""
+    out_dir = Path(out_dir)
+    metadata_path = out_dir / RUN_METADATA_NAME
+    if not metadata_path.exists():
+        raise MinerError(
+            f"{metadata_path} is missing; refusing to roll back a run whose "
+            "identity cannot be established"
+        )
+    metadata = json.loads(metadata_path.read_text())
+    stage = metadata.get("stage")
+    if stage not in STAGES:
+        raise MinerError(f"{metadata_path} carries no recognised stage")
+
+    # This compares every pinned input, implementation/fixture digest, selected
+    # id/order, and allocation before the irreversible append-only tombstone.
+    preflight = preflight_stage(stage)
+    bind_run_metadata(out_dir, preflight.metadata)
+
+    ledger = Ledger(out_dir / "ledger.jsonl")
+    tombstoned = ledger.redo_last(count)
+    summary = write_derivatives(
+        out_dir,
+        ledger,
+        preflight.survivor_counts,
+        stage,
+        preflight.allocation,
+    )
+    return tombstoned, summary
 
 
 def main() -> None:
@@ -915,25 +1075,10 @@ def main() -> None:
 
     if args.redo_last is not None:
         out_dir = Path(args.out_dir)
-        # Everything that can fail happens BEFORE the tombstone. A tombstone is
-        # permanent; a failed preflight after one leaves a changed ledger with
-        # derivatives that still describe the rolled-back state.
-        metadata_path = out_dir / RUN_METADATA_NAME
-        if not metadata_path.exists():
-            raise SystemExit(f"{metadata_path} is missing; refusing to roll back a run "
-                             f"whose identity cannot be established")
-        metadata = json.loads(metadata_path.read_text())
-        if metadata.get("stage") not in STAGES:
-            raise SystemExit(f"{metadata_path} carries no recognised stage")
-        _prompts, receipt = load_eligible_prompts()
-        counts = {
-            MULTI: receipt["survivors"]["multi"],
-            SINGLE: receipt["survivors"]["single"],
-        }
-
-        ledger = Ledger(out_dir / "ledger.jsonl")
-        tombstoned = ledger.redo_last(args.redo_last)
-        summary = write_derivatives(out_dir, ledger, counts, metadata["stage"])
+        try:
+            tombstoned, summary = redo_run(out_dir, args.redo_last)
+        except MinerError as exc:
+            raise SystemExit(str(exc)) from exc
         print(
             f"tombstoned {tombstoned} records; re-materialized "
             f"{summary['pairs_total']} pairs from {summary['prompts_mined_total']} prompts"

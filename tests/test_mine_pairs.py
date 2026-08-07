@@ -453,7 +453,9 @@ def test_run_metadata_pins_every_input_that_could_move(tmp_path, monkeypatch) ->
     assert meta["adapter"]["revision"] == mine_pairs.SFT_ADAPTER_REVISION
     assert meta["verifier"]["selftest_version"] == mine_pairs.VERIFIER_VERSION
     assert meta["verifier"]["module_sha256"], "a version string cannot detect code drift"
-    assert meta["verifier"]["selftest_receipt_sha256"]
+    assert meta["verifier"]["selftest"]["receipt_sha256"]
+    assert meta["verifier"]["selftest"]["pairs_passed"] == 1600
+    assert len(meta["verifier"]["selftest"]["fixtures"]) == 2
     assert meta["miner_sha256"]
     assert meta["base_model"]["revision"] == mine_pairs.BASE_MODEL_REVISION
     assert meta["allocation"] == {MULTI: 1, SINGLE: 1}
@@ -632,6 +634,22 @@ def test_diagnostics_ride_along_without_changing_yield(tmp_path, monkeypatch) ->
     assert written["guardrail_diagnostics"]["length_gap_reference"] == 0.40
 
 
+def test_length_gap_diagnostic_honours_the_call_vs_text_exemption() -> None:
+    pairs = [
+        {
+            "chosen": GOOD * 20,
+            "rejected": "plain prose",
+            "rejected_reason": mine_pairs.MISSING_CALL,
+        }
+    ]
+
+    diagnostics = mine_pairs.pair_diagnostics(pairs)
+
+    assert diagnostics["length_gap_over_reference"] == 0
+    assert diagnostics["length_gap_exempt_call_vs_text"] == 1
+    assert diagnostics["would_either_cap_have_bound"] is False
+
+
 # --- Review cycle 2 ----------------------------------------------------------
 
 
@@ -648,6 +666,23 @@ def test_run_has_no_seam_that_skips_the_pinned_preflight(monkeypatch, tmp_path) 
         mine_pairs.run(
             out_dir=tmp_path / "out", stage="pilot", generate_fn=_generator([GOOD] * 8)
         )
+
+
+def test_the_committed_selftest_receipt_is_verified_before_generation(
+    monkeypatch, tmp_path
+) -> None:
+    _install_fake_pool(monkeypatch, [_prompt("m1", MULTI), _prompt("s1", SINGLE)])
+    monkeypatch.setattr(mine_pairs, "VERIFIER_SELFTEST_RECEIPT_SHA256", "0" * 64)
+    called: list[str] = []
+
+    def generate_fn(prompt, n):
+        called.append(prompt.prompt_id)
+        return [GOOD] * 8
+
+    with pytest.raises(MinerError, match="verifier self-test receipt sha256"):
+        mine_pairs.run(tmp_path / "out", "pilot", generate_fn)
+
+    assert called == []
 
 
 def test_the_stage_fixes_the_prompt_count(monkeypatch, tmp_path) -> None:
@@ -743,3 +778,19 @@ def test_a_rollback_does_not_delete_the_recorded_allocation(tmp_path, monkeypatc
 
     written = json.loads((out / "mining_summary.json").read_text())
     assert written["allocation"] == {MULTI: 1, SINGLE: 1}, "read back from run.json"
+
+
+def test_redo_refuses_identity_drift_before_appending_a_tombstone(
+    tmp_path, monkeypatch
+) -> None:
+    out = tmp_path / "out"
+    _run(out, monkeypatch)
+    before = Ledger(out / "ledger.jsonl").records()
+
+    # Simulate invoking rollback under different miner bytes. The immutable run
+    # identity must be checked in full before redo's permanent control record.
+    monkeypatch.setattr(mine_pairs, "MINER_SOURCE", mine_pairs.VERIFIER_SOURCE)
+    with pytest.raises(MinerError, match="different run"):
+        mine_pairs.redo_run(out, 1)
+
+    assert Ledger(out / "ledger.jsonl").records() == before
