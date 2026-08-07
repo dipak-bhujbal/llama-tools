@@ -1,9 +1,14 @@
-# Amendment 5 — wide KTO arm — **CANDIDATE DRAFT, NOT ADOPTED**
+# Amendment 5 — wide KTO arm — **SUPERSEDED BY THE PREREGISTRATION**
 
-**Status: candidate draft, cycle 5 — owner's Option-1 rider applied.** Not in
-`docs/prereg-study2.md`, authorizes
-nothing, and no arm may run on it. Would be folded as **record 6 / numbered
-Amendment 5** only after review and explicit owner adoption.
+> **This draft is no longer authoritative.** Amendment 5 was adopted by the owner
+> (#general msg 2655 — Option 1 with the family-size rider) on reviewed candidate
+> `a4b1b39`, and is now **folded into `docs/prereg-study2.md` as record 6 /
+> Amendment 5**. **Read it there.**
+>
+> Kept only as drafting history — five review cycles and one role reversal. Note
+> the operative text carries **only** threshold activation; this file still shows
+> both activation options as they were offered for the decision. **If the two
+> disagree, the preregistration governs and this file is the one that is wrong.**
 
 **Relationship to Amendment 4.** A4-kto trains on the materialized pairs only, so
 that A0-versus-KTO compares objectives. **This arm deliberately does the opposite**
