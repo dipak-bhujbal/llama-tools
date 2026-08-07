@@ -110,9 +110,10 @@ def test_adapter_metadata_is_resolved_before_weights(monkeypatch) -> None:
 
     class Config:
         @classmethod
-        def from_pretrained(cls, repo, subfolder):
+        def from_pretrained(cls, repo, subfolder, revision):
             assert repo == "centuriandip/llama-3.1-8b-tools-sft"
             assert subfolder == "adapter"
+            assert revision == "b6f4da479f8c6fc044ee8b802a92f47780f970c5"
             return expected
 
     monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(PeftConfig=Config))

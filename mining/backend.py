@@ -214,7 +214,9 @@ def preflight_adapter() -> Any:
 
     try:
         return PeftConfig.from_pretrained(
-            SFT_ADAPTER_REPO, subfolder=SFT_ADAPTER_SUBFOLDER.rstrip("/")
+            SFT_ADAPTER_REPO,
+            subfolder=SFT_ADAPTER_SUBFOLDER.rstrip("/"),
+            revision=SFT_ADAPTER_REVISION,
         )
     except Exception as exc:
         raise BackendError(
