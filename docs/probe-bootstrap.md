@@ -1,5 +1,10 @@
 # Probe bootstrap — operator guide
 
+> **Scope: the §0 endpoint qualification probe only.** Approved ceiling **`$0.45`**
+> (#general msgs 2691–2697). **Calibration is NOT approved** and must not be run from this
+> guide; it requires its own estimate, agent agreement and owner approval, after the probe's
+> artifacts and the A1.2 stop-and-consult review.
+
 Operator guide for `scripts/bootstrap_pod.sh`, which turns a bare RunPod instance into a
 launch-ready checkout of an **exact reviewed commit**.
 
@@ -12,12 +17,26 @@ implemented and tested there is a bug in this document.
 
 There is **no unbilled setup phase.** Cloning, creating the venv, installing packages,
 downloading 16 GB of weights and every preflight check are all billed pod time, drawn from
-the **same `$2.50` lifecycle budget** as generation itself.
+the **same `$0.45` lifecycle budget** as generation itself.
 
 An earlier draft of this guide claimed "every step is `$0` until launch." That was wrong,
 and it mattered: it implied the provider cap could be configured late.
 
 **Consequence: provider auto-termination must already be set before the pod is running.**
+
+**Set it at creation — it cannot be added afterwards.** `runpodctl pod update` does not
+accept `--terminate-after`, so a browser-created pod cannot be retrofitted:
+
+```bash
+# ILLUSTRATION — substitute the deadline derived from the approved cap and the
+# console's actual rate. A literal date here would go stale.
+runpodctl pod create --terminate-after '<APPROVED_UTC_DEADLINE>' ...
+```
+
+`--terminate-after` takes an **absolute UTC datetime**; `launch_probe.sh` takes
+`--usd-cap` and `--usd-per-hour` and derives its own wall-clock `timeout` from them. **They
+are two independent bounds in different units** — the provider's survives this machine
+sleeping, the script's does not.
 It is Step 0 of the script, and the script refuses to proceed without an attestation of it.
 
 ## Transfer method: git bundle — decided, not open
@@ -56,12 +75,14 @@ so no unverified object is ever trusted.
 ## Owner: set the provider cap ⚠️ before the pod runs
 
 A process that has been SIGKILLed cannot stop its own billing, and approval to spend at
-most `$2.50` authorises an amount rather than enforcing one. Only the provider-side deadline
+most `$0.45` authorises an amount rather than enforcing one. Only the provider-side deadline
 enforces it.
 
 1. Record the **actual hourly rate** from the RunPod console and the **billing start time**.
-2. Enable **auto-termination** at a deadline whose maximum charge is **≤ `$2.50`**, keeping
-   a reserve for persistence and shutdown. At `$0.44/hr` the affordable ceiling is 5 h 40 m,
+2. Enable **auto-termination** at a deadline whose maximum charge is **≤ `$0.45`**, keeping
+   a reserve for persistence and shutdown. **Derive the ceiling from the rate the console
+   actually shows for the pod you are creating** — do not carry a remembered rate. As a
+   worked example only, at `$0.57/hr` the affordable ceiling is about 45 minutes,
    so set **≤ 5 h 00 m**.
 3. Save proof (a console screenshot) into the persistent volume.
 
@@ -123,7 +144,7 @@ cd llama-tools
 tmux new-session -d -s probe \
   "bash scripts/launch_probe.sh \
      --commit <REVIEWED_40_CHAR_SHA> \
-     --usd-cap 2.50 \
+     --usd-cap 0.45 \
      --usd-per-hour <ACTUAL_RATE> \
      --out-root /workspace/persist/study2 2>&1 | tee /workspace/persist/study2/probe.log"
 ```
