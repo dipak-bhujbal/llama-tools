@@ -195,7 +195,7 @@ def test_dry_run_orders_acquire_before_verify_before_first_generation() -> None:
 # (a `--usd-cap 2.50` example outlived a `$0.45` approval by 5.5x once already).
 # ---------------------------------------------------------------------------
 
-_MAX_SECONDS_RE = re.compile(r"per_command_max_seconds=(\d+)")
+_TIMEOUT_RE = re.compile(r"timeout --kill-after=30 (\d+)")
 
 
 def test_max_seconds_is_required() -> None:
@@ -206,15 +206,32 @@ def test_max_seconds_is_required() -> None:
     assert "--max-seconds" in combined_output(result)
 
 
-def test_budget_is_printed_and_split_across_both_paid_commands() -> None:
+def test_both_paid_commands_share_one_deadline_rather_than_splitting_it() -> None:
+    """The two commands carry very different workloads.
+
+    category=multiple is 200 prompts x 2 candidates = 400 generations;
+    category=simple_python is 400 x 2 = 800. An even split would hand the
+    command with twice the work the same allowance, so the probe would be
+    killed mid-simple_python having already paid for it. Each command instead
+    gets what is left of one shared deadline.
+    """
     result = run_script(full_args(extra=["--dry-run"]))
     output = combined_output(result)
     assert result.returncode == 0, output
-    match = _MAX_SECONDS_RE.search(output)
-    assert match, output
-    # Two paid commands share one ceiling: half each, so the total the probe
-    # can spend is the number supplied, not that number paid twice over.
-    assert int(match.group(1)) == 900, output
+    budgets = [int(x) for x in _TIMEOUT_RE.findall(output)]
+    assert len(budgets) == 2, output
+    # Neither is a half. Both are the full remaining span, because dry-run
+    # spends no time between them.
+    assert budgets == [1800, 1800], output
+    assert "share ONE deadline" in output
+
+
+def test_the_deadline_is_absolute_and_printed_before_anything_can_spend() -> None:
+    result = run_script(full_args(extra=["--dry-run"]))
+    output = combined_output(result)
+    assert re.search(r"deadline_epoch=\d{10}", output), output
+    # Printed before the first paid command is even announced.
+    assert output.index("deadline_epoch=") < output.index("--category multiple"), output
 
 
 def test_zero_negative_or_non_integer_max_seconds_is_rejected() -> None:
@@ -226,22 +243,31 @@ def test_zero_negative_or_non_integer_max_seconds_is_rejected() -> None:
         assert "--max-seconds" in combined_output(result), bad
 
 
-def test_max_seconds_above_the_hard_limit_is_rejected() -> None:
-    """The backstop catches a mistyped argument, e.g. a trailing extra zero."""
+def test_no_wall_clock_ceiling_is_hardcoded_in_the_script() -> None:
+    """A large --max-seconds is accepted: the script has no opinion on scale.
+
+    A built-in ceiling would be a policy claim in reusable source ("longer than
+    any approved probe"), which is the same staleness failure money was removed
+    for. The provider deadline and the externally derived remaining duration
+    are the authoritative bounds.
+    """
     result = run_script(
-        full_args(overrides={"--max-seconds": "18000"}, extra=["--dry-run"])
+        full_args(overrides={"--max-seconds": "999999"}, extra=["--dry-run"])
     )
-    assert result.returncode != 0
-    assert "--max-seconds" in combined_output(result)
+    assert result.returncode == 0, combined_output(result)
+    source = SCRIPT.read_text()
+    assert "HARD_LIMIT" not in source
 
 
 def test_probe_shell_sources_carry_no_monetary_literals() -> None:
     """Money is a per-run approval; it may live in docs, never in the source.
 
     Enforced as a test rather than a convention because the failure mode is
-    silent: a stale dollar figure in the source keeps being *mechanically
-    enforced* long after the approval it encoded was superseded, and every
-    downstream artifact still looks correct.
+    silent: a stale figure in the source keeps being *mechanically enforced*
+    long after the approval it encoded was superseded, and every downstream
+    artifact still looks correct. The check is written as an invariant with no
+    amount named — quoting the superseded or the current figure here would
+    reintroduce, in the test suite, the duplicate source of truth this removes.
 
     `bootstrap_pod.sh` is covered too — it does not spend directly, but it is
     where the operator reads what the ceiling is before setting the provider

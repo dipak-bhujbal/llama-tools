@@ -17,7 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "bootstrap_pod.sh"
 
 VALID_SHA = "7bb20ee8314e70782d03ebe48d02c8d8fd82dd03"
-VALID_ATTESTATION = "2026-08-04T23:00:00Z@0.44usd/hr"
+# Symbolic on purpose. The gate checks the *shape* `<ISO8601-Z>@<rate>` — it
+# cannot verify a rate from inside the pod, and a real-looking number here
+# would be a second place an approved figure lives, which is how a superseded
+# one stayed mechanically enforced before.
+VALID_ATTESTATION = "2026-08-04T23:00:00Z@RATE_FROM_CONSOLE"
 
 REQUIRED = {
     "--bundle": "/tmp/llama-tools.bundle",
@@ -65,7 +69,7 @@ def test_commit_must_be_full_hex_sha(bad_sha: str) -> None:
 
 @pytest.mark.parametrize(
     "bad_attestation",
-    ["sometime", "yes", "2026-08-04T23:00:00Z", "@0.44usd/hr", "later@"],
+    ["sometime", "yes", "2026-08-04T23:00:00Z", "@RATE_FROM_CONSOLE", "later@"],
 )
 def test_provider_cap_attestation_must_be_wellformed(bad_attestation: str) -> None:
     """The provider deadline is the only thing that actually bounds vendor

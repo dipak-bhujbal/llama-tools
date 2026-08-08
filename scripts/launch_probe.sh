@@ -72,9 +72,9 @@ readonly REPO_ROOT
 readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
 
 # The probe runs two paid generation commands (category=multiple and
-# category=simple_python) sharing one wall-clock budget. Dividing the ceiling
-# across both is what makes --max-seconds bound the whole probe
-# on *total* spend for the probe, not a cap that could be paid twice over.
+# category=simple_python) under ONE shared deadline. Used for reporting only —
+# the bound is the deadline, not a per-command quotient, because the two
+# commands carry very different workloads (400 vs 800 generations).
 readonly NUM_PAID_COMMANDS=2
 
 usage() {
@@ -88,14 +88,23 @@ Required:
   --out-root <dir>        Root directory under which the two probe categories'
                           --out-dir subdirectories are written.
 
-  --max-seconds <int>     Total wall-clock ceiling in seconds for the whole
-                          probe, split evenly across the two paid commands.
-                          Derive it OUTSIDE this script from the approved
-                          ceiling and the pod's live rate: this script knows
-                          neither, deliberately. A per-run approval is not a
-                          property of the source. Must be a positive integer,
-                          at most MAX_SECONDS_HARD_LIMIT (a mistyped-argument
-                          backstop, not a budget).
+  --max-seconds <int>     Wall-clock ceiling in seconds for the whole probe.
+                          Stamped once into ONE absolute deadline that both
+                          paid commands share; each gets whatever is left when
+                          it starts, so the sequence is bounded rather than
+                          each command separately. Must be a positive integer.
+
+                          Derive it OUTSIDE this script, IMMEDIATELY BEFORE
+                          launch, from the time actually left until the
+                          provider deadline:
+
+                            provider_termination_epoch - now - shutdown_reserve
+
+                          Not from the approved ceiling and rate: bootstrap
+                          already spent billed time, so re-deriving from the
+                          full ceiling would grant that time a second time.
+                          This script knows neither the ceiling nor the rate,
+                          deliberately, and carries no ceiling of its own.
 
 Optional:
   --dry-run               Print every command that would run, in order, and
@@ -192,38 +201,45 @@ if ! [[ "${max_seconds_override}" =~ ^[0-9]+$ ]] || [[ "${max_seconds_override}"
 fi
 
 # ---------------------------------------------------------------------------
-# Blocker 3: bound every paid command by wall-clock, and print the bound BEFORE
-# anything that can spend runs. The bound arrives as --max-seconds; this script
-# does not compute it from money, because a dollar ceiling is a per-run approval
-# rather than a property of the source. MAX_SECONDS_HARD_LIMIT is a sanity
-# backstop against a mistyped argument, not a budget.
+# Blocker 3: bound the whole paid sequence by ONE absolute deadline, stamped
+# once here and never reset.
+#
+# --max-seconds arrives already derived, immediately before launch, from the
+# time actually remaining until the provider deadline. This script does not
+# compute it from money: a monetary ceiling is a per-run approval, not a
+# property of reusable source. Nor does it carry a sanity ceiling of its own —
+# a number here claiming "longer than any approved probe" is exactly the kind
+# of policy claim that goes stale in source. The authoritative bounds are the
+# provider deadline and the externally derived remaining duration.
+#
+# A SHARED DEADLINE, NOT A PER-COMMAND BUDGET. An earlier version split
+# --max-seconds evenly across the two paid commands, which is wrong for this
+# workload: category=multiple is 200 prompts x 2 candidates = 400 generations,
+# category=simple_python is 400 x 2 = 800. An even split hands the command with
+# twice the work the same allowance, so the probe would reliably be killed
+# mid-simple_python having already paid for it. Each command instead gets
+# whatever is left of the shared deadline, so slack from a fast first command
+# flows to the second and the sequence as a whole is what is bounded.
 # ---------------------------------------------------------------------------
-readonly MAX_SECONDS_HARD_LIMIT=7200
-
-if [[ "${max_seconds_override}" -gt "${MAX_SECONDS_HARD_LIMIT}" ]]; then
-  echo "ERROR: --max-seconds ${max_seconds_override} exceeds the ${MAX_SECONDS_HARD_LIMIT}s" >&2
-  echo "       sanity limit. That is longer than any approved probe, and is far" >&2
-  echo "       more likely a mistyped argument than an intention." >&2
-  exit "${EXIT_USAGE}"
-fi
-
 total_max_seconds="${max_seconds_override}"
-echo "WALL-CLOCK BUDGET: ${total_max_seconds}s total across ${NUM_PAID_COMMANDS} paid commands"
-echo "NOTE: this script enforces wall-clock only. The monetary ceiling and the"
-echo "      provider-side auto-termination are enforced outside it."
-per_command_max_seconds=$(( total_max_seconds / NUM_PAID_COMMANDS ))
+deadline_epoch=$(( $(date +%s) + total_max_seconds ))
+readonly total_max_seconds deadline_epoch
 
-if [[ "${per_command_max_seconds}" -le 0 ]]; then
-  echo "ERROR: derived per-command wall-clock budget is ${per_command_max_seconds}s (<=0)." >&2
-  echo "       total_max_seconds=${total_max_seconds}" >&2
-  echo "       Pass a larger --max-seconds." >&2
-  exit "${EXIT_USAGE}"
-fi
+# Seconds left before the shared deadline. Monotonically shrinking across the
+# run by construction — there is no path that extends it.
+remaining_seconds() {
+  local now
+  now=$(date +%s)
+  echo $(( deadline_epoch - now ))
+}
 
 echo "====================================================================="
-echo "BUDGET: wall-clock only; paid_commands=${NUM_PAID_COMMANDS}"
-echo "BUDGET: total_max_seconds=${total_max_seconds} per_command_max_seconds=${per_command_max_seconds}"
-echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours total wall-clock ceiling)"
+echo "BUDGET: wall-clock only; ${NUM_PAID_COMMANDS} paid commands share ONE deadline"
+echo "BUDGET: total_max_seconds=${total_max_seconds} deadline_epoch=${deadline_epoch}"
+echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours from now, absolute)"
+echo "NOTE: this script enforces wall-clock only. The monetary ceiling and the"
+echo "      provider-side auto-termination are enforced outside it, and the"
+echo "      provider deadline is the bound that survives this process dying."
 echo "====================================================================="
 
 # ---------------------------------------------------------------------------
@@ -338,15 +354,30 @@ gen_simple_python_cmd=(
   --out-dir "${out_root}/study2_probe_simple_python"
 )
 
-# run_generation wraps a paid command in `timeout` so the derived wall-clock
-# budget (Blocker 3) is mechanically enforced rather than just documented.
+# run_generation wraps a paid command in `timeout`, bounded by whatever is left
+# of the shared deadline at the moment it starts — never by a fresh allowance.
 # --kill-after guarantees a SIGKILL follows if the process ignores SIGTERM
-# (e.g. mid CUDA-context teardown) — a timeout that doesn't actually stop
-# the meter is not a cap.
+# (e.g. mid CUDA-context teardown) — a timeout that doesn't actually stop the
+# meter is not a bound.
+#
+# The remaining time is checked BEFORE spending, not after: if the deadline has
+# already passed, launching would buy generation that is certain to be killed
+# and is billed anyway.
 run_generation() {
   local label="$1"
   shift
-  announce "${timeout_bin}" --kill-after=30 "${per_command_max_seconds}" "$@"
+  local budget
+  budget=$(remaining_seconds)
+
+  if [[ "${budget}" -le 0 ]]; then
+    echo "ERROR: the shared wall-clock deadline passed before ${label} started" >&2
+    echo "       (${budget}s remaining). Refusing to launch: this generation" >&2
+    echo "       would be billed and then killed. Re-derive --max-seconds from" >&2
+    echo "       the time left until the provider deadline and re-run." >&2
+    exit "${EXIT_GENERATION_FAILED}"
+  fi
+
+  announce "${timeout_bin}" --kill-after=30 "${budget}" "$@"
   if [[ "${dry_run}" -eq 1 ]]; then
     return 0
   fi
@@ -356,15 +387,15 @@ run_generation() {
     exit "${EXIT_USAGE}"
   fi
 
-  echo "---- launching paid generation: ${label} (budget ${per_command_max_seconds}s) ----"
+  echo "---- launching paid generation: ${label} (${budget}s left of shared deadline) ----"
   set +e
-  "${timeout_bin}" --kill-after=30 "${per_command_max_seconds}" "$@"
+  "${timeout_bin}" --kill-after=30 "${budget}" "$@"
   local status=$?
   set -e
   if [[ "${status}" -eq 124 ]]; then
-    echo "ERROR: ${label} hit the ${per_command_max_seconds}s wall-clock budget and was killed." >&2
-    echo "       This is the wall-clock bound doing its job, not a crash. Aborting remaining" >&2
-    echo "       steps rather than spending further." >&2
+    echo "ERROR: ${label} exhausted the shared wall-clock deadline and was killed" >&2
+    echo "       after ${budget}s. This is the bound doing its job, not a crash." >&2
+    echo "       Aborting remaining steps rather than spending further." >&2
     exit "${EXIT_GENERATION_FAILED}"
   elif [[ "${status}" -ne 0 ]]; then
     echo "ERROR: ${label} exited with status ${status}" >&2
