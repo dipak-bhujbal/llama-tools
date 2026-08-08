@@ -794,3 +794,181 @@ def test_redo_refuses_identity_drift_before_appending_a_tombstone(
         mine_pairs.redo_run(out, 1)
 
     assert Ledger(out / "ledger.jsonl").records() == before
+
+
+# --- Amendment 5: activation and family size resolved at calibration time ----
+
+
+def test_a0_planned_steps_uses_the_frozen_cellwise_split() -> None:
+    """§3.4 splits 90/10 within every non-empty cell; §3.11 states the train count
+    exactly. The cell key for a 3A arm is the pair's rejected_reason."""
+    pairs = (
+        [{"rejected_reason": "wrong_args"}] * 16 + [{"rejected_reason": "wrong_tool"}] * 2
+    )
+
+    r = mine_pairs.a0_planned_optimizer_steps(pairs)
+
+    # wrong_args: eval = max(1, ceil(1.6)) = 2 -> train 14
+    # wrong_tool: eval = max(1, ceil(0.2)) = 1 -> train 1
+    assert r["cells"]["wrong_args"] == {"n": 16, "train": 14, "eval": 2}
+    assert r["cells"]["wrong_tool"] == {"n": 2, "train": 1, "eval": 1}
+    assert r["A0_train_pairs"] == 15
+    assert r["A0_planned_optimizer_steps"] == 1
+
+
+def test_a_thin_cell_stops_the_run_rather_than_sending_it_all_to_train() -> None:
+    """§3.4: every non-empty cell must place a row on each side, so n_cell >= 2 is
+    required; a thinner cell stops the run and is never merged, dropped, or sent
+    entirely to train."""
+    with pytest.raises(MinerError, match="fewer than 2 pairs"):
+        mine_pairs.a0_planned_optimizer_steps([{"rejected_reason": "wrong_tool"}])
+
+
+def test_an_unrecognised_rejection_reason_fails_closed() -> None:
+    """§3.4(b): every 3A row carries exactly one error_type. Inventing an
+    `unknown` cell would be the reclassification §2.11 forbids."""
+    with pytest.raises(MinerError, match="is not one of"):
+        mine_pairs.a0_planned_optimizer_steps(
+            [{"rejected_reason": None}, {"rejected_reason": None}]
+        )
+
+
+def test_calibration_records_activation_and_family_size(tmp_path, monkeypatch) -> None:
+    """A5.5/A5.6: both must be in the artifact, not derived by hand afterwards."""
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(2)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(2)
+    ]
+    _install_fake_pool(monkeypatch, prompts, "calibration", 4)
+    out = tmp_path / "cal"
+    summary = mine_pairs.run(
+        out_dir=out, stage="calibration", generate_fn=_generator([GOOD] * 4 + [BAD] * 4)
+    )
+
+    # Operative fields at top level, and the branch is PROVEN not assumed:
+    # all 4 prompts yield pairs, so P_std = 10000 >= 1000.
+    assert summary["P_std"] >= 1000
+    assert summary["A0_planned_optimizer_steps"] < 250
+    assert summary["A5_kto_wide_activates"] is True
+    assert summary["family_size"] == 5
+    assert "P_std >= 1000" in summary["A5_activation_reason"]
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["family_size"] == 5 and written["A0_train_pairs"] == summary["A0_train_pairs"]
+
+
+def test_a_pilot_emits_no_amendment5_block(tmp_path, monkeypatch) -> None:
+    """The fields belong to the calibration artifact; a pilot decides nothing."""
+    summary = _run(tmp_path / "out", monkeypatch)
+    assert "amendment5" not in summary
+
+
+def test_step_threshold_boundary_is_strict() -> None:
+    """`< 250`, not `<=`. Exercised through the real split planner: find the
+    smallest cell size giving 250 steps, and check the one below it gives 249."""
+
+    def steps_for(n: int) -> int:
+        return mine_pairs.a0_planned_optimizer_steps(
+            [{"rejected_reason": "wrong_args"}] * n
+        )["A0_planned_optimizer_steps"]
+
+    n = next(k for k in range(2, 6000) if steps_for(k) >= 250)
+    assert steps_for(n) == 250
+    assert steps_for(n - 1) == 249
+    assert (steps_for(n - 1) < mine_pairs.A5_ACTIVATION_STEP_THRESHOLD) is True
+    assert (steps_for(n) < mine_pairs.A5_ACTIVATION_STEP_THRESHOLD) is False
+
+
+def test_the_production_resolver_at_every_gate_boundary() -> None:
+    """Exercises `resolve_amendment5` itself, so a regression in production
+    resolution fails here rather than passing a re-typed copy of the logic."""
+    pairs = [{"rejected_reason": "wrong_args"}] * 20   # 2 steps, well under 250
+
+    cases = {
+        None:            (False, None, "UNDECIDABLE"),
+        Fraction(299):   (False, 4, "routes to 3B"),
+        Fraction(300):   (False, 4, "no exploratory arm on the cautious branch"),
+        Fraction(999):   (False, 4, "no exploratory arm on the cautious branch"),
+        Fraction(1000):  (True,  5, "P_std >= 1000"),
+    }
+    for p_std, (activates, family, fragment) in cases.items():
+        r = mine_pairs.resolve_amendment5(p_std, pairs)
+        assert r["A5_kto_wide_activates"] is activates, p_std
+        assert r["family_size"] == family, p_std
+        assert fragment in r["A5_activation_reason"], p_std
+
+
+def test_below_300_never_plans_a0_at_all() -> None:
+    """3B runs B0 only, so a thin 3A cell must not abort a valid calibration."""
+    bad_for_3a = [{"rejected_reason": "wrong_tool"}]  # singleton: would raise if planned
+
+    r = mine_pairs.resolve_amendment5(Fraction(299), bad_for_3a)
+
+    assert r["A0_planned_optimizer_steps"] is None
+    assert r["family_size"] == 4
+
+
+def test_a_thin_cell_still_aborts_where_a0_is_permitted() -> None:
+    with pytest.raises(MinerError, match="fewer than 2 pairs"):
+        mine_pairs.resolve_amendment5(Fraction(1000), [{"rejected_reason": "wrong_tool"}])
+
+
+def test_undefined_p_std_is_undecidable_not_family_four() -> None:
+    r = mine_pairs.resolve_amendment5(None, [])
+    assert r["family_size"] is None
+    assert "UNDECIDABLE" in r["A5_activation_reason"]
+
+
+def test_an_incomplete_calibration_emits_no_operative_fields(tmp_path, monkeypatch) -> None:
+    """Derivatives are written in a `finally`, so a partial ledger reaches
+    write_derivatives. It must not yield a §2.6 decision or a family size."""
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(4)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(4)
+    ]
+    _install_fake_pool(monkeypatch, prompts, "calibration", 8)
+    out = tmp_path / "cal"
+
+    calls = {"n": 0}
+
+    def flaky(prompt, samples):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise RuntimeError("interrupted")
+        return [GOOD] * 4 + [BAD] * 4
+
+    with pytest.raises(RuntimeError):
+        mine_pairs.run(out_dir=out, stage="calibration", generate_fn=flaky)
+
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["calibration_complete"] is False
+    assert written["decision"] is None
+    assert written["family_size"] is None
+    assert written["A5_kto_wide_activates"] is False
+    assert "incomplete" in written["incomplete_reason"]
+
+
+# --- The stratum breakdown must be derivable, not asserted -------------------
+
+
+def test_the_committed_breakdown_re_derives_from_the_ledger() -> None:
+    """A hand-entered table is a claim; a re-derivation is evidence."""
+    from mining.stratum_breakdown import breakdown
+
+    committed = json.loads(Path("mining_pilot/stratum_breakdown.json").read_text())
+    fresh = breakdown(Path("mining_pilot/ledger.jsonl"))
+
+    assert fresh["source_ledger_sha256"] == committed["source_ledger_sha256"]
+    assert fresh["by_bucket"] == committed["by_bucket"]
+    assert fresh["stratum_totals"] == committed["stratum_totals"]
+    assert fresh["within_stratum_rates"] == committed["within_stratum_rates"]
+
+
+def test_the_breakdown_reads_active_records_only(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(_record("m1", MULTI, pair=True))
+    ledger.append(_record("s1", SINGLE, pair=True))
+    ledger.redo_last(1)
+
+    from mining.stratum_breakdown import breakdown
+
+    r = breakdown(tmp_path / "ledger.jsonl")
+    assert r["active_records"] == 1
+    assert r["stratum_totals"] == {"multi": 1, "single": 0}

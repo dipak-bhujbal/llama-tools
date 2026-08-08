@@ -901,6 +901,135 @@ def pair_diagnostics(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Amendment 5 A5.5/A5.6: the wide KTO arm activates iff
+# A0_planned_optimizer_steps < 250, and the exploratory Holm family is 4 when it
+# does not activate and 5 when it does. Both must be *computed and recorded at
+# calibration time* — an activation rule derived by hand afterwards is not
+# mechanical, and a family size settled after the fact is the defect §4.1 forbids.
+A5_ACTIVATION_STEP_THRESHOLD = 250
+A0_PAIRS_PER_OPTIMIZER_STEP = 16
+
+
+def a0_planned_optimizer_steps(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """§3.4's cellwise 90/10 split applied to the mined pairs, then §3.11's step rule.
+
+    Per §3.4 the split targets 90/10 within **every non-empty cell**, and §3.11
+    states the train count exactly: `sum(n_cell - max(1, ceil(0.10 * n_cell)))`.
+    The cell key for a 3A arm is the pair's `rejected_reason` (§3.4's
+    track-specific key; the miner emits `rejected_reason`, not `error_type`).
+    """
+    from mining.verifier import REASONS
+
+    cells: dict[str, int] = {}
+    for pair in pairs:
+        reason = pair.get("rejected_reason")
+        # §3.4(b): "every 3A row IS a preference pair and carries exactly one"
+        # error_type. A missing or unrecognised value is not bucketable, and
+        # inventing an `unknown` cell would be the reclassification §2.11 forbids.
+        if reason not in REASONS:
+            raise MinerError(
+                f"{pair.get('pair_id') or pair.get('prompt_id')}: rejected_reason "
+                f"{reason!r} is not one of {sorted(REASONS)}; A0 split planning "
+                f"cannot bucket it"
+            )
+        cells[reason] = cells.get(reason, 0) + 1
+
+    # §3.4: "Every non-empty cell must place at least one row on each side of the
+    # split. Therefore n_cell >= 2 is required for every 3A and B0 cell; a thinner
+    # cell stops the run with the track and cell named."
+    thin = sorted(r for r, n in cells.items() if n < 2)
+    if thin:
+        raise MinerError(
+            f"track 3A: split cell(s) {thin} have fewer than 2 pairs; §3.4 fails "
+            f"closed on thin cells rather than merging, dropping, or sending them "
+            f"entirely to train"
+        )
+
+    train = 0
+    per_cell: dict[str, dict[str, int]] = {}
+    for reason, n in sorted(cells.items()):
+        n_eval = max(1, -(-n // 10))          # ceil(0.10 * n)
+        n_train = n - n_eval
+        train += n_train
+        per_cell[reason] = {"n": n, "train": n_train, "eval": n_eval}
+
+    steps = -(-train // A0_PAIRS_PER_OPTIMIZER_STEP)  # ceil(train / 16)
+    return {
+        "A0_train_pairs": train,
+        "A0_planned_optimizer_steps": steps,
+        "cells": per_cell,
+        "rule": "train = sum(n_cell - max(1, ceil(0.10*n_cell))); steps = ceil(train/16)",
+    }
+
+
+def resolve_amendment5(
+    p_std: Fraction | None,
+    pairs: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Resolve A5-kto-wide activation and the exploratory family size.
+
+    **The gate is resolved first, and A0 planning runs only where A0 is
+    permitted.** Planning before the gate lets an irrelevant 3A split defect
+    abort a perfectly valid `P_std < 300` calibration — 3B runs `B0` only, so a
+    thin 3A error-type cell has no bearing on it.
+
+    `P_std` undefined is **undecidable**, not a quiet `family_size = 4`.
+    """
+    if p_std is None:
+        return {
+            "A0_train_pairs": None,
+            "A0_planned_optimizer_steps": None,
+            "A5_kto_wide_activates": False,
+            "A5_activation_reason": (
+                "UNDECIDABLE: P_std is undefined because a stratum has no mined "
+                "prompts, so neither the branch nor A0's step count is resolvable"
+            ),
+            "family_size": None,
+            "planning": None,
+        }
+
+    if p_std < GATE_CAUTIOUS:
+        return {
+            "A0_train_pairs": None,
+            "A0_planned_optimizer_steps": None,
+            "A5_kto_wide_activates": False,
+            "A5_activation_reason": (
+                f"P_std < {GATE_CAUTIOUS}: §2.6 routes to 3B, where A0 does not run "
+                f"and no exploratory arm exists"
+            ),
+            "family_size": 4,
+            "planning": None,
+        }
+
+    planning = a0_planned_optimizer_steps(pairs)
+    steps = planning["A0_planned_optimizer_steps"]
+    on_exploratory_branch = p_std >= GATE_PROCEED
+    below_threshold = steps < A5_ACTIVATION_STEP_THRESHOLD
+    activates = on_exploratory_branch and below_threshold
+
+    if not on_exploratory_branch:
+        reason = (
+            f"P_std < {GATE_PROCEED}: §3.1 permits no exploratory arm on the "
+            f"cautious branch"
+        )
+    elif not below_threshold:
+        reason = f"A0_planned_optimizer_steps {steps} >= {A5_ACTIVATION_STEP_THRESHOLD}"
+    else:
+        reason = (
+            f"P_std >= {GATE_PROCEED} and A0_planned_optimizer_steps {steps} < "
+            f"{A5_ACTIVATION_STEP_THRESHOLD}"
+        )
+
+    return {
+        "A0_train_pairs": planning["A0_train_pairs"],
+        "A0_planned_optimizer_steps": steps,
+        "A5_kto_wide_activates": activates,
+        "A5_activation_reason": reason,
+        "family_size": 5 if activates else 4,
+        "planning": planning,
+    }
+
+
 def gate_decision(p_std: float | Fraction | None) -> str:
     """§2.6's table, applied to the exact value. No rounding at any boundary."""
     if p_std is None:
@@ -947,7 +1076,48 @@ def write_derivatives(
     summary["guardrail_diagnostics"] = pair_diagnostics(summary["materialized_pairs"])
     if stage == "calibration":
         # §2.6 is evaluated on the exact rational, never the serialized float.
-        summary["decision"] = gate_decision(exact)
+
+        # Amendment 5's activation and family size, resolved here rather than by
+        # hand later. Both are pre-result numbers: they depend only on the mined
+        # pair count and the frozen split rule, never on any arm's outcome.
+        # An interrupted calibration must not emit a §2.6 decision, an activation
+        # or a family size: derivatives are written in a `finally`, so a partial
+        # ledger reaches here. A partial artifact stays resumable and says so.
+        expected = allocation or {}
+        mined = summary["prompts_mined"]
+        complete = bool(expected) and all(
+            mined.get(s, 0) == expected.get(s, 0) for s in (MULTI, SINGLE)
+        )
+        summary["calibration_complete"] = complete
+
+        if not complete:
+            summary["decision"] = None
+            summary["A0_planned_optimizer_steps"] = None
+            summary["A5_kto_wide_activates"] = False
+            summary["family_size"] = None
+            summary["incomplete_reason"] = (
+                f"calibration incomplete: mined {mined} of allocated {expected}. "
+                f"No §2.6 decision, activation or family size is emitted from a "
+                f"partial ledger. Rerun the same command to resume"
+            )
+        else:
+            summary["decision"] = gate_decision(exact)
+            resolved = resolve_amendment5(exact, summary["materialized_pairs"])
+            planning = resolved.pop("planning")
+            summary.update(resolved)
+            summary["amendment5"] = {
+                "activation_threshold": A5_ACTIVATION_STEP_THRESHOLD,
+                "requires_P_std_at_least": GATE_PROCEED,
+                **({"split_planning": planning} if planning else {}),
+                "note": (
+                    "Amendment 5 A5.5/A5.6, resolved from this artifact alone "
+                    "before any arm runs. A5-kto-wide activates iff P_std >= 1000 "
+                    "(§3.1's exploratory branch) AND A0_planned_optimizer_steps "
+                    "< 250. family_size is 4 when it does not activate and 5 when "
+                    "it does; adoption alone does not widen it."
+                ),
+            }
+
     else:
         summary["gate_note"] = (
             "§2.6's decision table decides on the committed CALIBRATION artifact "
@@ -1028,6 +1198,8 @@ def _mine_selected(
     already: set[str],
     generate_fn: Callable[[Prompt, int], list[str]],
 ) -> None:
+    total = len(preflight.selected)
+    done = sum(1 for p in preflight.selected if p.prompt_id in already)
     for prompt in preflight.selected:
         if prompt.prompt_id in already:
             continue  # resume: already paid for, never re-sampled
@@ -1049,6 +1221,16 @@ def _mine_selected(
                     "seed": SEED,
                 },
             }
+        )
+        done += 1
+        # Printed only AFTER the ledger append returns, so the log never claims
+        # work that is not yet durable. flush=True because stdout is redirected
+        # to a file and would otherwise block-buffer — a silent log for the whole
+        # run is indistinguishable from a hang, which is how the pilot looked.
+        print(
+            f"[{done}/{total}] {prompt.prompt_id} "
+            f"({sum(1 for v in outcome.verdicts if v['accepted'])}/{SAMPLES_PER_PROMPT} accepted)",
+            flush=True,
         )
 
 
