@@ -877,18 +877,72 @@ def test_step_threshold_boundary_is_strict() -> None:
     assert (steps_for(n) < mine_pairs.A5_ACTIVATION_STEP_THRESHOLD) is False
 
 
-def test_a_cautious_branch_never_activates_the_exploratory_arm() -> None:
-    """§3.1 permits NO exploratory arm on 300-999, so a short A0 there must still
-    give family 4. Step count alone would wrongly activate it."""
-    from fractions import Fraction
+def test_the_production_resolver_at_every_gate_boundary() -> None:
+    """Exercises `resolve_amendment5` itself, so a regression in production
+    resolution fails here rather than passing a re-typed copy of the logic."""
+    pairs = [{"rejected_reason": "wrong_args"}] * 20   # 2 steps, well under 250
 
-    for p_std, activates in (
-        (Fraction(999), False),   # cautious branch
-        (Fraction(1000), True),   # exploratory branch, boundary is >=
-        (Fraction(299), False),   # 3B
-    ):  # noqa: E501
-        on_branch = p_std >= mine_pairs.GATE_PROCEED
-        assert (on_branch and 1 < 250) is activates
+    cases = {
+        None:            (False, None, "UNDECIDABLE"),
+        Fraction(299):   (False, 4, "routes to 3B"),
+        Fraction(300):   (False, 4, "no exploratory arm on the cautious branch"),
+        Fraction(999):   (False, 4, "no exploratory arm on the cautious branch"),
+        Fraction(1000):  (True,  5, "P_std >= 1000"),
+    }
+    for p_std, (activates, family, fragment) in cases.items():
+        r = mine_pairs.resolve_amendment5(p_std, pairs)
+        assert r["A5_kto_wide_activates"] is activates, p_std
+        assert r["family_size"] == family, p_std
+        assert fragment in r["A5_activation_reason"], p_std
+
+
+def test_below_300_never_plans_a0_at_all() -> None:
+    """3B runs B0 only, so a thin 3A cell must not abort a valid calibration."""
+    bad_for_3a = [{"rejected_reason": "wrong_tool"}]  # singleton: would raise if planned
+
+    r = mine_pairs.resolve_amendment5(Fraction(299), bad_for_3a)
+
+    assert r["A0_planned_optimizer_steps"] is None
+    assert r["family_size"] == 4
+
+
+def test_a_thin_cell_still_aborts_where_a0_is_permitted() -> None:
+    with pytest.raises(MinerError, match="fewer than 2 pairs"):
+        mine_pairs.resolve_amendment5(Fraction(1000), [{"rejected_reason": "wrong_tool"}])
+
+
+def test_undefined_p_std_is_undecidable_not_family_four() -> None:
+    r = mine_pairs.resolve_amendment5(None, [])
+    assert r["family_size"] is None
+    assert "UNDECIDABLE" in r["A5_activation_reason"]
+
+
+def test_an_incomplete_calibration_emits_no_operative_fields(tmp_path, monkeypatch) -> None:
+    """Derivatives are written in a `finally`, so a partial ledger reaches
+    write_derivatives. It must not yield a §2.6 decision or a family size."""
+    prompts = [_prompt(f"m{i}", MULTI) for i in range(4)] + [
+        _prompt(f"s{i}", SINGLE) for i in range(4)
+    ]
+    _install_fake_pool(monkeypatch, prompts, "calibration", 8)
+    out = tmp_path / "cal"
+
+    calls = {"n": 0}
+
+    def flaky(prompt, samples):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise RuntimeError("interrupted")
+        return [GOOD] * 4 + [BAD] * 4
+
+    with pytest.raises(RuntimeError):
+        mine_pairs.run(out_dir=out, stage="calibration", generate_fn=flaky)
+
+    written = json.loads((out / "mining_summary.json").read_text())
+    assert written["calibration_complete"] is False
+    assert written["decision"] is None
+    assert written["family_size"] is None
+    assert written["A5_kto_wide_activates"] is False
+    assert "incomplete" in written["incomplete_reason"]
 
 
 # --- The stratum breakdown must be derivable, not asserted -------------------

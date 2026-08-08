@@ -962,6 +962,74 @@ def a0_planned_optimizer_steps(pairs: Sequence[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def resolve_amendment5(
+    p_std: Fraction | None,
+    pairs: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Resolve A5-kto-wide activation and the exploratory family size.
+
+    **The gate is resolved first, and A0 planning runs only where A0 is
+    permitted.** Planning before the gate lets an irrelevant 3A split defect
+    abort a perfectly valid `P_std < 300` calibration — 3B runs `B0` only, so a
+    thin 3A error-type cell has no bearing on it.
+
+    `P_std` undefined is **undecidable**, not a quiet `family_size = 4`.
+    """
+    if p_std is None:
+        return {
+            "A0_train_pairs": None,
+            "A0_planned_optimizer_steps": None,
+            "A5_kto_wide_activates": False,
+            "A5_activation_reason": (
+                "UNDECIDABLE: P_std is undefined because a stratum has no mined "
+                "prompts, so neither the branch nor A0's step count is resolvable"
+            ),
+            "family_size": None,
+            "planning": None,
+        }
+
+    if p_std < GATE_CAUTIOUS:
+        return {
+            "A0_train_pairs": None,
+            "A0_planned_optimizer_steps": None,
+            "A5_kto_wide_activates": False,
+            "A5_activation_reason": (
+                f"P_std < {GATE_CAUTIOUS}: §2.6 routes to 3B, where A0 does not run "
+                f"and no exploratory arm exists"
+            ),
+            "family_size": 4,
+            "planning": None,
+        }
+
+    planning = a0_planned_optimizer_steps(pairs)
+    steps = planning["A0_planned_optimizer_steps"]
+    on_exploratory_branch = p_std >= GATE_PROCEED
+    below_threshold = steps < A5_ACTIVATION_STEP_THRESHOLD
+    activates = on_exploratory_branch and below_threshold
+
+    if not on_exploratory_branch:
+        reason = (
+            f"P_std < {GATE_PROCEED}: §3.1 permits no exploratory arm on the "
+            f"cautious branch"
+        )
+    elif not below_threshold:
+        reason = f"A0_planned_optimizer_steps {steps} >= {A5_ACTIVATION_STEP_THRESHOLD}"
+    else:
+        reason = (
+            f"P_std >= {GATE_PROCEED} and A0_planned_optimizer_steps {steps} < "
+            f"{A5_ACTIVATION_STEP_THRESHOLD}"
+        )
+
+    return {
+        "A0_train_pairs": planning["A0_train_pairs"],
+        "A0_planned_optimizer_steps": steps,
+        "A5_kto_wide_activates": activates,
+        "A5_activation_reason": reason,
+        "family_size": 5 if activates else 4,
+        "planning": planning,
+    }
+
+
 def gate_decision(p_std: float | Fraction | None) -> str:
     """§2.6's table, applied to the exact value. No rounding at any boundary."""
     if p_std is None:
@@ -1008,54 +1076,48 @@ def write_derivatives(
     summary["guardrail_diagnostics"] = pair_diagnostics(summary["materialized_pairs"])
     if stage == "calibration":
         # §2.6 is evaluated on the exact rational, never the serialized float.
-        summary["decision"] = gate_decision(exact)
 
         # Amendment 5's activation and family size, resolved here rather than by
         # hand later. Both are pre-result numbers: they depend only on the mined
         # pair count and the frozen split rule, never on any arm's outcome.
-        planning = a0_planned_optimizer_steps(summary["materialized_pairs"])
-        steps = planning["A0_planned_optimizer_steps"]
+        # An interrupted calibration must not emit a §2.6 decision, an activation
+        # or a family size: derivatives are written in a `finally`, so a partial
+        # ledger reaches here. A partial artifact stays resumable and says so.
+        expected = allocation or {}
+        mined = summary["prompts_mined"]
+        complete = bool(expected) and all(
+            mined.get(s, 0) == expected.get(s, 0) for s in (MULTI, SINGLE)
+        )
+        summary["calibration_complete"] = complete
 
-        # A5-kto-wide is exploratory, and §3.1 permits exploratory arms ONLY on
-        # the `P_std >= 1000` branch. The step threshold alone would activate it
-        # on a cautious or 3B branch where no exploratory arm may run at all.
-        # Decided on the EXACT rational, never the serialized float (§2.6).
-        on_exploratory_branch = exact is not None and exact >= GATE_PROCEED
-        below_threshold = steps < A5_ACTIVATION_STEP_THRESHOLD
-        activates = on_exploratory_branch and below_threshold
-        if not on_exploratory_branch:
-            reason = (
-                "P_std < 1000: §3.1 permits no exploratory arm on this branch"
-                if exact is not None
-                else "P_std undefined: a stratum has no mined prompts"
+        if not complete:
+            summary["decision"] = None
+            summary["A0_planned_optimizer_steps"] = None
+            summary["A5_kto_wide_activates"] = False
+            summary["family_size"] = None
+            summary["incomplete_reason"] = (
+                f"calibration incomplete: mined {mined} of allocated {expected}. "
+                f"No §2.6 decision, activation or family size is emitted from a "
+                f"partial ledger. Rerun the same command to resume"
             )
-        elif not below_threshold:
-            reason = f"A0_planned_optimizer_steps {steps} >= {A5_ACTIVATION_STEP_THRESHOLD}"
         else:
-            reason = (
-                f"P_std >= 1000 and A0_planned_optimizer_steps {steps} < "
-                f"{A5_ACTIVATION_STEP_THRESHOLD}"
-            )
+            summary["decision"] = gate_decision(exact)
+            resolved = resolve_amendment5(exact, summary["materialized_pairs"])
+            planning = resolved.pop("planning")
+            summary.update(resolved)
+            summary["amendment5"] = {
+                "activation_threshold": A5_ACTIVATION_STEP_THRESHOLD,
+                "requires_P_std_at_least": GATE_PROCEED,
+                **({"split_planning": planning} if planning else {}),
+                "note": (
+                    "Amendment 5 A5.5/A5.6, resolved from this artifact alone "
+                    "before any arm runs. A5-kto-wide activates iff P_std >= 1000 "
+                    "(§3.1's exploratory branch) AND A0_planned_optimizer_steps "
+                    "< 250. family_size is 4 when it does not activate and 5 when "
+                    "it does; adoption alone does not widen it."
+                ),
+            }
 
-        # Operative fields at top level: these are what the activation rule reads.
-        summary["A0_train_pairs"] = planning["A0_train_pairs"]
-        summary["A0_planned_optimizer_steps"] = steps
-        summary["A5_kto_wide_activates"] = activates
-        summary["A5_activation_reason"] = reason
-        summary["family_size"] = 5 if activates else 4
-        summary["amendment5"] = {
-            **planning,
-            "activation_threshold": A5_ACTIVATION_STEP_THRESHOLD,
-            "requires_P_std_at_least": GATE_PROCEED,
-            "on_exploratory_branch": on_exploratory_branch,
-            "note": (
-                "Amendment 5 A5.5/A5.6, resolved from this artifact alone before "
-                "any arm runs. A5-kto-wide activates iff P_std >= 1000 (§3.1's "
-                "exploratory branch) AND A0_planned_optimizer_steps < 250. "
-                "family_size is 4 when it does not activate and 5 when it does; "
-                "adoption alone does not widen it."
-            ),
-        }
     else:
         summary["gate_note"] = (
             "§2.6's decision table decides on the committed CALIBRATION artifact "

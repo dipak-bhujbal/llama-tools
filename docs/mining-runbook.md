@@ -36,10 +36,14 @@ browser-created pod**, so it must be set at creation.
 second from the first so the attestation is true:
 
 ```bash
-TERMINATE_AT='2026-08-08T02:30:00Z'
+# ILLUSTRATION — substitute the deadline the owner actually approved.
+TERMINATE_AT='<APPROVED_UTC_DEADLINE>'          # e.g. YYYY-MM-DDTHH:MM:SSZ
 runpodctl pod create --terminate-after "$TERMINATE_AT" ...
 PROVIDER_SECONDS=$(( $(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$TERMINATE_AT" +%s) - $(date -u +%s) ))
 ```
+
+**This block is not runnable as written**, deliberately: a literal date here would
+go stale and a copy-paste would arm a deadline in the past.
 
 Pass `$PROVIDER_SECONDS` to the launcher. **Recompute it immediately before
 launching**, not at pod creation — setup time has elapsed in between.
@@ -53,22 +57,33 @@ in the same region.
 **The bundle is code only. `data/processed/` and `eval/bfcl_data/` are git-ignored
 and must be copied separately** — the pilot's first launch died on
 `MinerError: mining pool is missing at data/processed/sft_dedup_v2.jsonl` because
-this step did not exist. **~39 MB. Create the destinations first:**
+this step did not exist. **Copy the pinned pool file, not the directory.** `data/processed/` is ~165 MB
+of study-1 history; **the miner pins exactly one file from it**
+(`sft_dedup_v2.jsonl`, §2.7). With `eval/bfcl_data/` at ~11 MB the transfer is
+**~41 MB** rather than ~176 MB. **Create the destinations first:**
 
 ```bash
 ssh -p "$PORT" -i "$KEY" root@"$IP" \
   'mkdir -p /root/llama-tools/data/processed /root/llama-tools/eval'
-scp -P "$PORT" -i "$KEY" -r data/processed/ root@"$IP":/root/llama-tools/data/
+scp -P "$PORT" -i "$KEY" data/processed/sft_dedup_v2.jsonl \
+  root@"$IP":/root/llama-tools/data/processed/
 scp -P "$PORT" -i "$KEY" -r eval/bfcl_data/ root@"$IP":/root/llama-tools/eval/
 ```
 
 **Both go to `/root` (container disk), never `/workspace`.** The network volume is
 small and `df` reports the whole cluster, so it gives **no warning as it fills**.
 
-**No separate hash step is needed here.** The miner verifies the pool against
-`POOL_SHA256` and every BFCL file against the manifest's per-file digests before
-any model loads, so a truncated transfer stops the run rather than mining a
-corrupted pool.
+**What is and is not verified — the scopes differ, so do not over-trust this.**
+
+- **The miner** verifies the **pool** against `POOL_SHA256`, the **decontamination
+  receipt**, the **amended manifest**, and re-derives the post-screen id digest,
+  all before any model loads. A truncated pool transfer stops the run.
+- **It does not hash every copied file.** The screened **question** files are read
+  by the decontaminator; the **answer keys** are not verified at mining time.
+- **The scorer's own gate** (`eval/dev_subset_gate.py`) verifies the
+  `live_multiple` **questions and answer key** against their manifest digests —
+  but that runs at **dev-baseline time**, not here. A corrupted answer key would
+  surface then, not during mining.
 
 ## On the pod, before the miner
 
