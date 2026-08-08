@@ -82,8 +82,10 @@ enforces it.
 2. Enable **auto-termination** at a deadline whose maximum charge is **≤ `$0.45`**, keeping
    a reserve for persistence and shutdown. **Derive the ceiling from the rate the console
    actually shows for the pod you are creating** — do not carry a remembered rate. As a
-   worked example only, at `$0.57/hr` the affordable ceiling is about 45 minutes,
-   so set **≤ 5 h 00 m**.
+   worked example only, at `$0.57/hr` the cap buys about 47 minutes, so set the
+   deadline **strictly inside that — no more than 40 minutes** — leaving a reserve for
+   artifact persistence and shutdown. **The general rule, not the example:**
+   `deadline < $0.45 / actual_rate`, minus a shutdown reserve.
 3. Save proof (a console screenshot) into the persistent volume.
 
 The script cannot verify this from inside the pod, by design — it has no account
