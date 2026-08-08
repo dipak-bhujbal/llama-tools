@@ -33,10 +33,16 @@ accept `--terminate-after`, so a browser-created pod cannot be retrofitted:
 runpodctl pod create --terminate-after '<APPROVED_UTC_DEADLINE>' ...
 ```
 
-`--terminate-after` takes an **absolute UTC datetime**; `launch_probe.sh` takes
-`--usd-cap` and `--usd-per-hour` and derives its own wall-clock `timeout` from them. **They
-are two independent bounds in different units** — the provider's survives this machine
-sleeping, the script's does not.
+`--terminate-after` takes an **absolute UTC datetime**; `launch_probe.sh` takes a
+**required `--max-seconds`** and bounds every paid command with `timeout`. **They are two
+independent bounds** — the provider's survives this machine sleeping or the script being
+SIGKILLed, the script's does not.
+
+**Neither script knows what a dollar is, deliberately.** A ceiling is a *per-run approval*,
+not a property of reusable source. Converting the approved ceiling and the pod's live rate
+into seconds is the operator's job, done once, below, and recorded in the run evidence. When
+the number lived in the source it went stale silently — and a stale cap in source is not an
+*unenforced* budget, it is a **mechanically enforced one at a number nobody approved.**
 It is Step 0 of the script, and the script refuses to proceed without an attestation of it.
 
 ## Transfer method: git bundle — decided, not open
@@ -87,6 +93,15 @@ enforces it.
    artifact persistence and shutdown. **The general rule, not the example:**
    `deadline < $0.45 / actual_rate`, minus a shutdown reserve.
 3. Save proof (a console screenshot) into the persistent volume.
+4. **Derive `--max-seconds` from the same two numbers**, and write both the inputs and the
+   result into the run evidence:
+
+   ```
+   max_seconds = floor( (approved_ceiling / actual_rate_per_hour) * 3600 )  -  shutdown_reserve
+   ```
+
+   Use the same reserve you used for the provider deadline. `launch_probe.sh` splits this
+   total evenly across the two paid commands, so it bounds the **whole** probe.
 
 The script cannot verify this from inside the pod, by design — it has no account
 credentials. It requires an explicit attestation string and records it as evidence.
@@ -146,8 +161,7 @@ cd llama-tools
 tmux new-session -d -s probe \
   "bash scripts/launch_probe.sh \
      --commit <REVIEWED_40_CHAR_SHA> \
-     --usd-cap 0.45 \
-     --usd-per-hour <ACTUAL_RATE> \
+     --max-seconds <DERIVED_ABOVE> \
      --out-root /workspace/persist/study2 2>&1 | tee /workspace/persist/study2/probe.log"
 ```
 

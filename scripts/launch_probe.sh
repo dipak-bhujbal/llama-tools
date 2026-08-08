@@ -21,11 +21,17 @@
 #   *each* paid generation command, so a corrupted/tampered cache can never
 #   silently ride into a paid run — any verify failure aborts before spend.
 #
-# Blocker 3 ($2.50 hard cap approved but not mechanically enforced):
-#   We derive a wall-clock ceiling from --usd-cap and --usd-per-hour and run
-#   every paid generation command under `timeout`, so a hang or runaway
-#   generation cannot silently blow past the approved budget. The derived
-#   budget is printed clearly before any spend-capable step runs.
+# Blocker 3 (an approved ceiling that was not mechanically enforced):
+#   Every paid generation command runs under `timeout`, bounded by a REQUIRED
+#   --max-seconds, so a hang or runaway generation cannot run unbounded.
+#
+#   This script deliberately knows nothing about money. A dollar ceiling is a
+#   per-run approval, not a property of reusable source: converting an approved
+#   ceiling and a live pod rate into a wall-clock limit is the operator's job,
+#   and the result is recorded in run evidence. Baking rates or caps in here is
+#   how a superseded cap once stayed mechanically enforced after a smaller one
+#   had been approved: the source kept enforcing the number nobody had agreed
+#   to any more, and did it silently.
 #
 # Blocker 4 (must be fail-closed):
 #   `set -euo pipefail` plus explicit, distinct exit codes per failure class
@@ -50,7 +56,7 @@ readonly EXIT_USAGE=64          # missing/malformed CLI argument
 readonly EXIT_GIT_UNCLEAN=65    # checkout landed on the wrong SHA, or tree dirty
 readonly EXIT_ACQUIRE_FAILED=66 # fetch_pinned_bfcl.py (acquire) failed
 readonly EXIT_VERIFY_FAILED=67  # fetch_pinned_bfcl.py --verify-only failed
-readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the budget timeout
+readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the wall-clock timeout
 
 # This script always operates on the repo it lives in, resolved from its own
 # path — not the caller's $PWD — so it behaves the same no matter where it
@@ -66,33 +72,39 @@ readonly REPO_ROOT
 readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
 
 # The probe runs two paid generation commands (category=multiple and
-# category=simple_python) sharing one approved dollar budget. Dividing the
-# derived wall-clock ceiling across both is what makes --usd-cap a true cap
+# category=simple_python) sharing one wall-clock budget. Dividing the ceiling
+# across both is what makes --max-seconds bound the whole probe
 # on *total* spend for the probe, not a cap that could be paid twice over.
 readonly NUM_PAID_COMMANDS=2
 
 usage() {
   cat <<'EOF'
-Usage: launch_probe.sh --commit <40-char-sha> --usd-cap <float> \
-       --usd-per-hour <float> --out-root <dir> \
-       [--max-seconds <int>] [--dry-run]
+Usage: launch_probe.sh --commit <40-char-sha> --max-seconds <int> \
+       --out-root <dir> [--dry-run]
 
 Required:
-  --commit <sha>        Full 40-character hex commit SHA to detach-checkout.
-  --usd-cap <float>      Approved dollar hard cap for this probe launch.
-  --usd-per-hour <float> Pod's hourly rate in USD; used to derive the
-                          wall-clock kill budget from --usd-cap.
-  --out-root <dir>       Root directory under which the two probe
-                          categories' --out-dir subdirectories are written.
+  --commit <sha>          Full 40-character hex commit SHA to detach-checkout.
+
+  --out-root <dir>        Root directory under which the two probe categories'
+                          --out-dir subdirectories are written.
+
+  --max-seconds <int>     Total wall-clock ceiling in seconds for the whole
+                          probe, split evenly across the two paid commands.
+                          Derive it OUTSIDE this script from the approved
+                          ceiling and the pod's live rate: this script knows
+                          neither, deliberately. A per-run approval is not a
+                          property of the source. Must be a positive integer,
+                          at most MAX_SECONDS_HARD_LIMIT (a mistyped-argument
+                          backstop, not a budget).
 
 Optional:
-  --max-seconds <int>    Override the TOTAL derived wall-clock ceiling
-                          (seconds) instead of computing it from
-                          --usd-cap / --usd-per-hour. Still split evenly
-                          across the two paid generation commands.
   --dry-run               Print every command that would run, in order, and
                           exit 0 without touching git, the network, or
                           spawning generation.
+
+This script enforces wall-clock only. The monetary ceiling is a per-run
+approval recorded outside the source, and the provider-side auto-termination
+is the independent external hard stop that survives this process being killed.
 EOF
 }
 
@@ -100,15 +112,13 @@ EOF
 # Argument parsing
 # ---------------------------------------------------------------------------
 commit=""
-usd_cap=""
-usd_per_hour=""
 out_root=""
 max_seconds_override=""
 dry_run=0
 
 # require_value aborts *before* `shift`ing past the end of $@ or silently
-# swallowing the next flag as a value (e.g. `--commit --usd-cap` should be
-# reported as a missing --commit value, not consume --usd-cap as the SHA).
+# swallowing the next flag as a value (e.g. `--commit --max-seconds` should be
+# reported as a missing --commit value, not consume --max-seconds as the SHA).
 require_value() {
   local flag="$1"
   local value="${2:-}"
@@ -124,16 +134,6 @@ while [[ $# -gt 0 ]]; do
     --commit)
       require_value "--commit" "${2:-}"
       commit="$2"
-      shift 2
-      ;;
-    --usd-cap)
-      require_value "--usd-cap" "${2:-}"
-      usd_cap="$2"
-      shift 2
-      ;;
-    --usd-per-hour)
-      require_value "--usd-per-hour" "${2:-}"
-      usd_per_hour="$2"
       shift 2
       ;;
     --out-root)
@@ -167,8 +167,7 @@ done
 # to hit missing-flag errors one at a time.
 missing_flags=()
 [[ -z "${commit}" ]] && missing_flags+=("--commit")
-[[ -z "${usd_cap}" ]] && missing_flags+=("--usd-cap")
-[[ -z "${usd_per_hour}" ]] && missing_flags+=("--usd-per-hour")
+[[ -z "${max_seconds_override}" ]] && missing_flags+=("--max-seconds")
 [[ -z "${out_root}" ]] && missing_flags+=("--out-root")
 if [[ ${#missing_flags[@]} -gt 0 ]]; then
   echo "ERROR: missing required flag(s): ${missing_flags[*]}" >&2
@@ -184,63 +183,45 @@ if ! [[ "${commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit "${EXIT_USAGE}"
 fi
 
-# --usd-cap / --usd-per-hour must be positive numbers — they feed directly
-# into the wall-clock budget derivation below, and a zero/negative/garbage
-# value there would either divide by zero or silently grant an unbounded
-# (or negative) run.
-if ! [[ "${usd_cap}" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="${usd_cap}" 'BEGIN{exit !(v>0)}'; then
-  echo "ERROR: --usd-cap must be a positive number, got: '${usd_cap}'" >&2
+# --max-seconds must be a positive integer: it feeds `timeout` directly, and a
+# zero/negative/garbage value would disable the only bound this script enforces.
+# ---------------------------------------------------------------------------
+if ! [[ "${max_seconds_override}" =~ ^[0-9]+$ ]] || [[ "${max_seconds_override}" -le 0 ]]; then
+  echo "ERROR: --max-seconds must be a positive integer, got: '${max_seconds_override}'" >&2
   exit "${EXIT_USAGE}"
-fi
-if ! [[ "${usd_per_hour}" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="${usd_per_hour}" 'BEGIN{exit !(v>0)}'; then
-  echo "ERROR: --usd-per-hour must be a positive number, got: '${usd_per_hour}'" >&2
-  exit "${EXIT_USAGE}"
-fi
-if [[ -n "${max_seconds_override}" ]]; then
-  if ! [[ "${max_seconds_override}" =~ ^[0-9]+$ ]] || [[ "${max_seconds_override}" -le 0 ]]; then
-    echo "ERROR: --max-seconds must be a positive integer, got: '${max_seconds_override}'" >&2
-    exit "${EXIT_USAGE}"
-  fi
 fi
 
 # ---------------------------------------------------------------------------
-# Blocker 3: derive and print the wall-clock budget BEFORE anything that can
-# spend money runs. hours_affordable = usd_cap / usd_per_hour; floor (not
-# round) the resulting seconds so we never grant more wall-clock than the
-# cap actually covers, then split evenly across the two paid commands so
-# --usd-cap bounds *total* probe spend, not spend-per-category.
+# Blocker 3: bound every paid command by wall-clock, and print the bound BEFORE
+# anything that can spend runs. The bound arrives as --max-seconds; this script
+# does not compute it from money, because a dollar ceiling is a per-run approval
+# rather than a property of the source. MAX_SECONDS_HARD_LIMIT is a sanity
+# backstop against a mistyped argument, not a budget.
 # ---------------------------------------------------------------------------
-derived_max_seconds=$(awk -v cap="${usd_cap}" -v rate="${usd_per_hour}" \
-  'BEGIN { printf "%d", (cap / rate) * 3600 }')
+readonly MAX_SECONDS_HARD_LIMIT=7200
 
-# --max-seconds may only REDUCE the rate-derived ceiling, never enlarge it.
-# An override that raises the ceiling would silently authorise spending above
-# the approved cap, which makes the cap advisory rather than mechanical --
-# exactly the property it exists to have.
-if [[ -n "${max_seconds_override}" ]]; then
-  if [[ "${max_seconds_override}" -gt "${derived_max_seconds}" ]]; then
-    echo "ERROR: --max-seconds ${max_seconds_override} exceeds the affordable ceiling" >&2
-    echo "       of ${derived_max_seconds}s derived from --usd-cap ${usd_cap}" >&2
-    echo "       at --usd-per-hour ${usd_per_hour}." >&2
-    echo "       The override may only reduce the budget, never enlarge it." >&2
-    exit "${EXIT_USAGE}"
-  fi
-  total_max_seconds="${max_seconds_override}"
-  echo "BUDGET: override reduces ceiling ${derived_max_seconds}s -> ${total_max_seconds}s"
-else
-  total_max_seconds="${derived_max_seconds}"
+if [[ "${max_seconds_override}" -gt "${MAX_SECONDS_HARD_LIMIT}" ]]; then
+  echo "ERROR: --max-seconds ${max_seconds_override} exceeds the ${MAX_SECONDS_HARD_LIMIT}s" >&2
+  echo "       sanity limit. That is longer than any approved probe, and is far" >&2
+  echo "       more likely a mistyped argument than an intention." >&2
+  exit "${EXIT_USAGE}"
 fi
+
+total_max_seconds="${max_seconds_override}"
+echo "WALL-CLOCK BUDGET: ${total_max_seconds}s total across ${NUM_PAID_COMMANDS} paid commands"
+echo "NOTE: this script enforces wall-clock only. The monetary ceiling and the"
+echo "      provider-side auto-termination are enforced outside it."
 per_command_max_seconds=$(( total_max_seconds / NUM_PAID_COMMANDS ))
 
 if [[ "${per_command_max_seconds}" -le 0 ]]; then
   echo "ERROR: derived per-command wall-clock budget is ${per_command_max_seconds}s (<=0)." >&2
-  echo "       usd-cap=${usd_cap} usd-per-hour=${usd_per_hour} total_max_seconds=${total_max_seconds}" >&2
-  echo "       Raise --usd-cap, lower --usd-per-hour, or pass a larger --max-seconds." >&2
+  echo "       total_max_seconds=${total_max_seconds}" >&2
+  echo "       Pass a larger --max-seconds." >&2
   exit "${EXIT_USAGE}"
 fi
 
 echo "====================================================================="
-echo "BUDGET: usd-cap=\$${usd_cap} usd-per-hour=\$${usd_per_hour}/hr paid_commands=${NUM_PAID_COMMANDS}"
+echo "BUDGET: wall-clock only; paid_commands=${NUM_PAID_COMMANDS}"
 echo "BUDGET: total_max_seconds=${total_max_seconds} per_command_max_seconds=${per_command_max_seconds}"
 echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours total wall-clock ceiling)"
 echo "====================================================================="
@@ -382,7 +363,7 @@ run_generation() {
   set -e
   if [[ "${status}" -eq 124 ]]; then
     echo "ERROR: ${label} hit the ${per_command_max_seconds}s wall-clock budget and was killed." >&2
-    echo "       This is the \$${usd_cap} hard cap doing its job, not a crash. Aborting remaining" >&2
+    echo "       This is the wall-clock bound doing its job, not a crash. Aborting remaining" >&2
     echo "       steps rather than spending further." >&2
     exit "${EXIT_GENERATION_FAILED}"
   elif [[ "${status}" -ne 0 ]]; then
@@ -431,7 +412,7 @@ on_exit() {
   fi
   echo
   echo "STOP THE POD NOW, then CONFIRM IN THE CONSOLE THAT BILLING STOPPED."
-  echo "Approved cap is \$${usd_cap}. A process that has been killed cannot"
+  echo "A process that has been killed cannot"
   echo "stop its own billing — only the provider-side control can."
   echo
   echo "Record into the run evidence: actual elapsed ${elapsed}s, the actual"
@@ -456,8 +437,9 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Blocker 3, preflight half. The wall-clock cap is enforced by `timeout`, so a
-# missing `timeout` binary means the approved $2.50 ceiling is unenforceable.
+# Blocker 3, preflight half. The wall-clock bound is enforced by `timeout`, so
+# a missing `timeout` binary means --max-seconds is unenforceable and the only
+# remaining stop is the provider's.
 # This is checked HERE, before the detached checkout and before anything is
 # fetched, because discovering it later would leave the repo on a detached HEAD
 # and a pod billing for a download that can never be used. macOS ships coreutils
@@ -478,12 +460,12 @@ if [[ -z "${timeout_bin}" ]]; then
     timeout_bin="timeout"
     echo "PREFLIGHT WARNING: neither 'timeout' nor 'gtimeout' found on this host." >&2
     echo "                  A real run here would REFUSE to start, because the" >&2
-    echo "                  approved spend cap is enforced by wall-clock timeout." >&2
+    echo "                  --max-seconds bound is enforced by wall-clock timeout." >&2
   else
     echo "ERROR: neither 'timeout' nor 'gtimeout' is on PATH." >&2
-    echo "       The approved spend cap is enforced by a wall-clock timeout;" >&2
-    echo "       without it the cap cannot be enforced, so this refuses to run" >&2
-    echo "       rather than run uncapped." >&2
+    echo "       --max-seconds is enforced by a wall-clock timeout; without it" >&2
+    echo "       the only remaining stop is the provider deadline, so this" >&2
+    echo "       refuses to run rather than run unbounded." >&2
     echo "       Debian/Ubuntu pods: apt-get install coreutils." >&2
     echo "       macOS: brew install coreutils (provides gtimeout)." >&2
     exit "${EXIT_USAGE}"

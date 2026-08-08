@@ -11,8 +11,8 @@
 # BILLING REALITY, stated up front because an earlier draft of the operator
 # guide got this wrong: pod billing starts when the pod starts. Cloning,
 # creating the venv, installing packages and downloading weights are all
-# BILLED time and all consume the same $2.50 lifecycle budget as generation.
-# There is no "$0 until launch" phase. That is why --auto-terminate-set must
+# BILLED time and all draw on the same run lifecycle budget as generation.
+# There is no free "until launch" phase. That is why --auto-terminate-set must
 # be acknowledged before this script does anything else: the provider-side
 # deadline has to already exist by the time the pod is running.
 #
@@ -22,7 +22,7 @@
 #     --bundle-sha256-file /workspace/llama-tools.bundle.sha256 \
 #     --commit <FULL_40_CHAR_SHA> \
 #     --out-root /workspace/persist/study2 \
-#     --auto-terminate-set "2026-08-04T23:00:00Z@0.44usd/hr" \
+#     --auto-terminate-set "<ISO8601-deadline-Z>@<rate-from-console>" \
 #     [--dry-run]
 #
 set -euo pipefail
@@ -86,9 +86,11 @@ run() {
 # ---------------------------------------------------------------------------
 # STEP 0 — provider spend cap. FIRST, because billing is already running.
 #
-# A process that has been SIGKILLed cannot stop its own billing, and owner
-# approval to spend at most $2.50 authorises an amount; it does not enforce
-# one. Only the provider-side deadline does. This script cannot set it (no
+# A process that has been SIGKILLed cannot stop its own billing, and an owner
+# approval authorises an amount; it does not enforce one. Only the provider-side
+# deadline does. The approved figure lives in the run approval and the operator
+# guide, never here: source that carries a number keeps enforcing it after the
+# approval it encoded has been superseded. This script cannot set it (no
 # account credentials, by design) and cannot verify it from inside the pod, so
 # it requires an explicit acknowledgement string and records it as evidence.
 # That is deliberately a human attestation, not a simulated check.
@@ -97,7 +99,8 @@ echo "====================================================================="
 echo "STEP 0 — provider auto-termination"
 if [[ ! "${auto_terminate_set}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z@.+ ]]; then
   echo "ERROR: --auto-terminate-set must look like" >&2
-  echo "       <ISO8601-deadline-Z>@<rate>, e.g. 2026-08-04T23:00:00Z@0.44usd/hr" >&2
+  echo "       <ISO8601-deadline-Z>@<rate>, with both taken from the console for" >&2
+  echo "       THIS pod; a remembered rate is not evidence about this run." >&2
   echo "       Set the RunPod auto-terminate deadline FIRST, then record it here." >&2
   echo "       Billing is already running; there is no unbilled setup phase." >&2
   exit "${EXIT_PROVIDER_CAP}"
@@ -306,8 +309,7 @@ Next (the only remaining step, and it is the paid one):
   tmux new-session -d -s probe \\
     "bash scripts/launch_probe.sh \\
        --commit ${commit} \\
-       --usd-cap 2.50 \\
-       --usd-per-hour <ACTUAL_RATE> \\
+       --max-seconds <DERIVED_FROM_APPROVED_CEILING_AND_LIVE_RATE> \\
        --out-root ${out_root} 2>&1 | tee ${out_root}/probe.log"
   tmux attach -t probe      # optional; detaching does not stop the run
 

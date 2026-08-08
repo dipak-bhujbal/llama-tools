@@ -29,8 +29,7 @@ VALID_SHA = "1f0850103660ab46dc489a4c91280190b4da6620"
 
 REQUIRED_FLAGS = {
     "--commit": VALID_SHA,
-    "--usd-cap": "2.50",
-    "--usd-per-hour": "0.44",
+    "--max-seconds": "1800",
     "--out-root": "/tmp/launch_probe_test_out_root",
 }
 
@@ -190,57 +189,72 @@ def test_dry_run_orders_acquire_before_verify_before_first_generation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Budget derivation: printed, and scales the right direction.
+# The wall-clock bound: supplied, not derived. The script deliberately knows
+# nothing about money — a per-run dollar approval is not a property of the
+# source, and baking one in means the source silently enforces a stale number
+# (a `--usd-cap 2.50` example outlived a `$0.45` approval by 5.5x once already).
 # ---------------------------------------------------------------------------
 
 _MAX_SECONDS_RE = re.compile(r"per_command_max_seconds=(\d+)")
 
 
-def _derived_per_command_seconds(usd_cap: str, usd_per_hour: str) -> int:
-    result = run_script(
-        full_args(
-            overrides={"--usd-cap": usd_cap, "--usd-per-hour": usd_per_hour},
-            extra=["--dry-run"],
-        )
-    )
+def test_max_seconds_is_required() -> None:
+    args = full_args(extra=["--dry-run"])
+    without = [a for a in args if a not in ("--max-seconds", "1800")]
+    result = run_script(without)
+    assert result.returncode != 0
+    assert "--max-seconds" in combined_output(result)
+
+
+def test_budget_is_printed_and_split_across_both_paid_commands() -> None:
+    result = run_script(full_args(extra=["--dry-run"]))
     output = combined_output(result)
     assert result.returncode == 0, output
     match = _MAX_SECONDS_RE.search(output)
     assert match, output
-    return int(match.group(1))
+    # Two paid commands share one ceiling: half each, so the total the probe
+    # can spend is the number supplied, not that number paid twice over.
+    assert int(match.group(1)) == 900, output
 
 
-def test_derived_budget_is_printed() -> None:
-    result = run_script(full_args(extra=["--dry-run"]))
-    output = combined_output(result)
-    assert "BUDGET" in output
-    assert _MAX_SECONDS_RE.search(output), output
+def test_zero_negative_or_non_integer_max_seconds_is_rejected() -> None:
+    for bad in ("0", "-1", "1800.5", "half-an-hour"):
+        result = run_script(
+            full_args(overrides={"--max-seconds": bad}, extra=["--dry-run"])
+        )
+        assert result.returncode != 0, bad
+        assert "--max-seconds" in combined_output(result), bad
 
 
-def test_derived_budget_scales_correctly_with_hourly_rate() -> None:
-    # A cheaper hourly rate affords more wall-clock time for the same
-    # dollar cap, so the derived --max-seconds budget must be strictly
-    # larger for --usd-per-hour 0.44 than for --usd-per-hour 1.00.
-    cheap_rate_seconds = _derived_per_command_seconds("2.50", "0.44")
-    expensive_rate_seconds = _derived_per_command_seconds("2.50", "1.00")
-    assert cheap_rate_seconds > expensive_rate_seconds
-
-
-def test_zero_or_negative_usd_cap_is_rejected() -> None:
-    result = run_script(full_args(overrides={"--usd-cap": "0"}, extra=["--dry-run"]))
+def test_max_seconds_above_the_hard_limit_is_rejected() -> None:
+    """The backstop catches a mistyped argument, e.g. a trailing extra zero."""
+    result = run_script(
+        full_args(overrides={"--max-seconds": "18000"}, extra=["--dry-run"])
+    )
     assert result.returncode != 0
-    assert "--usd-cap" in combined_output(result)
-
-    result = run_script(full_args(overrides={"--usd-cap": "-1"}, extra=["--dry-run"]))
-    assert result.returncode != 0
-    assert "--usd-cap" in combined_output(result)
+    assert "--max-seconds" in combined_output(result)
 
 
-def test_zero_or_negative_usd_per_hour_is_rejected() -> None:
-    result = run_script(full_args(overrides={"--usd-per-hour": "0"}, extra=["--dry-run"]))
-    assert result.returncode != 0
-    assert "--usd-per-hour" in combined_output(result)
+def test_probe_shell_sources_carry_no_monetary_literals() -> None:
+    """Money is a per-run approval; it may live in docs, never in the source.
 
+    Enforced as a test rather than a convention because the failure mode is
+    silent: a stale dollar figure in the source keeps being *mechanically
+    enforced* long after the approval it encoded was superseded, and every
+    downstream artifact still looks correct.
+
+    `bootstrap_pod.sh` is covered too — it does not spend directly, but it is
+    where the operator reads what the ceiling is before setting the provider
+    deadline, so a stale number there misinforms the one bound that survives
+    this process being SIGKILLed.
+    """
+    for script in (SCRIPT, SCRIPT.parent / "bootstrap_pod.sh"):
+        source = script.read_text()
+        for forbidden in ("usd", "USD", "per-hour"):
+            assert forbidden not in source, f"{script.name}: {forbidden}"
+        # `$1`/`${1}` are bash positional parameters, not money. A decimal
+        # point after the digits is what distinguishes a currency amount.
+        assert not re.search(r"\$[0-9]+\.[0-9]", source), f"{script.name}: dollar amount"
 
 # ---------------------------------------------------------------------------
 # --dry-run must not create the out-root directory or modify git state.

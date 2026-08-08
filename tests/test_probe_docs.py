@@ -1,10 +1,15 @@
-"""The probe operator guide is load-bearing, so its numbers are tested.
+"""The probe operator guide is load-bearing, so its *pasteable* commands are tested.
 
-`scripts/launch_probe.sh` derives its wall-clock `timeout` from `--usd-cap`. A
-stale cap in the guide therefore does not produce an unenforced budget — it
-produces a *mechanically enforced* one at the wrong number, which is worse,
-because everything downstream looks correct. These tests exist because the guide
-carried `$2.50` and a `5 h 00 m` deadline for hours after `$0.45` was approved.
+The guide once carried `--usd-cap 2.50` in its launch example for hours after
+`$0.45` had been approved — 5.5x — and `launch_probe.sh` derived its wall-clock
+`timeout` from that flag. A stale number in a pasteable command therefore did not
+produce an *unenforced* budget; it produced a **mechanically enforced one at a
+number nobody had approved**, with everything downstream looking correct.
+
+The fix was structural: money left the source entirely, so the only remaining way
+for a stale figure to be enforced is for someone to paste one out of this guide.
+These tests police exactly that boundary — **prose may record the approval as
+audit/policy; a fenced command block may not carry a currency amount.**
 """
 
 from __future__ import annotations
@@ -13,31 +18,70 @@ import re
 from pathlib import Path
 
 GUIDE = Path("docs/probe-bootstrap.md")
-APPROVED_CAP = "0.45"
+
+_FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
+# A currency amount is a `$` carrying a decimal (`$0.45`), a `$` next to a rate
+# word (`$45/hr`), or a bare decimal next to one (`0.44usd/hr`). Bash's `$1` in
+# `awk '{print $1}'` and `${VAR}` are positional parameters, not money.
+_MONEY_RE = re.compile(
+    r"\$\s*\d+\.\d+"
+    r"|\$\s*\d+\s*(?:/\s*hr|usd|USD|per[- ]hour)"
+    r"|\d+\.\d+\s*(?:usd|USD|/\s*hr|per[- ]hour)"
+)
 
 
 def _text() -> str:
     return GUIDE.read_text()
 
 
-def test_no_superseded_dollar_cap_survives() -> None:
-    assert "2.50" not in _text(), "the superseded $2.50 cap is 5.5x the approved ceiling"
+def _code_blocks() -> list[str]:
+    return _FENCE_RE.findall(_text())
+
+
+def test_the_guide_has_pasteable_command_blocks_to_police() -> None:
+    """Guard the guard: the other tests are vacuous if the fences stop matching."""
+    blocks = _code_blocks()
+    assert len(blocks) >= 3, blocks
+    assert any("launch_probe.sh" in b for b in blocks), "no launch example found"
+
+
+def test_no_currency_amount_appears_in_any_pasteable_command() -> None:
+    for block in _code_blocks():
+        hits = _MONEY_RE.findall(block)
+        assert not hits, f"currency amount in a pasteable command: {hits}\n{block}"
+
+
+def test_the_launch_example_passes_max_seconds_and_no_money_flags() -> None:
+    launch = [b for b in _code_blocks() if "launch_probe.sh" in b]
+    assert launch, "no launch example found"
+    for block in launch:
+        assert "--max-seconds" in block
+        assert "--usd-cap" not in block
+        assert "--usd-per-hour" not in block
+
+
+def test_no_superseded_cap_survives_anywhere() -> None:
+    """`2.50` was the specific stale figure; it must not reappear in any form."""
+    assert "2.50" not in _text()
 
 
 def test_no_multi_hour_deadline_survives() -> None:
-    """At any plausible rate a multi-hour deadline exceeds a $0.45 cap."""
+    """At any plausible pod rate a multi-hour deadline blows the approved ceiling."""
     hits = re.findall(r"\b\d+\s*h\s*\d*\s*m?\b", _text())
     assert not hits, f"multi-hour deadline(s) left in the guide: {hits}"
 
 
-def test_the_launch_example_uses_the_approved_cap() -> None:
-    assert f"--usd-cap {APPROVED_CAP}" in _text()
+def test_the_derivation_is_stated_as_a_rule_not_only_a_worked_example() -> None:
+    """A number computed at one rate is not a rule; the operator needs the rule."""
+    assert "approved_ceiling / actual_rate_per_hour" in _text()
+
+
+def test_the_two_bounds_are_documented_as_independent() -> None:
+    """The script's timeout dies with the script; only the provider's outlives it."""
+    text = _text()
+    assert "independent bounds" in text
+    assert "auto-termination" in text
 
 
 def test_calibration_is_excluded_in_writing() -> None:
     assert "Calibration is NOT approved" in _text()
-
-
-def test_the_deadline_rule_is_stated_generally_not_only_as_an_example() -> None:
-    """A worked example at one rate is not a rule; the guide must state the rule."""
-    assert "$0.45 / actual_rate" in _text()
