@@ -19,6 +19,7 @@ duplicate-source-of-truth this change exists to remove.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 GUIDE = Path("docs/probe-bootstrap.md")
@@ -93,6 +94,38 @@ def test_timing_derivation_is_fail_closed_and_persisted() -> None:
     assert "Refusing to overwrite" in block
     assert "probe_timing.txt" in block
     assert "tee \"${TIMING_RECEIPT}\"" in block
+    assert "prepare_probe_deadlines()" in block
+    assert "return 1" in block
+    assert "exit 1" not in block
+    assert "readonly" not in block
+
+
+def test_bad_derivation_does_not_kill_the_interactive_shell() -> None:
+    block = next(b for b in _code_blocks() if "prepare_probe_deadlines()" in b)
+    snippet = re.sub(r"^```bash\n|\n```$", "", block)
+    result = subprocess.run(
+        ["bash"],
+        input=f"set -e\n{snippet}\nprintf 'STILL_ALIVE\\n'\n",
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert "STILL_ALIVE" in result.stdout, result.stderr
+
+
+def test_existing_timing_receipt_has_non_destructive_recovery_instructions() -> None:
+    block = next(b for b in _code_blocks() if "prepare_probe_deadlines()" in b)
+    assert "renaming it with a UTC suffix; never delete it" in block
+    assert "mv --" in block
+    assert ".rejected" in block
+
+
+def test_receipt_and_launcher_share_one_output_root() -> None:
+    derivation = next(b for b in _code_blocks() if "PROBE_OUT_ROOT=" in b)
+    launch = next(b for b in _code_blocks() if "launch_probe.sh" in b)
+    assert 'TIMING_RECEIPT="${PROBE_OUT_ROOT}/probe_timing.txt"' in derivation
+    assert '--out-root "${PROBE_OUT_ROOT}"' in launch
+    assert 'tee "${PROBE_OUT_ROOT}/probe.log"' in launch
 
 
 def test_provider_and_shutdown_margins_are_distinct_and_stack() -> None:

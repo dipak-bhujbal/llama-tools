@@ -164,34 +164,58 @@ absolute epochs, not a relative duration, so pausing after derivation cannot sil
 either deadline later:
 
 ```bash
-# The absolute UTC deadline you set at pod creation.
-PROVIDER_TERMINATION="<THE_ISO8601_DEADLINE_YOU_SET>"
-SHUTDOWN_RESERVE_SECONDS=180
-TIMING_RECEIPT=/workspace/persist/study2/probe_timing.txt
+prepare_probe_deadlines() {
+  # The absolute UTC deadline you set at pod creation.
+  PROVIDER_TERMINATION="<THE_ISO8601_DEADLINE_YOU_SET>"
+  SHUTDOWN_RESERVE_SECONDS=180
+  PROBE_OUT_ROOT=/workspace/persist/study2
+  TIMING_RECEIPT="${PROBE_OUT_ROOT}/probe_timing.txt"
 
-provider_termination_epoch=$(date -u -d "${PROVIDER_TERMINATION}" +%s)
-derivation_epoch=$(date -u +%s)
-SCRIPT_DEADLINE_EPOCH=$(( provider_termination_epoch - SHUTDOWN_RESERVE_SECONDS ))
-remaining_seconds_at_derivation=$(( SCRIPT_DEADLINE_EPOCH - derivation_epoch ))
+  # A retry must never inherit usable-looking values from an earlier attempt.
+  unset provider_termination_epoch SCRIPT_DEADLINE_EPOCH
+  unset derivation_epoch remaining_seconds_at_derivation
 
-if (( remaining_seconds_at_derivation <= 0 )); then
-  echo "No usable probe time remains before provider termination" >&2
-  exit 1
+  if [[ -e "${TIMING_RECEIPT}" ]]; then
+    echo "Refusing to overwrite existing timing receipt: ${TIMING_RECEIPT}" >&2
+    echo "Preserve it by renaming it with a UTC suffix; never delete it." >&2
+    echo 'Example: mv -- "${TIMING_RECEIPT}" "${TIMING_RECEIPT}.$(date -u +%Y%m%dT%H%M%SZ).rejected"' >&2
+    return 1
+  fi
+  if ! provider_termination_epoch=$(date -u -d "${PROVIDER_TERMINATION}" +%s); then
+    echo "Invalid provider deadline; correct PROVIDER_TERMINATION and retry." >&2
+    unset provider_termination_epoch
+    return 1
+  fi
+
+  derivation_epoch=$(date -u +%s)
+  SCRIPT_DEADLINE_EPOCH=$(( provider_termination_epoch - SHUTDOWN_RESERVE_SECONDS ))
+  remaining_seconds_at_derivation=$(( SCRIPT_DEADLINE_EPOCH - derivation_epoch ))
+
+  if (( remaining_seconds_at_derivation <= 0 )); then
+    echo "No usable probe time remains before provider termination" >&2
+    unset provider_termination_epoch SCRIPT_DEADLINE_EPOCH
+    unset derivation_epoch remaining_seconds_at_derivation
+    return 1
+  fi
+
+  if ! {
+    echo "provider_termination=${PROVIDER_TERMINATION}"
+    echo "provider_termination_epoch=${provider_termination_epoch}"
+    echo "script_deadline_epoch=${SCRIPT_DEADLINE_EPOCH}"
+    echo "derivation_epoch=${derivation_epoch}"
+    echo "shutdown_reserve_seconds=${SHUTDOWN_RESERVE_SECONDS}"
+    echo "remaining_seconds_at_derivation=${remaining_seconds_at_derivation}"
+  } | tee "${TIMING_RECEIPT}"; then
+    echo "Could not persist timing receipt; refusing to launch." >&2
+    unset provider_termination_epoch SCRIPT_DEADLINE_EPOCH
+    unset derivation_epoch remaining_seconds_at_derivation
+    return 1
+  fi
+}
+
+if ! prepare_probe_deadlines; then
+  echo "Deadline derivation failed; correct the input and rerun this block. Do not launch." >&2
 fi
-if [[ -e "${TIMING_RECEIPT}" ]]; then
-  echo "Refusing to overwrite existing timing receipt: ${TIMING_RECEIPT}" >&2
-  exit 1
-fi
-
-{
-  echo "provider_termination=${PROVIDER_TERMINATION}"
-  echo "provider_termination_epoch=${provider_termination_epoch}"
-  echo "script_deadline_epoch=${SCRIPT_DEADLINE_EPOCH}"
-  echo "derivation_epoch=${derivation_epoch}"
-  echo "shutdown_reserve_seconds=${SHUTDOWN_RESERVE_SECONDS}"
-  echo "remaining_seconds_at_derivation=${remaining_seconds_at_derivation}"
-} | tee "${TIMING_RECEIPT}"
-readonly provider_termination_epoch SCRIPT_DEADLINE_EPOCH
 ```
 
 This writes both deadlines, the derivation time, reserve and remaining time to the
@@ -215,7 +239,7 @@ tmux new-session -d -s probe \
      --commit <REVIEWED_40_CHAR_SHA> \
      --provider-deadline-epoch "${provider_termination_epoch}" \
      --deadline-epoch "${SCRIPT_DEADLINE_EPOCH}" \
-     --out-root /workspace/persist/study2 2>&1 | tee /workspace/persist/study2/probe.log"
+     --out-root "${PROBE_OUT_ROOT}" 2>&1 | tee "${PROBE_OUT_ROOT}/probe.log""
 ```
 
 **Detached (`-d`) and `tee`'d on purpose.** A foreground `tmux new -s probe` blocks the
