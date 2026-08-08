@@ -309,12 +309,15 @@ Next (the only remaining step, and it is the paid one):
   tmux new-session -d -s probe \\
     "bash scripts/launch_probe.sh \\
        --commit ${commit} \\
-       --max-seconds <DERIVED_FROM_APPROVED_CEILING_AND_LIVE_RATE> \\
+       --provider-deadline-epoch <EPOCH_FROM_PROVIDER_DEADLINE> \\
+       --deadline-epoch <PROVIDER_DEADLINE_MINUS_SHUTDOWN_RESERVE> \\
        --out-root ${out_root} 2>&1 | tee ${out_root}/probe.log"
   tmux attach -t probe      # optional; detaching does not stop the run
 
 Detached session + tee: the run survives a dropped SSH connection and its
 stdout/stderr lands in the persistent root as durable evidence.
+Derive --deadline-epoch immediately before launch by subtracting the shutdown
+reserve from the provider deadline; see docs/probe-bootstrap.md.
 =====================================================================
 EOF
 

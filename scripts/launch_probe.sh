@@ -23,7 +23,7 @@
 #
 # Blocker 3 (an approved ceiling that was not mechanically enforced):
 #   Every paid generation command runs under `timeout`, bounded by a REQUIRED
-#   --max-seconds, so a hang or runaway generation cannot run unbounded.
+#   --deadline-epoch, so a hang or runaway generation cannot run unbounded.
 #
 #   This script deliberately knows nothing about money. A dollar ceiling is a
 #   per-run approval, not a property of reusable source: converting an approved
@@ -79,7 +79,8 @@ readonly NUM_PAID_COMMANDS=2
 
 usage() {
   cat <<'EOF'
-Usage: launch_probe.sh --commit <40-char-sha> --max-seconds <int> \
+Usage: launch_probe.sh --commit <40-char-sha> \
+       --provider-deadline-epoch <int> --deadline-epoch <int> \
        --out-root <dir> [--dry-run]
 
 Required:
@@ -88,23 +89,17 @@ Required:
   --out-root <dir>        Root directory under which the two probe categories'
                           --out-dir subdirectories are written.
 
-  --max-seconds <int>     Wall-clock ceiling in seconds for the whole probe.
-                          Stamped once into ONE absolute deadline that both
-                          paid commands share; each gets whatever is left when
-                          it starts, so the sequence is bounded rather than
-                          each command separately. Must be a positive integer.
+  --deadline-epoch <int>  Shared in-process deadline as Unix epoch seconds.
+                          Derive it OUTSIDE this script by subtracting the
+                          shutdown reserve from the provider deadline. Both
+                          paid commands share this exact absolute deadline;
+                          it never resets or shifts if launch is delayed.
 
-                          Derive it OUTSIDE this script, IMMEDIATELY BEFORE
-                          launch, from the time actually left until the
-                          provider deadline:
-
-                            provider_termination_epoch - now - shutdown_reserve
-
-                          Not from the approved ceiling and rate: bootstrap
-                          already spent billed time, so re-deriving from the
-                          full ceiling would grant that time a second time.
-                          This script knows neither the ceiling nor the rate,
-                          deliberately, and carries no ceiling of its own.
+  --provider-deadline-epoch <int>
+                          Provider auto-termination deadline as Unix epoch
+                          seconds. The script refuses to run unless its shared
+                          deadline is strictly earlier, mechanically nesting
+                          the in-process bound inside the external hard stop.
 
 Optional:
   --dry-run               Print every command that would run, in order, and
@@ -122,12 +117,13 @@ EOF
 # ---------------------------------------------------------------------------
 commit=""
 out_root=""
-max_seconds_override=""
+deadline_epoch_input=""
+provider_deadline_epoch=""
 dry_run=0
 
 # require_value aborts *before* `shift`ing past the end of $@ or silently
-# swallowing the next flag as a value (e.g. `--commit --max-seconds` should be
-# reported as a missing --commit value, not consume --max-seconds as the SHA).
+# swallowing the next flag as a value (e.g. `--commit --deadline-epoch` should
+# be reported as a missing --commit value, not consume the next flag as the SHA).
 require_value() {
   local flag="$1"
   local value="${2:-}"
@@ -150,9 +146,14 @@ while [[ $# -gt 0 ]]; do
       out_root="$2"
       shift 2
       ;;
-    --max-seconds)
-      require_value "--max-seconds" "${2:-}"
-      max_seconds_override="$2"
+    --deadline-epoch)
+      require_value "--deadline-epoch" "${2:-}"
+      deadline_epoch_input="$2"
+      shift 2
+      ;;
+    --provider-deadline-epoch)
+      require_value "--provider-deadline-epoch" "${2:-}"
+      provider_deadline_epoch="$2"
       shift 2
       ;;
     --dry-run)
@@ -176,7 +177,8 @@ done
 # to hit missing-flag errors one at a time.
 missing_flags=()
 [[ -z "${commit}" ]] && missing_flags+=("--commit")
-[[ -z "${max_seconds_override}" ]] && missing_flags+=("--max-seconds")
+[[ -z "${deadline_epoch_input}" ]] && missing_flags+=("--deadline-epoch")
+[[ -z "${provider_deadline_epoch}" ]] && missing_flags+=("--provider-deadline-epoch")
 [[ -z "${out_root}" ]] && missing_flags+=("--out-root")
 if [[ ${#missing_flags[@]} -gt 0 ]]; then
   echo "ERROR: missing required flag(s): ${missing_flags[*]}" >&2
@@ -192,11 +194,15 @@ if ! [[ "${commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit "${EXIT_USAGE}"
 fi
 
-# --max-seconds must be a positive integer: it feeds `timeout` directly, and a
-# zero/negative/garbage value would disable the only bound this script enforces.
+# Both deadlines must be positive integer epochs. Invalid values would disable
+# or invert the only bounds this script enforces.
 # ---------------------------------------------------------------------------
-if ! [[ "${max_seconds_override}" =~ ^[0-9]+$ ]] || [[ "${max_seconds_override}" -le 0 ]]; then
-  echo "ERROR: --max-seconds must be a positive integer, got: '${max_seconds_override}'" >&2
+if ! [[ "${deadline_epoch_input}" =~ ^[0-9]+$ ]] || [[ "${deadline_epoch_input}" -le 0 ]]; then
+  echo "ERROR: --deadline-epoch must be a positive integer, got: '${deadline_epoch_input}'" >&2
+  exit "${EXIT_USAGE}"
+fi
+if ! [[ "${provider_deadline_epoch}" =~ ^[0-9]+$ ]] || [[ "${provider_deadline_epoch}" -le 0 ]]; then
+  echo "ERROR: --provider-deadline-epoch must be a positive integer, got: '${provider_deadline_epoch}'" >&2
   exit "${EXIT_USAGE}"
 fi
 
@@ -204,16 +210,14 @@ fi
 # Blocker 3: bound the whole paid sequence by ONE absolute deadline, stamped
 # once here and never reset.
 #
-# --max-seconds arrives already derived, immediately before launch, from the
-# time actually remaining until the provider deadline. This script does not
-# compute it from money: a monetary ceiling is a per-run approval, not a
-# property of reusable source. Nor does it carry a sanity ceiling of its own —
-# a number here claiming "longer than any approved probe" is exactly the kind
-# of policy claim that goes stale in source. The authoritative bounds are the
-# provider deadline and the externally derived remaining duration.
+# The two absolute deadlines arrive already derived. This script does not
+# compute them from money: a monetary ceiling is a per-run approval, not a
+# property of reusable source. Nor does it carry a sanity ceiling of its own.
+# Absolute epochs are used instead of a relative duration so pausing between
+# derivation and launch cannot silently move the bound later.
 #
 # A SHARED DEADLINE, NOT A PER-COMMAND BUDGET. An earlier version split
-# --max-seconds evenly across the two paid commands, which is wrong for this
+# the allowed duration evenly across the two paid commands, which is wrong for this
 # workload: category=multiple is 200 prompts x 2 candidates = 400 generations,
 # category=simple_python is 400 x 2 = 800. An even split hands the command with
 # twice the work the same allowance, so the probe would reliably be killed
@@ -221,9 +225,21 @@ fi
 # whatever is left of the shared deadline, so slack from a fast first command
 # flows to the second and the sequence as a whole is what is bounded.
 # ---------------------------------------------------------------------------
-total_max_seconds="${max_seconds_override}"
-deadline_epoch=$(( $(date +%s) + total_max_seconds ))
-readonly total_max_seconds deadline_epoch
+derivation_epoch=$(date +%s)
+deadline_epoch="${deadline_epoch_input}"
+total_max_seconds=$(( deadline_epoch - derivation_epoch ))
+if [[ "${total_max_seconds}" -le 0 ]]; then
+  echo "ERROR: --deadline-epoch ${deadline_epoch} has already passed" >&2
+  echo "       (current epoch ${derivation_epoch}); refusing to launch." >&2
+  exit "${EXIT_USAGE}"
+fi
+if [[ "${deadline_epoch}" -ge "${provider_deadline_epoch}" ]]; then
+  echo "ERROR: script deadline ${deadline_epoch} is not earlier than provider deadline" >&2
+  echo "       ${provider_deadline_epoch}. Re-derive --deadline-epoch by" >&2
+  echo "       subtracting the shutdown reserve; refusing to launch." >&2
+  exit "${EXIT_USAGE}"
+fi
+readonly total_max_seconds derivation_epoch deadline_epoch provider_deadline_epoch
 
 # Seconds left before the shared deadline. Monotonically shrinking across the
 # run by construction — there is no path that extends it.
@@ -235,7 +251,8 @@ remaining_seconds() {
 
 echo "====================================================================="
 echo "BUDGET: wall-clock only; ${NUM_PAID_COMMANDS} paid commands share ONE deadline"
-echo "BUDGET: total_max_seconds=${total_max_seconds} deadline_epoch=${deadline_epoch}"
+echo "BUDGET: derivation_epoch=${derivation_epoch} total_max_seconds=${total_max_seconds}"
+echo "BUDGET: deadline_epoch=${deadline_epoch} provider_deadline_epoch=${provider_deadline_epoch}"
 echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours from now, absolute)"
 echo "NOTE: this script enforces wall-clock only. The monetary ceiling and the"
 echo "      provider-side auto-termination are enforced outside it, and the"
@@ -372,8 +389,8 @@ run_generation() {
   if [[ "${budget}" -le 0 ]]; then
     echo "ERROR: the shared wall-clock deadline passed before ${label} started" >&2
     echo "       (${budget}s remaining). Refusing to launch: this generation" >&2
-    echo "       would be billed and then killed. Re-derive --max-seconds from" >&2
-    echo "       the time left until the provider deadline and re-run." >&2
+    echo "       would be billed and then killed. Re-derive --deadline-epoch" >&2
+    echo "       from the provider deadline and shutdown reserve, then re-run." >&2
     exit "${EXIT_GENERATION_FAILED}"
   fi
 
@@ -461,7 +478,9 @@ on_exit() {
       fi
     done
   done
-  echo "  plus: eval/out/pip_freeze.txt eval/out/gpu.txt eval/out/image_tag.txt"
+  echo "  plus: ${out_root}/pip_freeze.txt ${out_root}/gpu.txt ${out_root}/image_tag.txt"
+  echo "  plus: ${out_root}/env_fingerprint.json ${out_root}/bundle_sha256.txt"
+  echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
   echo "  plus: this tmux session's stdout/stderr log"
   echo "====================================================================="
   return "${status}"
@@ -469,7 +488,7 @@ on_exit() {
 trap on_exit EXIT
 
 # Blocker 3, preflight half. The wall-clock bound is enforced by `timeout`, so
-# a missing `timeout` binary means --max-seconds is unenforceable and the only
+# a missing `timeout` binary means --deadline-epoch is unenforceable and the only
 # remaining stop is the provider's.
 # This is checked HERE, before the detached checkout and before anything is
 # fetched, because discovering it later would leave the repo on a detached HEAD
@@ -491,10 +510,10 @@ if [[ -z "${timeout_bin}" ]]; then
     timeout_bin="timeout"
     echo "PREFLIGHT WARNING: neither 'timeout' nor 'gtimeout' found on this host." >&2
     echo "                  A real run here would REFUSE to start, because the" >&2
-    echo "                  --max-seconds bound is enforced by wall-clock timeout." >&2
+    echo "                  --deadline-epoch is enforced by wall-clock timeout." >&2
   else
     echo "ERROR: neither 'timeout' nor 'gtimeout' is on PATH." >&2
-    echo "       --max-seconds is enforced by a wall-clock timeout; without it" >&2
+    echo "       --deadline-epoch is enforced by a wall-clock timeout; without it" >&2
     echo "       the only remaining stop is the provider deadline, so this" >&2
     echo "       refuses to run rather than run unbounded." >&2
     echo "       Debian/Ubuntu pods: apt-get install coreutils." >&2

@@ -24,9 +24,8 @@ from pathlib import Path
 GUIDE = Path("docs/probe-bootstrap.md")
 
 _FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
-# A currency amount is a `$` carrying a decimal (`$0.45`), a `$` next to a rate
-# word (`$45/hr`), or a bare decimal next to one (`0.44usd/hr`). Bash's `$1` in
-# `awk '{print $1}'` and `${VAR}` are positional parameters, not money.
+# Match a currency sigil carrying a decimal or rate suffix, and a bare decimal
+# carrying a currency/rate suffix. Shell positional parameters are not money.
 _MONEY_RE = re.compile(
     r"\$\s*\d+\.\d+"
     r"|\$\s*\d+\s*(?:/\s*hr|usd|USD|per[- ]hour)"
@@ -55,11 +54,12 @@ def test_no_currency_amount_appears_in_any_pasteable_command() -> None:
         assert not hits, f"currency amount in a pasteable command: {hits}\n{block}"
 
 
-def test_the_launch_example_passes_max_seconds_and_no_money_flags() -> None:
+def test_the_launch_example_passes_absolute_deadlines_and_no_money_flags() -> None:
     launch = [b for b in _code_blocks() if "launch_probe.sh" in b]
     assert launch, "no launch example found"
     for block in launch:
-        assert "--max-seconds" in block
+        assert "--provider-deadline-epoch" in block
+        assert "--deadline-epoch" in block
         assert "--usd-cap" not in block
         assert "--usd-per-hour" not in block
 
@@ -77,7 +77,35 @@ def test_the_derivation_is_from_time_remaining_not_the_full_approved_ceiling() -
     by launch some of the approved ceiling is already spent. The bound the
     script gets must come from what is left until the provider deadline.
     """
-    assert "provider_termination_epoch" in _text()
+    blocks = [b for b in _code_blocks() if "provider_termination_epoch" in b]
+    assert blocks, "no pasteable time-remaining derivation found"
+    block = "\n".join(blocks)
+    assert "derivation_epoch" in block
+    assert "provider_termination_epoch - SHUTDOWN_RESERVE_SECONDS" in block
+    assert "SCRIPT_DEADLINE_EPOCH - derivation_epoch" in block
+
+
+def test_timing_derivation_is_fail_closed_and_persisted() -> None:
+    blocks = [b for b in _code_blocks() if "TIMING_RECEIPT" in b]
+    assert blocks, "no durable timing-receipt command found"
+    block = "\n".join(blocks)
+    assert "remaining_seconds_at_derivation <= 0" in block
+    assert "Refusing to overwrite" in block
+    assert "probe_timing.txt" in block
+    assert "tee \"${TIMING_RECEIPT}\"" in block
+
+
+def test_provider_and_shutdown_margins_are_distinct_and_stack() -> None:
+    text = _text()
+    assert "provider-cap margin" in text
+    assert "shutdown reserve" in text
+    assert "intentionally stack" in text
+
+
+def test_launch_mechanically_nests_the_script_and_provider_deadlines() -> None:
+    launch = "\n".join(b for b in _code_blocks() if "launch_probe.sh" in b)
+    assert "--provider-deadline-epoch" in launch
+    assert "--deadline-epoch" in launch
 
 
 def test_the_two_bounds_are_documented_as_independent() -> None:

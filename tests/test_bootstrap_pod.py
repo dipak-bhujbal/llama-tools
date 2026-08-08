@@ -121,6 +121,9 @@ def test_launch_hint_is_detached_and_logged() -> None:
     text = out(run_script(full_args()))
     assert "tmux new-session -d" in text
     assert "tee" in text
+    assert "PROVIDER_DEADLINE_MINUS_SHUTDOWN_RESERVE" in text
+    assert "provider-deadline-epoch" in text
+    assert "APPROVED_CEILING_AND_LIVE_RATE" not in text
 
 
 def test_unknown_image_tag_is_rejected_on_a_real_run() -> None:

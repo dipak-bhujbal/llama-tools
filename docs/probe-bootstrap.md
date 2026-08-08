@@ -33,8 +33,8 @@ accept `--terminate-after`, so a browser-created pod cannot be retrofitted:
 runpodctl pod create --terminate-after '<APPROVED_UTC_DEADLINE>' ...
 ```
 
-`--terminate-after` takes an **absolute UTC datetime**; `launch_probe.sh` takes a
-**required `--max-seconds`** and bounds every paid command with `timeout`. **They are two
+`--terminate-after` takes an **absolute UTC datetime**; `launch_probe.sh` takes required
+provider and script deadline epochs and bounds every paid command with `timeout`. **They are two
 independent bounds** — the provider's survives this machine sleeping or the script being
 SIGKILLed, the script's does not.
 
@@ -85,16 +85,18 @@ most `$0.45` authorises an amount rather than enforcing one. Only the provider-s
 enforces it.
 
 1. Record the **actual hourly rate** from the RunPod console and the **billing start time**.
-2. Enable **auto-termination** at a deadline whose maximum charge is **≤ `$0.45`**, keeping
-   a reserve for persistence and shutdown. **Derive the ceiling from the rate the console
-   actually shows for the pod you are creating** — do not carry a remembered rate. As a
-   worked example only, at `$0.57/hr` the cap buys about 47 minutes, so set the
-   deadline **strictly inside that — no more than 40 minutes** — leaving a reserve for
-   artifact persistence and shutdown. **The general rule, not the example:**
-   `deadline < $0.45 / actual_rate`, minus a shutdown reserve.
-3. Save proof (a console screenshot) into the persistent volume.
-**Do not derive `--max-seconds` here.** It is derived at launch, below, from the deadline
-you just set — see the next section for why the difference matters.
+2. Enable **auto-termination** at a deadline whose maximum charge is **≤ `$0.45`**.
+   **Derive that hard ceiling from the rate the console actually shows for the pod you are
+   creating** — do not carry a remembered rate. Round the affordable duration down to the
+   provider's supported resolution, then subtract a small **provider-cap margin** for clock,
+   rate-display and provider-rounding uncertainty. This margin protects the monetary ceiling.
+   The launch-time **shutdown reserve** below is distinct: it leaves time to persist artifacts
+   before provider SIGKILL. The two protections intentionally stack and must be recorded by
+   name; do not silently treat either one as the other.
+3. Save proof (a console screenshot) and a written record of the exact provider-cap margin
+   chosen into the persistent volume.
+**Do not derive the script deadline here.** It is derived at launch, below, from the
+provider deadline you just set — see the next section for why the difference matters.
 
 The script cannot verify this from inside the pod, by design — it has no account
 credentials. It requires an explicit attestation string and records it as evidence.
@@ -149,7 +151,7 @@ CUDA setup. The actual torch/CUDA/GPU versions are asserted and recorded at Step
 
 ## Pod: launch
 
-### Derive `--max-seconds` — immediately before launch, not earlier
+### Derive the script deadline — immediately before launch, not earlier
 
 **From the time remaining, never from the approved ceiling.** Bootstrap is billed: cloning,
 the venv, the 16 GB download and every preflight all ran on the meter. Deriving from the
@@ -157,34 +159,62 @@ full ceiling and rate at this point would hand the script the *original* full du
 second time, on top of what bootstrap already spent — the ceiling would be enforced twice
 over and the provider would terminate mid-probe.
 
-Run this on the pod, in the same shell, seconds before launching:
+Run this on the pod, in the same shell, seconds before launching. The launcher receives
+absolute epochs, not a relative duration, so pausing after derivation cannot silently move
+either deadline later:
 
 ```bash
 # The absolute UTC deadline you set at pod creation.
 PROVIDER_TERMINATION="<THE_ISO8601_DEADLINE_YOU_SET>"
-SHUTDOWN_RESERVE=180        # seconds kept back to persist artifacts and stop the pod
+SHUTDOWN_RESERVE_SECONDS=180
+TIMING_RECEIPT=/workspace/persist/study2/probe_timing.txt
 
 provider_termination_epoch=$(date -u -d "${PROVIDER_TERMINATION}" +%s)
-MAX_SECONDS=$(( provider_termination_epoch - $(date -u +%s) - SHUTDOWN_RESERVE ))
-echo "MAX_SECONDS=${MAX_SECONDS}"    # must be positive; if not, the pod has no useful time left
+derivation_epoch=$(date -u +%s)
+SCRIPT_DEADLINE_EPOCH=$(( provider_termination_epoch - SHUTDOWN_RESERVE_SECONDS ))
+remaining_seconds_at_derivation=$(( SCRIPT_DEADLINE_EPOCH - derivation_epoch ))
+
+if (( remaining_seconds_at_derivation <= 0 )); then
+  echo "No usable probe time remains before provider termination" >&2
+  exit 1
+fi
+if [[ -e "${TIMING_RECEIPT}" ]]; then
+  echo "Refusing to overwrite existing timing receipt: ${TIMING_RECEIPT}" >&2
+  exit 1
+fi
+
+{
+  echo "provider_termination=${PROVIDER_TERMINATION}"
+  echo "provider_termination_epoch=${provider_termination_epoch}"
+  echo "script_deadline_epoch=${SCRIPT_DEADLINE_EPOCH}"
+  echo "derivation_epoch=${derivation_epoch}"
+  echo "shutdown_reserve_seconds=${SHUTDOWN_RESERVE_SECONDS}"
+  echo "remaining_seconds_at_derivation=${remaining_seconds_at_derivation}"
+} | tee "${TIMING_RECEIPT}"
+readonly provider_termination_epoch SCRIPT_DEADLINE_EPOCH
 ```
 
-Record `provider_termination_epoch`, the derivation time and `MAX_SECONDS` in the run
-evidence. **The approved ceiling and the hourly rate stay external** — they justified the
-provider deadline; they are not inputs to the script.
+This writes both deadlines, the derivation time, reserve and remaining time to the
+persistent run evidence before launch. **The approved ceiling and the hourly rate stay
+external** — they justified the provider deadline; they are not inputs to the script. The
+snippet uses GNU `date`, intentionally: it runs on the Linux pod, not the macOS laptop.
 
-**One shared deadline, not two halves.** `launch_probe.sh` stamps `MAX_SECONDS` into a single
-absolute deadline and gives each paid command whatever is left when it starts. This matters
+**One shared deadline, not two halves.** `launch_probe.sh` gives each paid command whatever
+is left before `SCRIPT_DEADLINE_EPOCH`. This matters
 because the two commands are not the same size: `multiple` is 200 × 2 = **400 generations**,
 `simple_python` is 400 × 2 = **800**. An even split would give the command with twice the
 work the same allowance and reliably kill the probe mid-`simple_python`, after paying for it.
+The provider epoch is also passed explicitly; the script refuses to start unless its shared
+deadline is strictly earlier, so the two bounds are mechanically nested rather than merely
+assumed to be.
 
 ```bash
 cd llama-tools
 tmux new-session -d -s probe \
   "bash scripts/launch_probe.sh \
      --commit <REVIEWED_40_CHAR_SHA> \
-     --max-seconds "${MAX_SECONDS}" \
+     --provider-deadline-epoch "${provider_termination_epoch}" \
+     --deadline-epoch "${SCRIPT_DEADLINE_EPOCH}" \
      --out-root /workspace/persist/study2 2>&1 | tee /workspace/persist/study2/probe.log"
 ```
 
@@ -197,7 +227,8 @@ connection and the log lands in the persistent root as evidence rather than scro
 1. Both category directories contain `generations.jsonl`, `report.md` and
    `run_manifest.json`, and each manifest reads `"status": "complete"` with its embedded
    on-disk ID×candidate validation passing.
-2. `probe.log` and the Step-7 environment files are alongside them in the persistent root.
+2. `probe.log`, `probe_timing.txt` and the Step-7 environment files are alongside them in
+   the persistent root.
 3. **Stop the pod, then confirm in the console that billing stopped.** Record actual elapsed
    time and actual charge into the run evidence.
 

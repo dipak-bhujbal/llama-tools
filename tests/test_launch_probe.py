@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -26,10 +27,14 @@ SCRIPT = REPO_ROOT / "scripts" / "launch_probe.sh"
 # commit for --dry-run: the script never calls `git checkout` for real in
 # dry-run mode, it only prints the command it would run.
 VALID_SHA = "1f0850103660ab46dc489a4c91280190b4da6620"
+TEST_NOW = int(time.time())
+TEST_SCRIPT_DEADLINE = TEST_NOW + 1800
+TEST_PROVIDER_DEADLINE = TEST_NOW + 3600
 
 REQUIRED_FLAGS = {
     "--commit": VALID_SHA,
-    "--max-seconds": "1800",
+    "--provider-deadline-epoch": str(TEST_PROVIDER_DEADLINE),
+    "--deadline-epoch": str(TEST_SCRIPT_DEADLINE),
     "--out-root": "/tmp/launch_probe_test_out_root",
 }
 
@@ -191,19 +196,16 @@ def test_dry_run_orders_acquire_before_verify_before_first_generation() -> None:
 # ---------------------------------------------------------------------------
 # The wall-clock bound: supplied, not derived. The script deliberately knows
 # nothing about money — a per-run dollar approval is not a property of the
-# source, and baking one in means the source silently enforces a stale number
-# (a `--usd-cap 2.50` example outlived a `$0.45` approval by 5.5x once already).
+# source, and baking one in means the source silently enforces a stale approval.
 # ---------------------------------------------------------------------------
 
 _TIMEOUT_RE = re.compile(r"timeout --kill-after=30 (\d+)")
 
 
-def test_max_seconds_is_required() -> None:
-    args = full_args(extra=["--dry-run"])
-    without = [a for a in args if a not in ("--max-seconds", "1800")]
-    result = run_script(without)
+def test_deadline_epoch_is_required() -> None:
+    result = run_script(full_args(omit={"--deadline-epoch"}, extra=["--dry-run"]))
     assert result.returncode != 0
-    assert "--max-seconds" in combined_output(result)
+    assert "--deadline-epoch" in combined_output(result)
 
 
 def test_both_paid_commands_share_one_deadline_rather_than_splitting_it() -> None:
@@ -220,10 +222,26 @@ def test_both_paid_commands_share_one_deadline_rather_than_splitting_it() -> Non
     assert result.returncode == 0, output
     budgets = [int(x) for x in _TIMEOUT_RE.findall(output)]
     assert len(budgets) == 2, output
-    # Neither is a half. Both are the full remaining span, because dry-run
-    # spends no time between them.
-    assert budgets == [1800, 1800], output
+    # Neither is a half. Dry-run spends almost no time between them, but it may
+    # cross an epoch-second boundary; the second allowance may shrink and must
+    # never grow or reset.
+    assert 900 < budgets[1] <= budgets[0] <= 1800, output
     assert "share ONE deadline" in output
+
+
+def test_script_deadline_must_be_nested_inside_provider_deadline() -> None:
+    now = int(time.time())
+    result = run_script(
+        full_args(
+            overrides={
+                "--provider-deadline-epoch": str(now + 60),
+                "--deadline-epoch": str(now + 120),
+            },
+            extra=["--dry-run"],
+        )
+    )
+    assert result.returncode != 0, combined_output(result)
+    assert "not earlier than provider deadline" in combined_output(result)
 
 
 def test_the_deadline_is_absolute_and_printed_before_anything_can_spend() -> None:
@@ -234,26 +252,28 @@ def test_the_deadline_is_absolute_and_printed_before_anything_can_spend() -> Non
     assert output.index("deadline_epoch=") < output.index("--category multiple"), output
 
 
-def test_zero_negative_or_non_integer_max_seconds_is_rejected() -> None:
-    for bad in ("0", "-1", "1800.5", "half-an-hour"):
+def test_invalid_or_expired_deadline_epoch_is_rejected() -> None:
+    for bad in ("0", "-1", "1800.5", "later", str(int(time.time()) - 1)):
         result = run_script(
-            full_args(overrides={"--max-seconds": bad}, extra=["--dry-run"])
+            full_args(overrides={"--deadline-epoch": bad}, extra=["--dry-run"])
         )
         assert result.returncode != 0, bad
-        assert "--max-seconds" in combined_output(result), bad
+        assert "--deadline-epoch" in combined_output(result), bad
 
 
 def test_no_wall_clock_ceiling_is_hardcoded_in_the_script() -> None:
-    """A large --max-seconds is accepted: the script has no opinion on scale.
+    """A far-future deadline is accepted: the script has no opinion on scale.
 
     A built-in ceiling would be a policy claim in reusable source ("longer than
     any approved probe"), which is the same staleness failure money was removed
     for. The provider deadline and the externally derived remaining duration
     are the authoritative bounds.
     """
-    result = run_script(
-        full_args(overrides={"--max-seconds": "999999"}, extra=["--dry-run"])
-    )
+    now = int(time.time())
+    result = run_script(full_args(overrides={
+        "--deadline-epoch": str(now + 999999),
+        "--provider-deadline-epoch": str(now + 1000000),
+    }, extra=["--dry-run"]))
     assert result.returncode == 0, combined_output(result)
     source = SCRIPT.read_text()
     assert "HARD_LIMIT" not in source
@@ -343,12 +363,14 @@ def test_output_includes_stop_the_pod_reminder_and_artifact_paths() -> None:
     assert "STOP THE POD" in output
     assert "study2_probe_multiple/generations.jsonl" in output
     assert "study2_probe_simple_python/generations.jsonl" in output
+    assert "probe_timing.txt" in output
+    assert "/tmp/launch_probe_test_out_root/pip_freeze.txt" in output
 
 
 def test_preflight_warns_in_dry_run_when_timeout_binary_is_absent(tmp_path) -> None:
-    """The approved spend cap is enforced by `timeout`. A host without it must
-    be told, because a plan that prints fine here would refuse to start on a
-    pod. Dry run warns rather than fails so the plan stays reviewable off-pod.
+    """The script's wall-clock bound is enforced by `timeout`. A host without
+    it must be told, because a plan that prints fine here would refuse to start
+    on a pod. Dry run warns rather than fails so the plan stays reviewable off-pod.
     """
     # Stripping PATH down to a stub dir is not viable: the script legitimately
     # needs dirname/awk too, so a minimal PATH fails for the wrong reason.
