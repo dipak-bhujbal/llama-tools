@@ -109,7 +109,16 @@ the first preflight artifact onward, not copied at the end and hoped for.
 
 ```bash
 export RUNPOD_IMAGE_NAME="<the exact template tag you launched>"
-export HF_TOKEN="<read token>"
+
+# Type the token at the prompt. Do not paste it into an `export HF_TOKEN=...`
+# command and do not put it in a file. A token given as a command argument is
+# written to shell history in cleartext and is visible in `ps` to anything else
+# on the pod for as long as the command runs; a token in a file survives until
+# something deletes it, which on a volume that outlives the pod is indefinitely.
+# `read -rs` echoes nothing and never becomes a history entry, because the value
+# is stdin to a command rather than part of one.
+read -rsp 'HF read token: ' HF_TOKEN; echo
+export HF_TOKEN
 
 bash scripts/bootstrap_pod.sh \
   --bundle /workspace/llama-tools.bundle \
@@ -148,6 +157,67 @@ be false as provenance and probably uninstallable on a CUDA pod.
 **torch is deliberately not pinned** — it comes from the template's CUDA build, matched to
 the pod's driver. Installing a different torch over it is the usual way to break a working
 CUDA setup. The actual torch/CUDA/GPU versions are asserted and recorded at Step 6.
+
+## Pod: §0 smoke gate — run this before anything paid
+
+The 2026-08-08 §0 probe died at 64s with a CUDA illegal memory access and zero
+generations, and the cause is still indeterminate. Relaunching the full probe would
+spend the same money to learn the same nothing, because it varies four things at once.
+Run the isolation ladder first. It varies one thing per rung:
+
+| Rung | Configuration | What an adjacent pair isolates |
+|---|---|---|
+| 1 | raw base, explicit `cuda:0`, no `device_map` | — |
+| 2 | raw base, `device_map="auto"` | 1 vs 2 → **placement** |
+| 3 | `PeftModel`, adapter **disabled** | 2 vs 3 → **the PEFT wrapper** |
+| 4 | `PeftModel`, adapter **enabled** | 3 vs 4 → **adapter state** |
+
+Rung 3 is what the probe's `base` candidate ran; rung 4 is what the mining pilot ran
+successfully on 2026-08-07. One 609-token prompt, 8 new tokens per rung, seconds of GPU
+time. It aborts at the first failure and prints the verdict for that branch.
+
+```bash
+# Inspect the plan first — loads nothing, needs no GPU, and is reviewable off-pod.
+.venv/bin/python eval/isolation_ladder.py --dry-run
+
+.venv/bin/python eval/isolation_ladder.py \
+  --out /workspace/persist/study2/isolation_ladder.json
+```
+
+The script re-execs itself with `CUDA_LAUNCH_BLOCKING=1`; do not set it yourself and do
+not work around the re-exec. Setting that variable after the process has started is a
+no-op that looks like it worked, and without it a CUDA fault surfaces at some later
+synchronisation point and gets attributed to the wrong rung — which is exactly why the
+postmortem could not name a cause.
+
+It refuses to run if the first prompt is not 609 tokens. That is intended: a pass on some
+other prompt is not evidence about the crash.
+
+Read `isolation_ladder.json` before deciding anything. Each rung carries its own telemetry
+— resolved `hf_device_map`, `_attn_implementation`, peak/reserved VRAM, free/total VRAM,
+GPU name and UUID, driver, ECC counters and Xid codes, library versions. **Fields that
+could not be measured say so.** A consumer card has no ECC, and an unprivileged container
+usually cannot read the kernel log for Xid codes; those come back as `unavailable` with a
+reason, never as zero. Do not read a missing measurement as a clean result.
+
+### Watch the run with the liveness monitor, not with your eyes
+
+```bash
+# In the tmux session, note the launcher's PID, then from a second pane:
+bash scripts/probe_liveness.sh \
+  --log /workspace/persist/study2/probe.log \
+  --status-file /workspace/persist/study2/probe_status.json \
+  --pid <LAUNCHER_PID> --tmux-session probe --interval 30
+```
+
+It asserts positively: the process is alive, or a terminal record exists explaining why
+not, and that record carries an exit code. Exit `72` means the process is gone and left no
+account of itself — SIGKILL, the OOM killer, or host preemption. That is the one condition
+worth waking someone for, and it is the condition the previous mtime-watching monitor could
+not detect. **Log staleness is reported but never alerts**: a model load writes nothing for
+minutes while perfectly healthy.
+
+Monitor exit codes: `0` alive · `70` exited 0 · `71` exited nonzero · `72` died hard.
 
 ## Pod: launch
 

@@ -483,6 +483,17 @@ on_exit() {
   echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
   echo "  plus: this tmux session's stdout/stderr log"
   echo "====================================================================="
+
+  # Machine-readable terminal record, carrying this shell's PID.
+  #
+  # scripts/probe_liveness.sh reads this line and checks the pid against the one
+  # it was told to watch. Without the pid a monitor can only match on the prose
+  # footer above, and a log file appended by two consecutive runs would let it
+  # report the FIRST run's clean exit as the second run's outcome — a stale
+  # record read as a live one, which is the failure mode this whole exercise is
+  # about. Absence of this line after the process is gone is itself the signal:
+  # the trap never ran, so the process did not exit in an orderly way.
+  echo "PROBE_EXIT_RECORD pid=$$ exit=${status} elapsed=${elapsed}s completed_all_steps=${completed_all_steps} dry_run=${dry_run}"
   return "${status}"
 }
 trap on_exit EXIT
