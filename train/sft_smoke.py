@@ -26,8 +26,8 @@ Expected cost: $0.25-0.50.
 Prerequisites (on the pod)
 --------------------------
 - Repo cloned + `pip install -e ".[train]"` completed
-- `hf auth login --token $HF_TOKEN` ran successfully
-- `wandb login $WANDB_API_KEY` ran successfully
+- `hf auth login` ran successfully (interactive; set HF_TOKEN via `read -rs`, never `--token`)
+- `wandb login` ran successfully (interactive; reads WANDB_API_KEY from the environment)
 - Llama-3.1-8B-Instruct license accepted on HF (approved)
 
 Usage

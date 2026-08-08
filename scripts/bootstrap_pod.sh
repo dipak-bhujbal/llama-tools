@@ -41,7 +41,18 @@ out_root=""
 auto_terminate_set=""
 dry_run=0
 
-die() { echo "ERROR: $*" >&2; exit "${2:-$EXIT_USAGE}"; }
+# die takes (message, exit_code). The previous form was `echo "ERROR: $*"`, which
+# expanded BOTH arguments into the message, so every classified failure printed
+# its own exit code as if it were part of the sentence:
+#   "ERROR: bundle not found: /workspace/x.bundle 66"
+# A diagnostic that appends a stray integer to its own text is a small lie in the
+# one place an operator reads under time pressure on a billing pod.
+die() {
+  local message="$1"
+  local code="${2:-$EXIT_USAGE}"
+  echo "ERROR: ${message}" >&2
+  exit "${code}"
+}
 
 require_value() {
   [[ -n "${2:-}" && "${2:0:2}" != "--" ]] || die "$1 requires a value"
@@ -77,10 +88,45 @@ missing=()
 
 announce() { echo "+ $*"; }
 
-run() {
+# run_classified is the ONLY way this script executes a side-effecting command.
+#
+# It replaces a plain `run()` helper that leaned on `set -e`, which aborts with
+# the *tool's* exit code: a failed clone exits 128, which is git's opinion about
+# git and says nothing about which of this script's guarantees was violated. On
+# a pod where every second is billed, the operator needs the class in the first
+# line, not after reading the log. `run()` is deleted rather than kept unused —
+# an unclassified helper sitting in the file is what the next edit reaches for,
+# and it would reintroduce exactly the class this audit removed.
+#
+# Its dry-run guard was also `[[ cond ]] && return 0`, which is correct only
+# because bash exempts the non-final members of an AND-list from `set -e`: the
+# behaviour depended on a subtlety of errexit rather than on the code saying
+# what it meant. Written as an `if`, a future edit that moves the line cannot
+# silently change it.
+run_classified() {
+  local label="$1" code="$2"
+  shift 2
   announce "$@"
-  [[ "${dry_run}" -eq 1 ]] && return 0
-  "$@"
+  if [[ "${dry_run}" -eq 1 ]]; then
+    return 0
+  fi
+  local status=0
+  "$@" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    die "${label} failed (exit ${status})" "${code}"
+  fi
+}
+
+# assert_file exists so "the step ran without erroring" is never mistaken for
+# "the step produced its artifact". That distinction is not hypothetical here:
+# the retained mining-pilot artifact directory has no env_fingerprint.json,
+# pip_freeze.txt or gpu.txt, so the pilot's library versions are not traceably
+# measurable today. Nothing failed loudly at the time; the files just were not
+# there, and nothing asserted that they should be.
+assert_file() {
+  local path="$1" what="$2" code="$3"
+  [[ -f "${path}" ]] || die "${what} was not created at ${path}" "${code}"
+  [[ -s "${path}" ]] || die "${what} at ${path} is empty" "${code}"
 }
 
 # ---------------------------------------------------------------------------
@@ -136,10 +182,20 @@ echo "  image: ${image_tag}"
 # ---------------------------------------------------------------------------
 echo
 echo "STEP 2 — persistent evidence root"
-run mkdir -p "${out_root}"
+run_classified "mkdir -p ${out_root}" "${EXIT_ENV}" mkdir -p "${out_root}"
 if [[ "${dry_run}" -eq 0 ]]; then
-  touch "${out_root}/.write_probe" 2>/dev/null \
-    || die "--out-root ${out_root} is not writable" "${EXIT_ENV}"
+  # The `2>/dev/null` that used to be on this touch discarded the only text that
+  # distinguishes the failure modes: read-only filesystem, permission denied,
+  # ENOSPC, or a path component that is not a directory. All four collapsed into
+  # the same "is not writable" sentence, and the one telling detail — the volume
+  # was never mounted — looked identical to a permissions problem.
+  [[ -d "${out_root}" ]] \
+    || die "--out-root ${out_root} does not exist after mkdir -p" "${EXIT_ENV}"
+  touch "${out_root}/.write_probe" \
+    || die "--out-root ${out_root} is not writable (the touch error above is the reason)" \
+           "${EXIT_ENV}"
+  [[ -f "${out_root}/.write_probe" ]] \
+    || die "touch reported success but ${out_root}/.write_probe does not exist" "${EXIT_ENV}"
   rm -f "${out_root}/.write_probe"
 fi
 echo "  evidence root: ${out_root}"
@@ -156,7 +212,18 @@ if [[ "${dry_run}" -eq 0 ]]; then
   [[ -f "${bundle}" ]]          || die "bundle not found: ${bundle}" "${EXIT_BUNDLE}"
   [[ -f "${bundle_sha_file}" ]] || die "sidecar not found: ${bundle_sha_file}" "${EXIT_BUNDLE}"
   expected_sha="$(tr -d '[:space:]' < "${bundle_sha_file}" | cut -c1-64)"
-  if command -v sha256sum >/dev/null 2>&1; then
+  # A truncated, empty or line-mangled sidecar previously reached the comparison
+  # as a short string and failed as a "hash mismatch" — a message that accuses
+  # the bundle when the defect is in the receipt. Check the shape first so the
+  # two are never confused.
+  [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "sidecar ${bundle_sha_file} does not contain a 64-char lowercase hex digest (read: '${expected_sha}')" \
+           "${EXIT_BUNDLE}"
+  # `command -v` writes its result to stdout and nothing to stderr, so the
+  # discarded stream here never carried a diagnostic. Dropping the `2>&1` costs
+  # nothing and removes the pattern from the file entirely, so a future reader
+  # cannot cite it as precedent for suppressing a stream that does matter.
+  if command -v sha256sum >/dev/null; then
     actual_sha="$(sha256sum "${bundle}" | awk '{print $1}')"
   else
     actual_sha="$(shasum -a 256 "${bundle}" | awk '{print $1}')"
@@ -165,6 +232,7 @@ if [[ "${dry_run}" -eq 0 ]]; then
     || die "bundle hash mismatch: got ${actual_sha}, expected ${expected_sha}" "${EXIT_BUNDLE}"
   echo "  bundle sha256 verified: ${actual_sha}"
   echo "${actual_sha}" > "${out_root}/bundle_sha256.txt"
+  assert_file "${out_root}/bundle_sha256.txt" "bundle hash receipt" "${EXIT_ENV}"
 else
   announce sha256sum "${bundle}" "# compared against ${bundle_sha_file}"
 fi
@@ -174,14 +242,60 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "STEP 4 — clone at the reviewed commit"
-run git clone "${bundle}" llama-tools
-run git -C llama-tools checkout --detach "${commit}"
+run_classified "git clone from ${bundle}" "${EXIT_GIT}" git clone "${bundle}" llama-tools
+
 if [[ "${dry_run}" -eq 0 ]]; then
-  head_sha="$(git -C llama-tools rev-parse HEAD)"
+  # Assert the clone produced a repository before asking that repository
+  # anything. Without this, a clone that half-succeeded made the NEXT command
+  # the one that failed, and its error ("not a git repository") reads as a
+  # working-directory mistake rather than as the clone having failed.
+  [[ -d llama-tools/.git ]] \
+    || die "git clone reported success but llama-tools/.git does not exist" "${EXIT_GIT}"
+
+  # Assert the bundle actually CONTAINS the reviewed commit, before checkout.
+  # A bundle built from the wrong ref clones fine and then fails at checkout
+  # with git's own "reference is not a tree" — which sounds like a corrupt repo.
+  # The real fault is upstream, on the machine that built the bundle, and the
+  # operator needs to be told that rather than debugging the pod.
+  bundle_has_commit=0
+  git -C llama-tools cat-file -e "${commit}^{commit}" || bundle_has_commit=$?
+  [[ "${bundle_has_commit}" -eq 0 ]] \
+    || die "the bundle does not contain commit ${commit}; it was built from the wrong ref on the owner's machine" \
+           "${EXIT_GIT}"
+fi
+
+run_classified "git checkout --detach ${commit}" "${EXIT_GIT}" \
+  git -C llama-tools checkout --detach "${commit}"
+
+if [[ "${dry_run}" -eq 0 ]]; then
+  # rev-parse and status are themselves classified. Left to `set -e` they abort
+  # with git's exit code and no message at all, so a failure of the *assertion
+  # machinery* was indistinguishable in the log from a failure of the thing it
+  # asserts — the checkout landing on the wrong SHA.
+  head_sha=""
+  head_status=0
+  head_sha="$(git -C llama-tools rev-parse HEAD)" || head_status=$?
+  [[ "${head_status}" -eq 0 ]] \
+    || die "git rev-parse HEAD failed (exit ${head_status}); the checked-out SHA cannot be asserted" \
+           "${EXIT_GIT}"
+  # Shape-check before comparing: an empty or truncated rev-parse result would
+  # otherwise report as a plain SHA mismatch, blaming the checkout for a read
+  # that never returned anything.
+  [[ "${head_sha}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "git rev-parse HEAD returned '${head_sha}', not a 40-char SHA" "${EXIT_GIT}"
   [[ "${head_sha}" == "${commit}" ]] \
     || die "HEAD is ${head_sha}, expected ${commit}" "${EXIT_GIT}"
-  [[ -z "$(git -C llama-tools status --porcelain)" ]] \
-    || die "working tree is dirty immediately after clone" "${EXIT_GIT}"
+
+  dirty=""
+  dirty_status=0
+  dirty="$(git -C llama-tools status --porcelain)" || dirty_status=$?
+  [[ "${dirty_status}" -eq 0 ]] \
+    || die "git status --porcelain failed (exit ${dirty_status}); tree cleanliness cannot be asserted" \
+           "${EXIT_GIT}"
+  if [[ -n "${dirty}" ]]; then
+    echo "${dirty}" >&2
+    die "working tree is dirty immediately after clone (see git status above)" "${EXIT_GIT}"
+  fi
   echo "  HEAD asserted: ${head_sha}"
 fi
 
@@ -197,10 +311,36 @@ echo "STEP 5 — virtualenv + exact probe dependency spec"
 # not be importable and Step 6 would fail on every normal template. This flag is
 # what makes "inherit the image's torch" actually true instead of merely
 # intended.
-run python3 -m venv --system-site-packages llama-tools/.venv
-run llama-tools/.venv/bin/pip install -q --upgrade pip
+# The dependency spec is asserted to exist BEFORE the venv is built. pip's own
+# "could not open requirements file" arrives after the venv and a pip upgrade
+# have already been paid for, and reads as a pip problem rather than as the
+# checked-out tree being wrong.
+if [[ "${dry_run}" -eq 0 ]]; then
+  [[ -f llama-tools/requirements-probe.txt ]] \
+    || die "llama-tools/requirements-probe.txt is missing at ${commit}; the checkout is not the reviewed tree" \
+           "${EXIT_GIT}"
+fi
+
+run_classified "python3 -m venv" "${EXIT_ENV}" \
+  python3 -m venv --system-site-packages llama-tools/.venv
+
+# `venv` can exit 0 having produced an unusable environment (ensurepip failure
+# on a stripped image is the common one). Assert the interpreter and pip are
+# actually there and executable rather than inferring it from the exit code.
+if [[ "${dry_run}" -eq 0 ]]; then
+  [[ -x llama-tools/.venv/bin/python ]] \
+    || die "venv reported success but llama-tools/.venv/bin/python is missing or not executable" \
+           "${EXIT_ENV}"
+  [[ -x llama-tools/.venv/bin/pip ]] \
+    || die "venv reported success but llama-tools/.venv/bin/pip is missing or not executable" \
+           "${EXIT_ENV}"
+fi
+
+run_classified "pip install --upgrade pip" "${EXIT_ENV}" \
+  llama-tools/.venv/bin/pip install -q --upgrade pip
 # torch is intentionally NOT installed: it comes from the template's CUDA build.
-run llama-tools/.venv/bin/pip install -q -r llama-tools/requirements-probe.txt
+run_classified "pip install -r requirements-probe.txt" "${EXIT_ENV}" \
+  llama-tools/.venv/bin/pip install -q -r llama-tools/requirements-probe.txt
 
 # ---------------------------------------------------------------------------
 # STEP 6 — preflight. Everything that must be true BEFORE money is spent on
@@ -215,7 +355,10 @@ echo "STEP 6 — preflight (fail closed)"
 if [[ "${dry_run}" -eq 0 ]]; then
   timeout_bin=""
   for c in timeout gtimeout; do
-    command -v "$c" >/dev/null 2>&1 && { timeout_bin="$c"; break; }
+    if command -v "$c" >/dev/null; then
+      timeout_bin="$c"
+      break
+    fi
   done
   [[ -n "${timeout_bin}" ]] || die "GNU timeout not found; the spend cap cannot be enforced" \
     "${EXIT_ENV}"
@@ -227,7 +370,12 @@ else
 fi
 
 if [[ "${dry_run}" -eq 0 ]]; then
-  llama-tools/.venv/bin/python - "${out_root}" <<'PY' || exit 68
+  # `|| exit 68` was a bare literal duplicating EXIT_ENV, and it exited with no
+  # message of its own — the operator saw only Python's traceback and had to
+  # infer which preflight had failed. It now names the check and uses the
+  # constant, so renumbering EXIT_ENV cannot leave a stale 68 behind here.
+  env_preflight_status=0
+  llama-tools/.venv/bin/python - "${out_root}" <<'PY' || env_preflight_status=$?
 import json, sys
 from importlib.metadata import version
 
@@ -257,6 +405,14 @@ with open(f"{out_root}/env_fingerprint.json", "w") as f:
     json.dump(fingerprint, f, indent=2, sort_keys=True)
 print("  versions + imports + CUDA OK:", fingerprint["gpu"], "| CUDA", fingerprint["cuda"])
 PY
+  [[ "${env_preflight_status}" -eq 0 ]] \
+    || die "environment preflight failed (exit ${env_preflight_status}): version tuple, imports, or CUDA availability — see the traceback above" \
+           "${EXIT_ENV}"
+  # The fingerprint is the artifact that makes this run comparable to any other.
+  # Asserting it landed is the whole point: an absent fingerprint is precisely
+  # why the mining pilot's library versions cannot be compared to the probe's
+  # today, and that gap was silent at the time it was created.
+  assert_file "${out_root}/env_fingerprint.json" "environment fingerprint" "${EXIT_ENV}"
 else
   announce "python -c 'assert exact version tuple, imports, torch.cuda.is_available()'"
 fi
@@ -264,7 +420,8 @@ fi
 # HF access to the gated base model and the private SFT adapter, checked before
 # a 16GB download is attempted on billed time.
 if [[ "${dry_run}" -eq 0 ]]; then
-  llama-tools/.venv/bin/python - <<'PY' || exit 68
+  hf_preflight_status=0
+  llama-tools/.venv/bin/python - <<'PY' || hf_preflight_status=$?
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ.get("HF_TOKEN"))
@@ -274,6 +431,9 @@ api.repo_info("centuriandip/llama-3.1-8b-tools-sft",
               revision="b6f4da479f8c6fc044ee8b802a92f47780f970c5")
 print("  HF access OK (gated base + private adapter)")
 PY
+  [[ "${hf_preflight_status}" -eq 0 ]] \
+    || die "HF access preflight failed (exit ${hf_preflight_status}): the gated base or the private adapter is not reachable with this HF_TOKEN — see the traceback above" \
+           "${EXIT_ENV}"
 else
   announce "python -c 'HfApi().repo_info(base@rev); repo_info(sft-adapter@rev)'"
 fi
@@ -284,16 +444,57 @@ fi
 echo
 echo "STEP 7 — environment evidence -> ${out_root}"
 if [[ "${dry_run}" -eq 0 ]]; then
-  llama-tools/.venv/bin/pip freeze > "${out_root}/pip_freeze.txt"
+  pip_freeze_status=0
+  llama-tools/.venv/bin/pip freeze > "${out_root}/pip_freeze.txt" || pip_freeze_status=$?
+  [[ "${pip_freeze_status}" -eq 0 ]] \
+    || die "pip freeze failed (exit ${pip_freeze_status}); the dependency receipt for this run cannot be written" \
+           "${EXIT_ENV}"
+
+  # This block used to read:
+  #
+  #   nvidia-smi ... > gpu.txt 2>/dev/null || echo "nvidia-smi unavailable" > gpu.txt
+  #
+  # which is the fail-open pattern in its purest form. It discarded the reason,
+  # then WROTE AN ARTIFACT ASSERTING a reason it had just thrown away — and the
+  # run continued to paid inference as if the environment had been recorded.
+  # "unavailable" is also flatly inconsistent with STEP 6, which has already
+  # asserted torch.cuda.is_available() on this same host: if the CUDA runtime
+  # can see a device and nvidia-smi cannot, something is wrong with the pod that
+  # an operator must know about BEFORE spending, not discover in a postmortem.
+  # Stderr is preserved as evidence and the run stops.
+  nvidia_smi_status=0
   nvidia-smi --query-gpu=name,driver_version,memory.total \
-    --format=csv > "${out_root}/gpu.txt" 2>/dev/null || echo "nvidia-smi unavailable" \
-    > "${out_root}/gpu.txt"
+    --format=csv > "${out_root}/gpu.txt" 2> "${out_root}/gpu.stderr.txt" \
+    || nvidia_smi_status=$?
+  if [[ "${nvidia_smi_status}" -ne 0 ]]; then
+    echo "--- nvidia-smi stderr ---" >&2
+    cat "${out_root}/gpu.stderr.txt" >&2
+    die "nvidia-smi failed (exit ${nvidia_smi_status}) on a host where STEP 6 already asserted torch.cuda.is_available(); stderr preserved at ${out_root}/gpu.stderr.txt" \
+        "${EXIT_ENV}"
+  fi
+  rm -f "${out_root}/gpu.stderr.txt"
+
   echo "${image_tag}" > "${out_root}/image_tag.txt"
   echo "${auto_terminate_set}" > "${out_root}/auto_terminate_attestation.txt"
   echo "${commit}" > "${out_root}/reviewed_commit.txt"
+
+  # Explicit inventory assertion. Every file below is something a later reader
+  # needs in order to say what this run's environment WAS; a missing one is not
+  # a cosmetic gap, it is the difference between a measured claim and a guess.
+  # Checked here rather than trusted, because each was written by a separate
+  # command and `set -e` only proves those commands returned zero.
+  assert_file "${out_root}/pip_freeze.txt"                 "pip freeze receipt"        "${EXIT_ENV}"
+  assert_file "${out_root}/gpu.txt"                        "GPU receipt"               "${EXIT_ENV}"
+  assert_file "${out_root}/image_tag.txt"                  "image tag receipt"         "${EXIT_ENV}"
+  assert_file "${out_root}/auto_terminate_attestation.txt" "auto-terminate attestation" "${EXIT_ENV}"
+  assert_file "${out_root}/reviewed_commit.txt"            "reviewed-commit receipt"   "${EXIT_ENV}"
+  assert_file "${out_root}/env_fingerprint.json"           "environment fingerprint"   "${EXIT_ENV}"
+  assert_file "${out_root}/bundle_sha256.txt"              "bundle hash receipt"       "${EXIT_ENV}"
+  echo "  all 7 environment receipts asserted present and non-empty"
   ls -1 "${out_root}"
 else
   announce "pip freeze / nvidia-smi / image tag / attestation -> ${out_root}"
+  announce "assert all 7 environment receipts exist and are non-empty"
 fi
 
 cat <<EOF

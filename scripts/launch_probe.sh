@@ -277,6 +277,16 @@ announce() {
 # status. Centralizing this is what makes --dry-run a true simulation: every
 # side-effecting call in this script funnels through here or run_generation
 # below, so nothing can execute for real while --dry-run is set.
+#
+# ERREXIT IS NEVER TURNED OFF. The previous form of this function, and of the
+# two below it, wrapped the call in `set +e` / `set -e` to capture the exit
+# status. That opens a window in which the script's central guarantee — Blocker
+# 4, "nothing is allowed to fail silently and let a later, more expensive step
+# run anyway" — is not in force, and the window is exactly where the risky
+# command runs. It also restores `set -e` unconditionally rather than to its
+# prior value. `cmd || status=$?` captures the same status with errexit on for
+# the whole file, so "set -euo pipefail throughout" is true of the runtime and
+# not only of line 46.
 run_checked() {
   local label="$1" code="$2"
   shift 2
@@ -284,10 +294,8 @@ run_checked() {
   if [[ "${dry_run}" -eq 1 ]]; then
     return 0
   fi
-  set +e
-  "$@"
-  local status=$?
-  set -e
+  local status=0
+  "$@" || status=$?
   if [[ "${status}" -ne 0 ]]; then
     echo "ERROR: ${label} failed (exit ${status}) — aborting before any further spend" >&2
     exit "${code}"
@@ -313,25 +321,46 @@ step_git_checkout() {
     return 0
   fi
 
-  set +e
-  "${checkout_cmd[@]}"
-  local checkout_status=$?
-  set -e
+  local checkout_status=0
+  "${checkout_cmd[@]}" || checkout_status=$?
   if [[ "${checkout_status}" -ne 0 ]]; then
     echo "ERROR: git checkout --detach ${commit} failed (exit ${checkout_status})" >&2
     exit "${EXIT_GIT_UNCLEAN}"
   fi
 
-  local actual_head
-  actual_head="$("${head_cmd[@]}")"
+  # rev-parse and status are classified failures too. Previously both were bare
+  # command substitutions: if either git call itself failed, `set -e` aborted
+  # with git's exit code and printed nothing, so a broken *assertion* was
+  # indistinguishable in the log from the assertion having caught a real
+  # problem. The two demand opposite responses — one is a sick pod, the other is
+  # a wrong tree — and they must never present identically.
+  local actual_head="" head_status=0
+  actual_head="$("${head_cmd[@]}")" || head_status=$?
+  if [[ "${head_status}" -ne 0 ]]; then
+    echo "ERROR: git rev-parse HEAD failed (exit ${head_status}) after checkout." >&2
+    echo "       The checked-out SHA cannot be asserted, so it is not asserted." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
+  # Shape check before equality. An empty or truncated rev-parse result would
+  # otherwise be reported as a SHA mismatch — blaming the checkout for a read
+  # that returned nothing.
+  if ! [[ "${actual_head}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "ERROR: git rev-parse HEAD returned '${actual_head}', not a 40-char SHA." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
   if [[ "${actual_head}" != "${commit}" ]]; then
     echo "ERROR: HEAD is ${actual_head} after checkout, expected ${commit}." >&2
     echo "       Refusing to run a paid probe against an unpinned tree." >&2
     exit "${EXIT_GIT_UNCLEAN}"
   fi
 
-  local dirty
-  dirty="$("${status_cmd[@]}")"
+  local dirty="" dirty_status=0
+  dirty="$("${status_cmd[@]}")" || dirty_status=$?
+  if [[ "${dirty_status}" -ne 0 ]]; then
+    echo "ERROR: git status --porcelain failed (exit ${dirty_status}) after checkout." >&2
+    echo "       Tree cleanliness cannot be asserted, so it is not asserted." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
   if [[ -n "${dirty}" ]]; then
     echo "ERROR: working tree is dirty after checkout — refusing to run a paid probe" >&2
     echo "       against a non-reproducible tree. git status --porcelain:" >&2
@@ -432,10 +461,8 @@ run_bounded() {
   fi
 
   echo "---- launching billed command: ${label} (${budget}s left of shared deadline) ----"
-  set +e
-  "${timeout_bin}" --kill-after=30 "${budget}" "$@"
-  local status=$?
-  set -e
+  local status=0
+  "${timeout_bin}" --kill-after=30 "${budget}" "$@" || status=$?
   if [[ "${status}" -eq 124 ]]; then
     echo "ERROR: ${label} exhausted the shared wall-clock deadline and was killed" >&2
     echo "       after ${budget}s. This is the bound doing its job, not a crash." >&2
@@ -548,9 +575,13 @@ trap on_exit EXIT
 # and a pod billing for a download that can never be used. macOS ships coreutils
 # as `gtimeout`; the Linux pod images have `timeout`. Accept either, fail if
 # neither, and never fall back to running uncapped.
+# `command -v` writes the resolved path to stdout and nothing to stderr, so the
+# `2>&1` this used to carry never discarded a diagnostic. It is dropped anyway:
+# leaving one instance in the file makes the pattern citable as precedent, and
+# the pattern is what this audit exists to remove.
 timeout_bin=""
 for candidate in timeout gtimeout; do
-  if command -v "${candidate}" >/dev/null 2>&1; then
+  if command -v "${candidate}" >/dev/null; then
     timeout_bin="${candidate}"
     break
   fi
@@ -577,6 +608,49 @@ fi
 readonly timeout_bin
 echo "PREFLIGHT: wall-clock enforcement via '${timeout_bin}'"
 
+# Blocker 4, existence half. Every command this script runs is `${PYTHON}` plus
+# a script path, and neither was ever asserted to exist. A missing interpreter
+# or entry point therefore surfaced as whatever the *first* step that used it
+# happened to report: bash's "No such file or directory" (exit 127) funnelled
+# through run_checked and relabelled "acquire pinned BFCL fixtures failed",
+# which names the wrong thing. On a billing pod the operator then debugs the
+# fetcher instead of the venv.
+#
+# The interpreter is checked here, before the detached checkout, for the same
+# reason the timeout binary is: discovering it afterwards leaves the repo on a
+# detached HEAD with nothing to run.
+if [[ "${dry_run}" -eq 0 ]]; then
+  if [[ ! -x "${PYTHON}" ]]; then
+    echo "ERROR: no executable interpreter at ${PYTHON}." >&2
+    echo "       This script never falls back to whatever 'python' is on PATH —" >&2
+    echo "       a fresh pod's system python is not this project's environment." >&2
+    echo "       Run scripts/bootstrap_pod.sh first." >&2
+    exit "${EXIT_USAGE}"
+  fi
+  echo "PREFLIGHT: interpreter ${PYTHON}"
+else
+  echo "PREFLIGHT: would assert an executable interpreter at ${PYTHON}"
+fi
+
+# assert_entrypoint checks one script path and says which step needed it.
+# Called AFTER the detached checkout, because the question is whether the
+# REVIEWED tree carries these files — asserting against the pre-checkout tree
+# would answer a question nobody asked.
+#
+# Classified as EXIT_GIT_UNCLEAN, not EXIT_USAGE. Nothing about the operator's
+# invocation is wrong here — the tree standing at the pinned SHA is not the tree
+# that SHA describes, which is the same diagnosis and the same fix (rebuild the
+# checkout) as a wrong HEAD or a dirty worktree.
+assert_entrypoint() {
+  local path="$1" purpose="$2"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: ${purpose} entry point is missing: ${path}" >&2
+    echo "       The tree at ${commit} does not contain it. Refusing to start a" >&2
+    echo "       paid sequence that cannot complete." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
+}
+
 # Publish this shell's PID before any risky work, so the monitor is handed an
 # exact number instead of guessing with `pgrep -n -f`, which cannot recover a
 # launcher that has already died and can match an unrelated process.
@@ -594,12 +668,29 @@ else
   # truncated number, i.e. some other process entirely.
   printf '%s\n' "$$" > "${launcher_pid_file}.tmp.$$"
   mv -f "${launcher_pid_file}.tmp.$$" "${launcher_pid_file}"
+  # Asserted, not assumed. The monitor is started from this file; if it is
+  # absent the operator gets "PID file not found" minutes later and has no way
+  # to recover the number, because the process that knew it is the one being
+  # watched. A launch that cannot be monitored must not proceed to spend.
+  if [[ ! -s "${launcher_pid_file}" ]]; then
+    echo "ERROR: ${launcher_pid_file} is missing or empty after being written." >&2
+    echo "       The run would be unmonitorable; refusing to proceed to spend." >&2
+    exit "${EXIT_USAGE}"
+  fi
   echo "Launcher PID $$ recorded at ${launcher_pid_file}"
 fi
 
 echo
 echo "Planned steps (in order):"
 step_git_checkout
+
+# Asserted in BOTH modes, deliberately. A dry run whose printed plan references
+# a script that does not exist in this tree is not a reviewable plan — it is a
+# plan that will fail on the pod, reviewed as though it would work.
+assert_entrypoint "${REPO_ROOT}/eval/fetch_pinned_bfcl.py" "fixture acquire/verify"
+assert_entrypoint "${REPO_ROOT}/eval/isolation_ladder.py" "§0 smoke gate"
+assert_entrypoint "${REPO_ROOT}/eval/bfcl_simple.py"      "paid generation"
+echo "OK: all three entry points present at ${commit}."
 
 echo
 run_checked "acquire pinned BFCL fixtures" "${EXIT_ACQUIRE_FAILED}" "${acquire_cmd[@]}"

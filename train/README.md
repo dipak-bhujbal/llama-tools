@@ -23,8 +23,17 @@ Training scripts. Populated across **Weeks 2, 4, 6, 8**.
 # on the pod
 git clone https://github.com/dipak-bhujbal/llama-tools && cd llama-tools
 pip install -e ".[train]"
-hf auth login --token $HF_TOKEN
-wandb login $WANDB_API_KEY   # optional; script falls back to plain logging
+
+# Secrets are typed at a prompt, never passed as arguments: the shell expands
+# `--token $HF_TOKEN` before exec, leaving the value in the process's argv where
+# any `ps` on the pod can read it for the life of the command.
+read -rsp 'HF token: ' HF_TOKEN; echo
+export HF_TOKEN
+hf auth login                # interactive; reads HF_TOKEN from the environment
+
+read -rsp 'wandb key: ' WANDB_API_KEY; echo   # optional
+export WANDB_API_KEY
+wandb login                  # optional; script falls back to plain logging
 
 # the dataset is not in git — copy it up from local:
 # (from local machine)
@@ -144,7 +153,9 @@ Same 1x RTX A6000 48GB. Fresh-pod setup:
 ```bash
 cd /workspace && git clone https://github.com/dipak-bhujbal/llama-tools.git && cd llama-tools
 pip install -e ".[train]"
-hf auth login --token $HF_TOKEN
+read -rsp 'HF token: ' HF_TOKEN; echo   # typed, never echoed, never in argv
+export HF_TOKEN
+hf auth login                           # interactive; no --token flag
 
 # SFT adapter + v1 preference file from HF (no scp needed)
 hf download centuriandip/llama-3.1-8b-tools-sft --include "adapter/*" --local-dir /tmp/sft \

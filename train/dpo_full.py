@@ -21,8 +21,8 @@ Smoke-informed watch note (from the Week 5 smoke run):
 Prereqs on the pod:
 - Week 4 SFT complete; `outputs/sft-full/` present with the LoRA adapter.
 - `pip install -e ".[train]"` completed
-- `hf auth login --token $HF_TOKEN` succeeded
-- `wandb login $WANDB_API_KEY` (optional; script falls back to plain logging)
+- `hf auth login` succeeded (interactive; set HF_TOKEN via `read -rs`, never `--token`)
+- `wandb login` (optional; interactive. Script falls back to plain logging)
 - `data/processed/preferences_dpo.jsonl` present on the pod (10,242 pairs)
 
 Usage:

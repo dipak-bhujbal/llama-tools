@@ -12,9 +12,14 @@ environment-setup time by checking config-file access; it runs on cloud
 GPUs starting Week 2, not on your laptop.
 
 Prerequisites (see docs/learning/week-1-fundamentals.md):
-- HuggingFace account with API token exported as HF_TOKEN
+- HuggingFace account with API token exported as HF_TOKEN. Set it without
+  putting the value on a command line:
+      read -rsp 'HF token: ' HF_TOKEN; echo
+      export HF_TOKEN
 - Python 3.11+, transformers, torch, huggingface_hub installed
-- Optionally: `hf auth login --token $HF_TOKEN` for persistent auth
+- Optionally: `hf auth login` for persistent auth. Not `--token $HF_TOKEN`:
+  the shell expands that before exec, so the token sits in the new process's
+  argv and is readable by any `ps` on the box for the life of the command.
 
 Usage:
     python smoke.py

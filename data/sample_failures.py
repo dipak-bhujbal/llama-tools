@@ -17,7 +17,8 @@ eval/dpo_sweep.py) is NEVER sampled, so the final judging sweep stays clean.
 Prereqs on the pod:
 - SFT adapter at `outputs/sft-full/`
 - `data/processed/preferences_dpo.jsonl` present
-- `pip install -e ".[train]"`, `hf auth login --token $HF_TOKEN`
+- `pip install -e ".[train]"`, `hf auth login` (interactive; set HF_TOKEN via
+  `read -rs`, never `--token`, which leaves the value in argv)
 
 Usage:
     python data/sample_failures.py

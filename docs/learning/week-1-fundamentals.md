@@ -59,11 +59,14 @@ Do not let unfamiliar acronyms in this list stress you. We only cover them if an
 Do these in order. Estimated time: 2-3 hours total including account creation and troubleshooting.
 
 - [ ] **HuggingFace account:** already exist as `centuriandip`. Log in.
-- [ ] **HuggingFace API token:** at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with "write" access. Save to your shell:
+- [ ] **HuggingFace API token:** at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with "write" access. Put it in your shell **without ever typing the value into a command**:
   ```bash
-  export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX
+  read -rsp 'HF token: ' HF_TOKEN; echo
+  export HF_TOKEN
   ```
-  Add that to `~/.zshrc` (or wherever you keep environment variables). You'll use this token in code and in `huggingface-cli login`.
+  `read -rs` echoes nothing and takes no argument, so the token reaches neither your screen, your shell history, nor any process's argv. You'll use this token in code and via `hf auth login` (interactive — no `--token` flag).
+
+  > **Corrected 2026-08-08.** This step originally read `export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX` and told you to add that line to `~/.zshrc`. Both are wrong and this journal is public: a literal assignment lands in `~/.zsh_history` in cleartext, and a token in a shell rc file is a long-lived secret at rest in a file that gets backed up, synced, and screen-shared. The original wording is preserved in git history rather than pretended away.
 - [ ] **Accept Llama 3.1 license:** visit [huggingface.co/meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and accept the license terms. Meta requires this before you can download the model. Approval is usually near-instant to a few minutes.
       - Note: the smoke test does NOT use Llama — it uses SmolLM2-135M (non-gated, tiny, fast) — because the smoke test's job is to verify your environment, not test a specific model's access. Llama-3.1-8B is verified separately as part of environment setup.
 - [ ] **Runpod account:** sign up at [runpod.io](https://runpod.io). Add payment method (add $50 to start, top up as needed — don't add $1000 upfront). Familiarize with the console but do NOT launch a pod yet.
@@ -106,7 +109,7 @@ First run downloads the model (~300 MB) into `~/.cache/huggingface/`. Subsequent
 **Common failures:**
 - **`AttributeError` on tokenizer.apply_chat_template:** transformers version mismatch — reinstall with `.venv/bin/pip install -U transformers`.
 - **Package import error:** you're not in the repo's virtualenv. Either activate it (`source .venv/bin/activate`) or invoke Python via `.venv/bin/python smoke.py`.
-- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env` and re-run `hf auth login --token $HF_TOKEN`.
+- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env`, re-set it with `read -rsp 'HF token: ' HF_TOKEN; echo` then `export HF_TOKEN`, and re-run `hf auth login` (interactive, no `--token`).
 
 ---
 
