@@ -161,10 +161,12 @@ INCOMPLETE_VERDICT = (
 ALL_PASS_VERDICT = (
     "NOT REPRODUCED. All four configurations generated cleanly. The ladder "
     "excludes placement, the PEFT wrapper and adapter state as *sufficient* "
-    "causes at this scale, and points at something it deliberately does not "
-    "vary: prompt count (400 vs 1), sequence length across the full 280-999 "
-    "range, the second category, or time/thermal effects during a long run. It "
-    "does NOT clear the card — a green ladder on a sick GPU is possible."
+    "causes on this run. It does not identify a cause for the earlier failure: "
+    "that crash occurred on this same first 609-token prompt, before later "
+    "prompts or categories could contribute. Intermittent or nondeterministic "
+    "software behavior and differences in node, card, driver, or environment "
+    "remain open. Compare the recorded telemetry. A green ladder does NOT clear "
+    "the card or node from the original failure."
 )
 
 
@@ -507,9 +509,10 @@ def matches_s0_fault_signature(error: str | None) -> bool:
     if not error:
         return False
     lowered = error.lower()
-    return "illegal memory access" in lowered or (
-        "cuda error" in lowered and "device-side assert" in lowered
-    )
+    # Exact retained signature only. A device-side assert, OOM, NCCL failure or
+    # another CUDA-family error may be important, but it is not the illegal
+    # memory access the §0 probe recorded and must not be labelled a match.
+    return "cuda" in lowered and "illegal memory access" in lowered
 
 
 def summarise(results: list[StepResult]) -> dict:
@@ -538,22 +541,28 @@ def summarise(results: list[StepResult]) -> dict:
 
     # Deliberately two separate facts, because they answer different questions
     # and the old single `reproduces_s0_probe_crash` conflated them.
-    within_configuration = failed is not None and failed.step.index <= 3
+    at_or_before_configuration = failed is not None and failed.step.index <= 3
+    at_configuration = failed is not None and failed.step.index == 3
+    at_original_phase = failed is not None and failed.phase == "generate"
     signature_matches = matches_s0_fault_signature(failed.error) if failed else False
 
     if failed is None:
         reproduction = "not_applicable_no_failure"
-    elif within_configuration and signature_matches:
-        reproduction = "yes"
-    elif signature_matches:
+    elif at_configuration and at_original_phase and signature_matches:
+        reproduction = "yes_exact"
+    elif signature_matches and failed.step.index < 3:
+        reproduction = "same_fault_before_probe_configuration"
+    elif signature_matches and failed.step.index > 3:
         reproduction = "same_fault_outside_the_probe_configuration"
-    elif within_configuration:
+    elif at_configuration and signature_matches:
+        reproduction = "same_fault_at_probe_configuration_different_phase"
+    elif at_or_before_configuration:
         reproduction = "no_different_fault"
     else:
         reproduction = "no"
 
     return {
-        "schema": "isolation_ladder/v2",
+        "schema": "isolation_ladder/v3",
         "outcome": outcome,
         "category": PROBE_CATEGORY,
         "expected_prompt_tokens": EXPECTED_PROMPT_TOKENS,
@@ -569,7 +578,9 @@ def summarise(results: list[StepResult]) -> dict:
         "failed_phase": failed.phase if failed else None,
         # A fact about which configurations were exercised — NOT a claim that
         # the §0 crash was reproduced.
-        "failed_within_probe_configuration": within_configuration,
+        "failed_at_or_before_probe_configuration": at_or_before_configuration,
+        "failed_at_probe_configuration": at_configuration,
+        "failed_at_s0_phase": at_original_phase,
         "fault_signature_matches_s0": signature_matches,
         "s0_reproduction": reproduction,
         "verdict": verdict,

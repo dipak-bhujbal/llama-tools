@@ -173,9 +173,10 @@ spend the same money to learn the same nothing, because it varies four things at
 Run the isolation ladder first. It varies one thing per rung:
 
 **The ladder is itself billed.** It runs on a metered pod, loads an 8B model four times and
-generates tokens. It is cheaper than the full probe by a large factor — 4 loads and 32
-generated tokens against 1,200 generations — but it is not free, and it runs under the same
-absolute wall-clock deadline as everything else the launcher does.
+generates tokens. It reduces generation exposure — 4 loads and 32 generated tokens before
+the 1,200-generation probe — but it is not free. Its time and cost still need a fresh
+estimate and explicit approval before any pod starts, and it runs under the same absolute
+wall-clock deadline as the full model-execution commands.
 
 | Rung | Configuration | What an adjacent pair isolates |
 |---|---|---|
@@ -244,11 +245,22 @@ hard death looks like. An incomplete artifact carries `INCOMPLETE — NO CONCLUS
 the rung marked `running` as where it died. **Never read the absence of a failed rung as a
 pass**; only `outcome: all_passed` is a pass, and only that exits 0.
 
-`s0_reproduction` is separate from `failed_at_step` on purpose. A gated-repo 401 or a
-disk-full error at rung 1 fails inside the probe's configuration without being the fault the
-probe died of, so the ladder reports `failed_within_probe_configuration` and
-`fault_signature_matches_s0` as two distinct facts rather than inferring a reproduction from
-the rung index alone.
+`s0_reproduction` is separate from `failed_at_step` on purpose. The probe's realized
+configuration is rung 3. A gated-repo 401 or disk-full error at rung 1 fails *before* that
+configuration and is not the fault the probe recorded. The ladder therefore reports
+`failed_at_or_before_probe_configuration`, `failed_at_probe_configuration`,
+`failed_at_s0_phase`, and `fault_signature_matches_s0` as distinct facts. Exact reproduction
+requires rung 3 plus the retained illegal-memory-access signature in the `generate` phase:
+the original load and adapter attachment completed before the first prompt faulted. The same
+fault on rung 1 or 2 is reported as `same_fault_before_probe_configuration`, which is useful
+isolation evidence without being mislabelled as an exact reproduction. A rung-3 load-phase
+illegal access is likewise a different failure despite sharing the error string.
+
+A green ladder means only **not reproduced on this run**. The original failure happened on
+this same first 609-token prompt, before later prompts or the second category ran, so a green
+result does not point at prompt count, the later length range, or the second category. It
+leaves intermittent or nondeterministic behavior and node/card/driver/environment differences
+open; compare the telemetry rather than treating the original card or node as cleared.
 
 Read `isolation_ladder.json` before deciding anything. **Fields that could not be measured
 say so.** A consumer card has no ECC, and an unprivileged container usually cannot read the

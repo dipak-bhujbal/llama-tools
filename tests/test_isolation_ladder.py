@@ -469,16 +469,16 @@ def test_only_an_explicit_all_pass_is_green() -> None:
 
 
 # --- reproduction is a fault claim, not a rung index -------------------------
-def test_a_non_cuda_failure_inside_the_configuration_is_not_a_reproduction() -> None:
-    """A gated-repo 401 or a disk-full OSError at rung 1 fails inside the probe's
-    configuration without being the fault the probe died of. Calling it a
-    reproduction sends someone hunting a CUDA bug that isn't there."""
+def test_a_non_cuda_failure_before_the_configuration_is_not_a_reproduction() -> None:
+    """A gated-repo 401 or disk-full OSError at rung 1 fails before the probe's
+    realized rung-3 configuration and is not the fault the probe died of."""
     results = [il.StepResult(step=step) for step in il.LADDER]
     results[0].status = "failed"
     results[0].error = "OSError: 401 Client Error: gated repo for meta-llama/Llama-3.1-8B-Instruct"
 
     summary = il.summarise(results)
-    assert summary["failed_within_probe_configuration"] is True
+    assert summary["failed_at_or_before_probe_configuration"] is True
+    assert summary["failed_at_probe_configuration"] is False
     assert summary["fault_signature_matches_s0"] is False
     assert summary["s0_reproduction"] == "no_different_fault"
 
@@ -487,10 +487,41 @@ def test_the_actual_s0_fault_inside_the_configuration_is_a_reproduction() -> Non
     results = [il.StepResult(step=step) for step in il.LADDER]
     results[2].status = "failed"
     results[2].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
+    results[2].phase = "generate"
 
     summary = il.summarise(results)
     assert summary["fault_signature_matches_s0"] is True
-    assert summary["s0_reproduction"] == "yes"
+    assert summary["failed_at_s0_phase"] is True
+    assert summary["failed_at_probe_configuration"] is True
+    assert summary["s0_reproduction"] == "yes_exact"
+
+
+def test_same_signature_during_rung3_load_is_not_exact_reproduction() -> None:
+    """The retained run completed load and adapter attachment before the first
+    prompt faulted, so a load-phase illegal access is a different failure."""
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    results[2].status = "failed"
+    results[2].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
+    results[2].phase = "load"
+
+    summary = il.summarise(results)
+    assert summary["failed_at_probe_configuration"] is True
+    assert summary["failed_at_s0_phase"] is False
+    assert summary["fault_signature_matches_s0"] is True
+    assert summary["s0_reproduction"] == "same_fault_at_probe_configuration_different_phase"
+
+
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_same_fault_before_probe_configuration_is_not_exact_reproduction(fail_at: int) -> None:
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    results[fail_at - 1].status = "failed"
+    results[fail_at - 1].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
+
+    summary = il.summarise(results)
+    assert summary["failed_at_or_before_probe_configuration"] is True
+    assert summary["failed_at_probe_configuration"] is False
+    assert summary["fault_signature_matches_s0"] is True
+    assert summary["s0_reproduction"] == "same_fault_before_probe_configuration"
 
 
 def test_the_s0_fault_at_rung_4_is_outside_the_probes_configuration() -> None:
@@ -503,7 +534,8 @@ def test_the_s0_fault_at_rung_4_is_outside_the_probes_configuration() -> None:
     results[3].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
 
     summary = il.summarise(results)
-    assert summary["failed_within_probe_configuration"] is False
+    assert summary["failed_at_or_before_probe_configuration"] is False
+    assert summary["failed_at_probe_configuration"] is False
     assert summary["fault_signature_matches_s0"] is True
     assert summary["s0_reproduction"] == "same_fault_outside_the_probe_configuration"
 
@@ -512,9 +544,10 @@ def test_the_s0_fault_at_rung_4_is_outside_the_probes_configuration() -> None:
     "error,expected",
     [
         ("RuntimeError: CUDA error: an illegal memory access was encountered", True),
-        ("CUDA error: device-side assert triggered", True),
+        ("CUDA error: device-side assert triggered", False),
         ("OSError: [Errno 28] No space left on device", False),
         ("torch.cuda.OutOfMemoryError: CUDA out of memory", False),
+        ("RuntimeError: NCCL operation failed", False),
         ("HTTPError: 401 Unauthorized", False),
         (None, False),
         ("", False),
@@ -541,7 +574,21 @@ def test_the_configuration_boundary_is_rung_3(fail_at: int, within: bool) -> Non
     configurations, deliberately separate from any claim about the fault."""
     summary = il.summarise(Recorder(fail_at=fail_at).run())
     assert summary["failed_at_step"] == fail_at
-    assert summary["failed_within_probe_configuration"] is within
+    assert summary["failed_at_or_before_probe_configuration"] is within
+    assert summary["failed_at_probe_configuration"] is (fail_at == 3)
+
+
+def test_all_pass_verdict_does_not_blame_work_the_failed_probe_never_reached() -> None:
+    summary = il.summarise(Recorder().run())
+    verdict = summary["verdict"]
+    assert "same first 609-token prompt" in verdict
+    assert "before later prompts or categories" in verdict
+    assert "prompt count (400 vs 1)" not in verdict
+    assert "280-999" not in verdict
+    assert "second category" not in verdict
+    assert "thermal" not in verdict.lower()
+    assert "long run" not in verdict.lower()
+    assert "Intermittent or nondeterministic" in verdict
 
 
 def test_the_old_conflated_field_is_gone() -> None:

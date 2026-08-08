@@ -208,8 +208,8 @@ def test_deadline_epoch_is_required() -> None:
     assert "--deadline-epoch" in combined_output(result)
 
 
-def test_every_billed_command_shares_one_deadline_rather_than_splitting_it() -> None:
-    """The billed commands carry very different workloads.
+def test_every_billed_model_execution_shares_one_deadline_rather_than_splitting_it() -> None:
+    """The billed model-execution commands carry very different workloads.
 
     category=multiple is 200 prompts x 2 candidates = 400 generations;
     category=simple_python is 400 x 2 = 800. An even split would hand the

@@ -396,8 +396,8 @@ gen_simple_python_cmd=(
 # The remaining time is checked BEFORE spending, not after: if the deadline has
 # already passed, launching would buy generation that is certain to be killed
 # and is billed anyway.
-# run_bounded wraps ANY billed command in `timeout`, bounded by whatever is left
-# of the shared deadline at the moment it starts.
+# run_bounded wraps every billed model-execution command in `timeout`, bounded
+# by whatever is left of the shared deadline at the moment it starts.
 #
 # The exit class is a parameter rather than hardcoded to EXIT_GENERATION_FAILED
 # because the smoke gate is billed too and must be under the same bound, but a
@@ -453,7 +453,7 @@ run_bounded() {
 #   2. acquire pinned BFCL fixtures                          (Blocker 2)
 #   3. verify fixtures                                       (Blocker 2)
 #   4. §0 isolation ladder smoke gate, wall-clock bounded    (Blocker 5)
-#   5. verify fixtures again, immediately before the 1st spend (Blocker 2)
+#   5. verify fixtures again, immediately before the 1st full generation (Blocker 2)
 #   6. paid generation: category=multiple                    (Blocker 3)
 #   7. verify fixtures again, immediately before the 2nd spend (Blocker 2)
 #   8. paid generation: category=simple_python                (Blocker 3)
