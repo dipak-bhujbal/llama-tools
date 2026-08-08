@@ -208,25 +208,82 @@ def test_deadline_epoch_is_required() -> None:
     assert "--deadline-epoch" in combined_output(result)
 
 
-def test_both_paid_commands_share_one_deadline_rather_than_splitting_it() -> None:
-    """The two commands carry very different workloads.
+def test_every_billed_command_shares_one_deadline_rather_than_splitting_it() -> None:
+    """The billed commands carry very different workloads.
 
     category=multiple is 200 prompts x 2 candidates = 400 generations;
     category=simple_python is 400 x 2 = 800. An even split would hand the
     command with twice the work the same allowance, so the probe would be
     killed mid-simple_python having already paid for it. Each command instead
     gets what is left of one shared deadline.
+
+    The smoke gate is counted here too. It loads an 8B model four times and
+    generates on a metered pod, so it is a billed command like any other; it
+    was briefly on the unbounded path, where a hung CUDA load could have run
+    past the script deadline and eaten the shutdown reserve.
     """
     result = run_script(full_args(extra=["--dry-run"]))
     output = combined_output(result)
     assert result.returncode == 0, output
     budgets = [int(x) for x in _TIMEOUT_RE.findall(output)]
-    assert len(budgets) == 2, output
-    # Neither is a half. Dry-run spends almost no time between them, but it may
-    # cross an epoch-second boundary; the second allowance may shrink and must
-    # never grow or reset.
-    assert 900 < budgets[1] <= budgets[0] <= 1800, output
+    # ladder + multiple + simple_python
+    assert len(budgets) == 3, output
+    # None is a fraction of the whole, and none resets. Dry-run spends almost no
+    # time between them but may cross an epoch-second boundary, so each
+    # allowance may shrink and must never grow.
+    assert budgets == sorted(budgets, reverse=True), output
+    assert 900 < budgets[-1] <= budgets[0] <= 1800, output
     assert "share ONE deadline" in output
+
+
+def test_the_smoke_gate_is_wall_clock_bounded_like_every_other_billed_command() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'run_bounded "§0 isolation ladder (smoke gate)"' in source
+    assert 'run_checked "§0 isolation ladder' not in source
+
+
+def test_a_checksum_verify_sits_immediately_before_each_paid_generation() -> None:
+    """The standing invariant: nothing runs between a fixture verify and the
+    generation it guards. Inserting the gate between the first verify and the
+    first generation broke it — and the thing inserted loads 16 GB of weights
+    and writes to the same volume."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+
+    def positions(needle: str) -> list[int]:
+        found, start = [], 0
+        while (i := output.find(needle, start)) != -1:
+            found.append(i)
+            start = i + 1
+        return found
+
+    verifies = positions("--verify-only")
+    ladder = output.index("isolation_ladder.py")
+    multiple = output.index("--category multiple")
+    simple = output.index("--category simple_python")
+
+    # Three verifies now: before the gate, between the gate and the first
+    # generation, and before the second generation.
+    assert len(verifies) == 3, output
+    assert verifies[0] < ladder < verifies[1] < multiple < verifies[2] < simple, output
+
+
+def test_the_launcher_publishes_its_own_pid_for_the_monitor() -> None:
+    """`pgrep -n -f` cannot recover a launcher that already died and can match
+    an unrelated process. The file is the source of the number only — liveness
+    is still decided by kill -0, because a SIGKILLed process cannot update a
+    file, which is how the 2026-08-08 probe came to have a PID file pointing at
+    nothing."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "launcher.pid" in output
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'printf \'%s\\n\' "$$" > "${launcher_pid_file}.tmp.$$"' in source
+    assert 'mv -f "${launcher_pid_file}.tmp.$$" "${launcher_pid_file}"' in source
+
+
+def test_the_pid_file_is_not_written_during_a_dry_run() -> None:
+    """A dry run must not leave an artifact a monitor could pick up as real."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "would write this launcher's PID" in output
 
 
 def test_script_deadline_must_be_nested_inside_provider_deadline() -> None:

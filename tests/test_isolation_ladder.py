@@ -165,8 +165,9 @@ def test_all_pass_runs_every_rung_in_order() -> None:
 def test_synchronize_runs_after_load_and_after_generate_within_each_step() -> None:
     rec = Recorder()
     rec.run()
-    step1 = rec.events[: rec.events.index("load:2")]
+    step1 = rec.events[: rec.events.index("summary_written", rec.events.index("release"))]
     assert step1 == [
+        "summary_written",           # rung marked 'running' before any work
         "load:1",
         "sync",                      # after load, before telemetry
         "telemetry:1:after_load",    # persisted BEFORE the dangerous call
@@ -176,7 +177,6 @@ def test_synchronize_runs_after_load_and_after_generate_within_each_step() -> No
         "sync",                      # after generate
         "telemetry:1:after_generate",  # carries the rung's true peak VRAM
         "release",
-        "summary_written",
     ]
 
 
@@ -204,13 +204,15 @@ def test_every_snapshot_is_persisted_as_it_is_taken_not_buffered() -> None:
     assert "step3_on_failure" in rec.persisted
 
 
-def test_the_summary_is_rewritten_after_every_rung(paths=None) -> None:
+def test_the_summary_is_rewritten_at_the_start_and_end_of_every_rung() -> None:
     rec = Recorder(fail_at=3)
     rec.run()
-    # One write per executed rung, each a complete snapshot of progress so far.
-    assert len(rec.summaries) == 3
-    assert rec.summaries[0][0] == "passed"
-    assert rec.summaries[-1][2] == "failed"
+    # 3 executed rungs x (start + end) = 6, plus one for the rung skipped after
+    # the failure, so the durable artifact matches reality at every instant.
+    assert len(rec.summaries) == 7
+    assert rec.summaries[0] == ["running", "pending", "pending", "pending"]
+    assert rec.summaries[1] == ["passed", "pending", "pending", "pending"]
+    assert rec.summaries[-1] == ["passed", "passed", "failed", "skipped"]
 
 
 def test_post_fault_evidence_is_collected_on_the_failing_rung() -> None:
@@ -411,24 +413,139 @@ def test_traceback_is_retained_for_the_failing_step() -> None:
 
 
 # --- summary / verdict selection --------------------------------------------
+# --- the partial-summary false-pass regression -------------------------------
+def test_a_partial_summary_never_claims_all_four_passed() -> None:
+    """The load-bearing regression.
+
+    The summary is rewritten after every rung so it survives a hard death, which
+    means "no rung has failed yet" is a state it is routinely written in. The
+    previous version rendered that as ALL_PASS_VERDICT — literally "All four
+    configurations generated cleanly" — so a process killed during rung 2 left a
+    durable artifact claiming a clean sweep of rungs that never ran. A gate
+    whose crash residue reads as a pass is worse than no gate.
+    """
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    results[0].status = "passed"
+    results[1].status = "running"
+
+    summary = il.summarise(results)
+    assert summary["outcome"] == "incomplete"
+    assert summary["complete"] is False if "complete" in summary else True
+    assert "INCOMPLETE" in summary["verdict"]
+    assert "NO CONCLUSION" in summary["verdict"]
+    assert "All four configurations generated cleanly" not in summary["verdict"]
+    assert il.ALL_PASS_VERDICT not in summary["verdict"]
+
+
+def test_a_summary_written_before_any_rung_runs_is_incomplete() -> None:
+    summary = il.summarise([il.StepResult(step=step) for step in il.LADDER])
+    assert summary["outcome"] == "incomplete"
+    assert summary["failed_at_step"] is None
+    assert il.ALL_PASS_VERDICT not in summary["verdict"]
+
+
+def test_the_running_rung_is_marked_so_a_hard_death_names_where_it_died() -> None:
+    """Without this the last durable summary is the previous rung's, in which
+    the current one is still 'pending' — indistinguishable from never attempted."""
+    rec = Recorder()
+    rec.run()
+    # A summary is written at the START of each rung, before any work.
+    assert rec.events.index("summary_written") < rec.events.index("load:1")
+    assert rec.summaries[0][0] == "running"
+
+
+def test_only_an_explicit_all_pass_is_green() -> None:
+    """`failed_at_step is None` was the old green condition and it is true for an
+    incomplete ladder too, which would have opened the launcher's gate on a run
+    that never finished."""
+    partial = [il.StepResult(step=step) for step in il.LADDER]
+    partial[0].status = "passed"
+    assert il.summarise(partial)["outcome"] != "all_passed"
+
+    done = [il.StepResult(step=step) for step in il.LADDER]
+    for result in done:
+        result.status = "passed"
+    assert il.summarise(done)["outcome"] == "all_passed"
+
+
+# --- reproduction is a fault claim, not a rung index -------------------------
+def test_a_non_cuda_failure_inside_the_configuration_is_not_a_reproduction() -> None:
+    """A gated-repo 401 or a disk-full OSError at rung 1 fails inside the probe's
+    configuration without being the fault the probe died of. Calling it a
+    reproduction sends someone hunting a CUDA bug that isn't there."""
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    results[0].status = "failed"
+    results[0].error = "OSError: 401 Client Error: gated repo for meta-llama/Llama-3.1-8B-Instruct"
+
+    summary = il.summarise(results)
+    assert summary["failed_within_probe_configuration"] is True
+    assert summary["fault_signature_matches_s0"] is False
+    assert summary["s0_reproduction"] == "no_different_fault"
+
+
+def test_the_actual_s0_fault_inside_the_configuration_is_a_reproduction() -> None:
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    results[2].status = "failed"
+    results[2].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
+
+    summary = il.summarise(results)
+    assert summary["fault_signature_matches_s0"] is True
+    assert summary["s0_reproduction"] == "yes"
+
+
+def test_the_s0_fault_at_rung_4_is_outside_the_probes_configuration() -> None:
+    """The probe never reached an adapter-enabled candidate, so rung 4 is new
+    information rather than a reproduction — but the fault still matches."""
+    results = [il.StepResult(step=step) for step in il.LADDER]
+    for result in results[:3]:
+        result.status = "passed"
+    results[3].status = "failed"
+    results[3].error = "RuntimeError: CUDA error: an illegal memory access was encountered"
+
+    summary = il.summarise(results)
+    assert summary["failed_within_probe_configuration"] is False
+    assert summary["fault_signature_matches_s0"] is True
+    assert summary["s0_reproduction"] == "same_fault_outside_the_probe_configuration"
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("RuntimeError: CUDA error: an illegal memory access was encountered", True),
+        ("CUDA error: device-side assert triggered", True),
+        ("OSError: [Errno 28] No space left on device", False),
+        ("torch.cuda.OutOfMemoryError: CUDA out of memory", False),
+        ("HTTPError: 401 Unauthorized", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_fault_signature_matching(error, expected) -> None:
+    assert il.matches_s0_fault_signature(error) is expected
+
+
 def test_summary_of_a_clean_ladder_does_not_claim_the_card_is_healthy() -> None:
     summary = il.summarise(Recorder().run())
+    assert summary["outcome"] == "all_passed"
     assert summary["failed_at_step"] is None
-    assert summary["reproduces_s0_probe_crash"] is False
+    assert summary["s0_reproduction"] == "not_applicable_no_failure"
     assert "NOT REPRODUCED" in summary["verdict"]
     assert "does NOT clear the card" in summary["verdict"]
 
 
-@pytest.mark.parametrize("fail_at,reproduced", [(1, True), (2, True), (3, True), (4, False)])
-def test_only_failures_at_or_before_the_probes_own_configuration_count_as_a_reproduction(
-    fail_at: int, reproduced: bool
-) -> None:
+@pytest.mark.parametrize("fail_at,within", [(1, True), (2, True), (3, True), (4, False)])
+def test_the_configuration_boundary_is_rung_3(fail_at: int, within: bool) -> None:
     """The probe crashed on candidate 'base' = PeftModel with the adapter
     disabled, which is rung 3. It never reached an adapter-enabled candidate, so
-    a rung-4-only failure is a new finding, not a reproduction."""
+    rung 4 is outside the configuration it exercised. This is a fact about
+    configurations, deliberately separate from any claim about the fault."""
     summary = il.summarise(Recorder(fail_at=fail_at).run())
     assert summary["failed_at_step"] == fail_at
-    assert summary["reproduces_s0_probe_crash"] is reproduced
+    assert summary["failed_within_probe_configuration"] is within
+
+
+def test_the_old_conflated_field_is_gone() -> None:
+    assert "reproduces_s0_probe_crash" not in il.summarise(Recorder(fail_at=2).run())
 
 
 def test_summary_records_the_pinned_run_parameters() -> None:

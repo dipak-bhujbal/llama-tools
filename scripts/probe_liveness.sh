@@ -183,7 +183,17 @@ scan_footer() {
   record="$(grep -F "${EXIT_RECORD_PREFIX}" <<<"${tail_text}" | tail -n 1 || true)"
   if [[ -n "${record}" ]]; then
     record_pid="$(sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' <<<"${record}")"
-    if [[ -n "${watch_pid}" && -n "${record_pid}" && "${record_pid}" != "${watch_pid}" ]]; then
+    # A record with no parseable pid authenticates nothing. The previous version
+    # required `-n record_pid` before it would even consider a mismatch, so a
+    # truncated or malformed line like `PROBE_EXIT_RECORD exit=0` fell straight
+    # through to "clean completion" — an unauthenticated record accepted in the
+    # reassuring direction, which is the only direction that actually costs
+    # anything. Missing pid is now treated as no record at all.
+    if [[ -z "${record_pid}" ]]; then
+      footer_state="malformed_record"
+      return 0
+    fi
+    if [[ "${record_pid}" != "${watch_pid}" ]]; then
       footer_state="foreign"
       return 0
     fi
@@ -339,6 +349,18 @@ check_once() {
       echo "[liveness] ALERT: DIED HARD — process gone; the terminal record in" >&2
       echo "[liveness] this log carries a different pid, so it describes an" >&2
       echo "[liveness] earlier run appending to the same file, not this one." >&2
+      echo "[liveness] STOP THE POD AND CONFIRM BILLING STOPPED — a dead process" >&2
+      echo "[liveness] does not stop its own meter." >&2
+      return "${EXIT_DIED_HARD}"
+      ;;
+    malformed_record)
+      write_status "died_hard" "" "true" \
+        "process gone; a PROBE_EXIT_RECORD line is present but carries no parseable pid, so it authenticates nothing"
+      echo "[liveness] ALERT: DIED HARD — process gone. A PROBE_EXIT_RECORD line" >&2
+      echo "[liveness] is present but carries no parseable pid, so it cannot be" >&2
+      echo "[liveness] attributed to this run. --allow-legacy-footer does NOT" >&2
+      echo "[liveness] apply: this is a corrupt record, not an old-format log." >&2
+      echo "[liveness] Most likely the log was truncated mid-write." >&2
       echo "[liveness] STOP THE POD AND CONFIRM BILLING STOPPED — a dead process" >&2
       echo "[liveness] does not stop its own meter." >&2
       return "${EXIT_DIED_HARD}"

@@ -396,18 +396,29 @@ gen_simple_python_cmd=(
 # The remaining time is checked BEFORE spending, not after: if the deadline has
 # already passed, launching would buy generation that is certain to be killed
 # and is billed anyway.
-run_generation() {
+# run_bounded wraps ANY billed command in `timeout`, bounded by whatever is left
+# of the shared deadline at the moment it starts.
+#
+# The exit class is a parameter rather than hardcoded to EXIT_GENERATION_FAILED
+# because the smoke gate is billed too and must be under the same bound, but a
+# gate failure and a generation failure are different diagnoses and must not
+# collapse into one code. The gate does four model loads and four generations on
+# a metered pod: leaving it on the unbounded `run_checked` path meant a hung
+# CUDA load could sail past the script deadline and eat the shutdown reserve
+# until the provider killed the pod.
+run_bounded() {
   local label="$1"
-  shift
+  local failure_code="$2"
+  shift 2
   local budget
   budget=$(remaining_seconds)
 
   if [[ "${budget}" -le 0 ]]; then
     echo "ERROR: the shared wall-clock deadline passed before ${label} started" >&2
-    echo "       (${budget}s remaining). Refusing to launch: this generation" >&2
+    echo "       (${budget}s remaining). Refusing to launch: this command" >&2
     echo "       would be billed and then killed. Re-derive --deadline-epoch" >&2
     echo "       from the provider deadline and shutdown reserve, then re-run." >&2
-    exit "${EXIT_GENERATION_FAILED}"
+    exit "${failure_code}"
   fi
 
   announce "${timeout_bin}" --kill-after=30 "${budget}" "$@"
@@ -420,7 +431,7 @@ run_generation() {
     exit "${EXIT_USAGE}"
   fi
 
-  echo "---- launching paid generation: ${label} (${budget}s left of shared deadline) ----"
+  echo "---- launching billed command: ${label} (${budget}s left of shared deadline) ----"
   set +e
   "${timeout_bin}" --kill-after=30 "${budget}" "$@"
   local status=$?
@@ -429,10 +440,10 @@ run_generation() {
     echo "ERROR: ${label} exhausted the shared wall-clock deadline and was killed" >&2
     echo "       after ${budget}s. This is the bound doing its job, not a crash." >&2
     echo "       Aborting remaining steps rather than spending further." >&2
-    exit "${EXIT_GENERATION_FAILED}"
+    exit "${failure_code}"
   elif [[ "${status}" -ne 0 ]]; then
     echo "ERROR: ${label} exited with status ${status}" >&2
-    exit "${EXIT_GENERATION_FAILED}"
+    exit "${failure_code}"
   fi
 }
 
@@ -441,10 +452,11 @@ run_generation() {
 #   1. detached checkout + HEAD/clean-tree assertions      (Blocker 1)
 #   2. acquire pinned BFCL fixtures                          (Blocker 2)
 #   3. verify fixtures                                       (Blocker 2)
-#   4. §0 isolation ladder smoke gate                        (Blocker 5)
-#   5. paid generation: category=multiple                    (Blocker 3)
-#   6. verify fixtures again, immediately before the 2nd spend (Blocker 2)
-#   7. paid generation: category=simple_python                (Blocker 3)
+#   4. §0 isolation ladder smoke gate, wall-clock bounded    (Blocker 5)
+#   5. verify fixtures again, immediately before the 1st spend (Blocker 2)
+#   6. paid generation: category=multiple                    (Blocker 3)
+#   7. verify fixtures again, immediately before the 2nd spend (Blocker 2)
+#   8. paid generation: category=simple_python                (Blocker 3)
 # Any failure at any step aborts every step after it (Blocker 4).
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -498,6 +510,7 @@ on_exit() {
   echo "  plus: ${out_root}/pip_freeze.txt ${out_root}/gpu.txt ${out_root}/image_tag.txt"
   echo "  plus: ${out_root}/env_fingerprint.json ${out_root}/bundle_sha256.txt"
   echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
+  echo "  plus: ${out_root}/launcher.pid (the exact pid this run published)"
   # The gate's evidence is listed even when the gate is what failed — especially
   # then. A run aborted at the ladder has no generations to persist, and its
   # entire value is in these files.
@@ -564,6 +577,26 @@ fi
 readonly timeout_bin
 echo "PREFLIGHT: wall-clock enforcement via '${timeout_bin}'"
 
+# Publish this shell's PID before any risky work, so the monitor is handed an
+# exact number instead of guessing with `pgrep -n -f`, which cannot recover a
+# launcher that has already died and can match an unrelated process.
+#
+# This is NOT a liveness claim and must never be read as one: a process cannot
+# update a file after being SIGKILLed, which is exactly how the 2026-08-08 probe
+# came to have a PID file pointing at nothing. The file is the *source of the
+# number*; probe_liveness.sh still decides liveness with `kill -0` on it.
+launcher_pid_file="${out_root}/launcher.pid"
+if [[ "${dry_run}" -eq 1 ]]; then
+  echo "DRY RUN: would write this launcher's PID to ${launcher_pid_file}"
+else
+  mkdir -p "${out_root}"
+  # Written atomically: a monitor reading a half-written pid would kill -0 a
+  # truncated number, i.e. some other process entirely.
+  printf '%s\n' "$$" > "${launcher_pid_file}.tmp.$$"
+  mv -f "${launcher_pid_file}.tmp.$$" "${launcher_pid_file}"
+  echo "Launcher PID $$ recorded at ${launcher_pid_file}"
+fi
+
 echo
 echo "Planned steps (in order):"
 step_git_checkout
@@ -575,20 +608,32 @@ echo
 run_checked "verify pinned BFCL fixtures (pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
 # The gate. Runs after the fixtures exist (it reads the first `multiple` prompt)
-# and before the first paid generation. A non-zero exit aborts here, so a run
-# that would have reproduced the §0 crash spends four model loads and 32
-# generated tokens instead of 1,200 generations.
+# and before the full probe. A non-zero exit aborts here, so a run that would
+# have reproduced the §0 crash spends four model loads and 32 generated tokens
+# instead of 1,200 generations.
+#
+# It goes through run_bounded, not run_checked: the ladder is itself a billed
+# command that loads an 8B model four times and generates, so an unbounded gate
+# could hang past the script deadline and consume the shutdown reserve.
 echo
-run_checked "§0 isolation ladder (smoke gate)" "${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"
+run_bounded "§0 isolation ladder (smoke gate)" "${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"
+
+# Verify AGAIN, immediately before the first full generation. Inserting the gate
+# between the earlier verify and this generation broke the standing invariant
+# that a checksum check sits immediately before *each* paid generation, with
+# nothing in between — and the thing now in between loads 16 GB of weights and
+# writes to the same volume. Restoring the invariant costs a checksum pass.
+echo
+run_checked "verify pinned BFCL fixtures (post-gate, pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
 echo
-run_generation "multiple" "${gen_multiple_cmd[@]}"
+run_bounded "paid generation: multiple" "${EXIT_GENERATION_FAILED}" "${gen_multiple_cmd[@]}"
 
 echo
 run_checked "verify pinned BFCL fixtures (pre-flight: simple_python)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
 echo
-run_generation "simple_python" "${gen_simple_python_cmd[@]}"
+run_bounded "paid generation: simple_python" "${EXIT_GENERATION_FAILED}" "${gen_simple_python_cmd[@]}"
 
 if [[ "${dry_run}" -eq 1 ]]; then
   echo

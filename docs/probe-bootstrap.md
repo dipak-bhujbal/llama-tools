@@ -165,12 +165,17 @@ be false as provenance and probably uninstallable on a CUDA pod.
 the pod's driver. Installing a different torch over it is the usual way to break a working
 CUDA setup. The actual torch/CUDA/GPU versions are asserted and recorded at Step 6.
 
-## Pod: §0 smoke gate — run this before anything paid
+## Pod: §0 smoke gate — runs before the full probe
 
 The 2026-08-08 §0 probe died at 64s with a CUDA illegal memory access and zero
 generations, and the cause is still indeterminate. Relaunching the full probe would
 spend the same money to learn the same nothing, because it varies four things at once.
 Run the isolation ladder first. It varies one thing per rung:
+
+**The ladder is itself billed.** It runs on a metered pod, loads an 8B model four times and
+generates tokens. It is cheaper than the full probe by a large factor — 4 loads and 32
+generated tokens against 1,200 generations — but it is not free, and it runs under the same
+absolute wall-clock deadline as everything else the launcher does.
 
 | Rung | Configuration | What an adjacent pair isolates |
 |---|---|---|
@@ -180,11 +185,14 @@ Run the isolation ladder first. It varies one thing per rung:
 | 4 | `PeftModel`, adapter **enabled** | 3 vs 4 → **adapter state** |
 
 Rung 3 is what the probe's `base` candidate ran; rung 4 is what the mining pilot ran
-successfully on 2026-08-07. One 609-token prompt, 8 new tokens per rung, seconds of GPU
-time. It aborts at the first failure and prints the verdict for that branch.
+successfully on 2026-08-07. One 609-token prompt, 8 new tokens per rung. It aborts at the
+first failure and prints the verdict for that branch.
 
 **`launch_probe.sh` runs the ladder itself**, as step 4, after fixture verification and
-before the first paid generation. A non-green ladder exits `69` and the probe never starts.
+before the full probe, wall-clock bounded by the same shared deadline as the generations. A
+non-green ladder exits `69` and the probe never starts. Fixtures are then verified *again*
+between the gate and the first generation, preserving the invariant that a checksum check
+sits immediately before each paid generation with nothing in between.
 You do not run it manually as part of a probe, and there is no flag to skip it — a gate an
 operator has to remember under time pressure on a billing pod is not a gate, and running it
 inside the launcher is also what makes a green result same-run, same-node evidence rather
@@ -218,7 +226,7 @@ Evidence lands under `<out-root>/isolation_ladder/`:
 | `telemetry/stepN_after_load.json` | after each load, **before** the dangerous call |
 | `telemetry/stepN_after_generate.json` | after each successful generation — carries the rung's true peak VRAM |
 | `telemetry/stepN_on_failure.json` | best effort on the rung that faults |
-| `isolation_ladder.json` | rewritten after **every** rung, not once at the end |
+| `isolation_ladder.json` | written before rung 1 and rewritten at the start and end of **every** rung |
 
 Every one of those is written atomically as it is produced, because the process being
 measured is one that has already died abruptly once and taken all of its evidence with it.
@@ -229,6 +237,18 @@ The `on_failure` snapshot is the important one. torch's device queries will usua
 a poisoned CUDA context and come back `unavailable` — but `nvidia-smi` and the kernel log
 are separate processes, so the **Xid code the driver just logged** is still readable, and
 it is the single most diagnostic thing available.
+
+Check `outcome` first. It is one of `all_passed`, `failed`, or **`incomplete`** — the last
+meaning the ladder did not reach a conclusion, which is what a partial artifact left by a
+hard death looks like. An incomplete artifact carries `INCOMPLETE — NO CONCLUSION` and names
+the rung marked `running` as where it died. **Never read the absence of a failed rung as a
+pass**; only `outcome: all_passed` is a pass, and only that exits 0.
+
+`s0_reproduction` is separate from `failed_at_step` on purpose. A gated-repo 401 or a
+disk-full error at rung 1 fails inside the probe's configuration without being the fault the
+probe died of, so the ladder reports `failed_within_probe_configuration` and
+`fault_signature_matches_s0` as two distinct facts rather than inferring a reproduction from
+the rung index alone.
 
 Read `isolation_ladder.json` before deciding anything. **Fields that could not be measured
 say so.** A consumer card has no ECC, and an unprivileged container usually cannot read the
@@ -241,16 +261,29 @@ Launch exactly as the **Pod: launch** section below specifies — that is the on
 invocation, with the absolute deadlines and the shared `--out-root`. Do not retype it here.
 Run it under tmux with its output teed to a log, then start the monitor from a second pane:
 
+The launcher publishes its own PID to `<out-root>/launcher.pid` before any risky work.
+Read it from there. Do **not** use `pgrep`: it cannot recover a launcher that has already
+died — the case you most need the PID for — and it can match an unrelated process.
+
+Use the literal persistent path in this pane. `PROBE_OUT_ROOT` is assigned inside a function
+in the *launch* shell and is not exported, so referencing it in a second tmux pane silently
+expands to empty and the monitor would watch `/probe.log`.
+
 ```bash
-# PID of the launcher started in the Pod: launch step. Capture it there if you can;
-# this recovers it if you did not.
-LAUNCHER_PID=$(pgrep -n -f 'scripts/launch_probe')
+# Second pane. Literal path on the persistent volume — same value you passed as
+# --out-root, written out in full because this shell never saw that variable.
+OUT=/workspace/persist/study2
 
 bash scripts/probe_liveness.sh \
-  --log "${PROBE_OUT_ROOT}/probe.log" \
-  --status-file "${PROBE_OUT_ROOT}/probe_status.json" \
-  --pid "${LAUNCHER_PID}" --tmux-session probe --interval 30
+  --log "${OUT}/probe.log" \
+  --status-file "${OUT}/probe_status.json" \
+  --pid "$(cat "${OUT}/launcher.pid")" \
+  --tmux-session probe --interval 30
 ```
+
+The PID file is the *source of the number*, never proof of life: a SIGKILLed process cannot
+update a file, which is exactly how the 2026-08-08 probe came to have a PID file pointing at
+nothing. The monitor still decides liveness with `kill -0` on that number.
 
 `--pid` is required and is the **sole** liveness authority. `--tmux-session` is recorded as
 context and never decides anything: you are told to run this monitor from a second pane of

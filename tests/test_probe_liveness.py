@@ -328,3 +328,49 @@ def test_launcher_exit_record_survives_a_dry_run_check() -> None:
     launcher = (REPO_ROOT / "scripts" / "launch_probe.sh").read_text(encoding="utf-8")
     trap_body = launcher.split("on_exit() {", 1)[1].split("\ntrap on_exit EXIT", 1)[0]
     assert "PROBE_EXIT_RECORD" in trap_body
+
+
+# --- a record must actually carry a PID to authenticate anything -------------
+def test_a_record_with_no_pid_does_not_authenticate_as_clean_completion(paths, dead_pid: int) -> None:
+    """The reassuring-direction regression.
+
+    The mismatch branch was guarded on the record PID being non-empty, so a
+    truncated line like `PROBE_EXIT_RECORD exit=0` skipped the check entirely
+    and fell through to "clean completion". An unauthenticated record accepted
+    in the only direction that costs anything.
+    """
+    log, status = paths
+    log.write_text("PROBE_EXIT_RECORD exit=0 elapsed=900s\n", encoding="utf-8")
+    result = run_monitor(
+        ["--log", str(log), "--status-file", str(status), "--pid", str(dead_pid), "--once"]
+    )
+    assert result.returncode == EXIT_DIED_HARD
+    record = read_status(status)
+    assert record["state"] == "died_hard"
+    assert record["exit_code"] is None
+    assert record["footer_state"] == "malformed_record"
+
+
+def test_a_record_with_a_malformed_pid_is_also_rejected(paths, dead_pid: int) -> None:
+    log, status = paths
+    log.write_text("PROBE_EXIT_RECORD pid=notanumber exit=0 elapsed=900s\n", encoding="utf-8")
+    result = run_monitor(
+        ["--log", str(log), "--status-file", str(status), "--pid", str(dead_pid), "--once"]
+    )
+    assert result.returncode == EXIT_DIED_HARD
+
+
+def test_the_legacy_flag_does_not_rescue_a_corrupt_record(paths, dead_pid: int) -> None:
+    """--allow-legacy-footer exists for logs from an older launcher, not for a
+    record that was truncated mid-write. Conflating the two would let the opt-in
+    silently cover a case it was never reasoned about."""
+    log, status = paths
+    log.write_text("PROBE_EXIT_RECORD exit=0 elapsed=900s\n", encoding="utf-8")
+    result = run_monitor(
+        [
+            "--log", str(log), "--status-file", str(status), "--pid", str(dead_pid),
+            "--allow-legacy-footer", "--once",
+        ]
+    )
+    assert result.returncode == EXIT_DIED_HARD
+    assert "does NOT" in result.stderr

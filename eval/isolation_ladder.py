@@ -149,6 +149,15 @@ LADDER: tuple[LadderStep, ...] = (
     ),
 )
 
+INCOMPLETE_VERDICT = (
+    "INCOMPLETE — NO CONCLUSION. Not every rung ran to completion, and none has "
+    "failed. This is a partial record written mid-run, not a result: if you are "
+    "reading it after the process died, the rungs still marked 'pending' were "
+    "never attempted and the one marked 'running' is where it died. Do NOT read "
+    "the absence of a failed rung as a pass. Check the per-rung telemetry "
+    "snapshots and the launcher's exit record for what actually happened."
+)
+
 ALL_PASS_VERDICT = (
     "NOT REPRODUCED. All four configurations generated cleanly. The ladder "
     "excludes placement, the PEFT wrapper and adapter state as *sufficient* "
@@ -162,7 +171,7 @@ ALL_PASS_VERDICT = (
 @dataclass
 class StepResult:
     step: LadderStep
-    status: str = "pending"  # pending | passed | failed | skipped
+    status: str = "pending"  # pending | running | passed | failed | skipped
     phase: str = ""  # load | synchronize_after_load | generate | synchronize_after_generate
     seconds: float = 0.0
     generated_text: str | None = None
@@ -387,12 +396,26 @@ def run_ladder(
         if aborted:
             result.status = "skipped"
             result.error = "not run: an earlier rung failed and the CUDA context is unusable"
+            try:
+                progress_fn(results)
+            except Exception as exc:  # pragma: no cover
+                emit(f"  (progress write for skipped step {step.index} raised {exc!r})")
             continue
 
         emit("")
         emit("=" * 72)
         emit(f"STEP {step.index}/{len(steps)}: {step.name}")
         emit("=" * 72)
+
+        # Mark and persist BEFORE doing anything, so a hard death leaves an
+        # artifact that names the rung it died on. Without this the last
+        # durable summary is the previous rung's, in which this one is still
+        # 'pending' — indistinguishable from never having been attempted.
+        result.status = "running"
+        try:
+            progress_fn(results)
+        except Exception as exc:  # pragma: no cover
+            emit(f"  (progress write before step {step.index} raised {exc!r}; continuing)")
 
         reset_peak_fn()
         started = clock()
@@ -472,21 +495,66 @@ def run_ladder(
     return results
 
 
+def matches_s0_fault_signature(error: str | None) -> bool:
+    """Does this failure look like the fault the §0 probe actually died of?
+
+    The probe died of `CUDA error: an illegal memory access was encountered`.
+    A gated-repo 401, a disk-full OSError or a missing adapter revision are all
+    failures at the same *configuration boundary* without being the same
+    *fault*, and calling either one a reproduction would send someone hunting a
+    CUDA bug that isn't there.
+    """
+    if not error:
+        return False
+    lowered = error.lower()
+    return "illegal memory access" in lowered or (
+        "cuda error" in lowered and "device-side assert" in lowered
+    )
+
+
 def summarise(results: list[StepResult]) -> dict:
     failed = next((r for r in results if r.status == "failed"), None)
-    if failed is None:
+    all_passed = bool(results) and all(r.status == "passed" for r in results)
+
+    if failed is not None:
+        outcome = "failed"
+        verdict = failed.step.verdict_on_failure
+        branch = failed.step.index
+    elif all_passed:
+        outcome = "all_passed"
         verdict = ALL_PASS_VERDICT
-        reproduced = False
         branch = None
     else:
-        verdict = failed.step.verdict_on_failure
-        # Step 3 is the probe's own configuration; failing there (or earlier) is
-        # a reproduction of the §0 crash. Failing only at step 4 is not — the
-        # probe never reached an adapter-enabled candidate.
-        reproduced = failed.step.index <= 3
-        branch = failed.step.index
+        # The case that matters most. This summary is rewritten after every
+        # rung so it survives a hard death, which means "no rung has failed
+        # yet" is a state it is routinely written in — and the previous version
+        # rendered that state as ALL_PASS_VERDICT, i.e. "all four configurations
+        # generated cleanly". A process killed during rung 2 left a durable
+        # artifact claiming a clean sweep of rungs that never ran. A gate whose
+        # crash residue reads as a pass is worse than no gate.
+        outcome = "incomplete"
+        verdict = INCOMPLETE_VERDICT
+        branch = None
+
+    # Deliberately two separate facts, because they answer different questions
+    # and the old single `reproduces_s0_probe_crash` conflated them.
+    within_configuration = failed is not None and failed.step.index <= 3
+    signature_matches = matches_s0_fault_signature(failed.error) if failed else False
+
+    if failed is None:
+        reproduction = "not_applicable_no_failure"
+    elif within_configuration and signature_matches:
+        reproduction = "yes"
+    elif signature_matches:
+        reproduction = "same_fault_outside_the_probe_configuration"
+    elif within_configuration:
+        reproduction = "no_different_fault"
+    else:
+        reproduction = "no"
+
     return {
-        "schema": "isolation_ladder/v1",
+        "schema": "isolation_ladder/v2",
+        "outcome": outcome,
         "category": PROBE_CATEGORY,
         "expected_prompt_tokens": EXPECTED_PROMPT_TOKENS,
         "max_new_tokens": MAX_NEW_TOKENS,
@@ -499,7 +567,11 @@ def summarise(results: list[StepResult]) -> dict:
         },
         "failed_at_step": branch,
         "failed_phase": failed.phase if failed else None,
-        "reproduces_s0_probe_crash": reproduced,
+        # A fact about which configurations were exercised — NOT a claim that
+        # the §0 crash was reproduced.
+        "failed_within_probe_configuration": within_configuration,
+        "fault_signature_matches_s0": signature_matches,
+        "s0_reproduction": reproduction,
         "verdict": verdict,
         "steps": [r.to_dict() for r in results],
     }
@@ -639,8 +711,18 @@ def main(argv: list[str] | None = None) -> int:
         partial = summarise(results)
         partial["prompt_id"] = prompt_id
         partial["prompt_tokens"] = token_count
-        partial["complete"] = all(r.status in {"passed", "failed", "skipped"} for r in results)
+        # Derived from `outcome`, never recomputed independently — two
+        # completeness notions that can disagree is how the false all-pass got
+        # written in the first place.
+        partial["complete"] = partial["outcome"] != "incomplete"
         gpu_telemetry.write_json_atomic(summary_path, partial)
+
+    # An incomplete summary on disk before rung 1 even starts. If the process
+    # dies during the first load, the artifact says INCOMPLETE — NO CONCLUSION
+    # rather than not existing at all, and an absent file is the one thing a
+    # reader is most likely to interpret as "the gate was not reached" when in
+    # fact it was and it died.
+    persist_summary([StepResult(step=s) for s in LADDER])
 
     results = run_ladder(
         generate_fn=lambda model: _real_generate(model, tokenizer, prompt),
@@ -654,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarise(results)
     summary["prompt_id"] = prompt_id
     summary["prompt_tokens"] = token_count
-    summary["complete"] = True
+    summary["complete"] = summary["outcome"] != "incomplete"
     summary["raw_nvidia_smi_q"] = smi_status
     gpu_telemetry.write_json_atomic(summary_path, summary)
 
@@ -669,7 +751,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nwrote {summary_path}")
     print(f"      {telemetry_dir}/ (per-rung snapshots)")
 
-    return EXIT_OK if summary["failed_at_step"] is None else EXIT_LADDER_FAILED
+    # Green ONLY on an explicit all-pass. `failed_at_step is None` was the old
+    # condition and it is true for an incomplete ladder too, which would have
+    # let the launcher's gate open on a run that never finished.
+    return EXIT_OK if summary["outcome"] == "all_passed" else EXIT_LADDER_FAILED
 
 
 if __name__ == "__main__":
