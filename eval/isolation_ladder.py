@@ -332,10 +332,11 @@ def run_ladder(
     steps: tuple[LadderStep, ...] = LADDER,
     loaders: dict[str, Callable[[], tuple[Any, Callable[[], Any]]]] | None = None,
     generate_fn: Callable[[Any], str],
-    telemetry_fn: Callable[[Any], dict],
+    snapshot_fn: Callable[[LadderStep, str, Any], dict],
     synchronize_fn: Callable[[], None],
-    release_fn: Callable[[Any], None],
+    release_fn: Callable[[], None],
     reset_peak_fn: Callable[[], None] = lambda: None,
+    progress_fn: Callable[[list["StepResult"]], None] = lambda results: None,
     emit: Callable[[str], None] = print,
     clock: Callable[[], float] = time.monotonic,
 ) -> list[StepResult]:
@@ -344,10 +345,42 @@ def run_ladder(
     Returns one StepResult per step; steps after a failure are 'skipped', which
     is recorded explicitly rather than omitted — a reader must be able to tell
     "step 4 was not run" from "step 4 has no result".
+
+    `snapshot_fn(step, phase, model)` must both collect telemetry AND persist it
+    before returning. Every call site below is placed on the assumption that the
+    process may not survive the next line: the process being measured is one
+    that has already died once, abruptly, taking all of its evidence with it.
+    Telemetry that only reaches disk after the ladder returns is telemetry the
+    crashing case never produces.
+
+    `release_fn` takes no arguments on purpose. Passing the model to a teardown
+    function binds it into that function's frame, so the refcount never reaches
+    zero and `empty_cache()` frees nothing — the previous rung's 16 GB stays
+    resident while the next rung loads another copy, and rung 4 OOMs on a 24 GB
+    card for reasons that have nothing to do with adapter state. That would not
+    look like a bug; it would look like a verdict.
     """
     loaders = LOADERS if loaders is None else loaders
     results = [StepResult(step=s) for s in steps]
     aborted = False
+
+    def snapshot(result: StepResult, phase: str, model: Any) -> None:
+        """Collect + persist, and never let a telemetry failure mask the fault
+        that made the telemetry interesting."""
+        try:
+            bundle = snapshot_fn(result.step, phase, model)
+        except BaseException as exc:  # noqa: BLE001
+            result.telemetry[phase] = gpu_telemetry.unavailable(
+                f"telemetry collection itself failed: {type(exc).__name__}: {exc}"
+            )
+            emit(f"  (telemetry '{phase}' could not be collected: {exc!r})")
+            return
+        result.telemetry[phase] = bundle
+        gaps = gpu_telemetry.unavailable_fields(bundle)
+        if gaps:
+            emit(f"  telemetry gaps at '{phase}' ({len(gaps)}) — unmeasured, not zero:")
+            for gap in gaps:
+                emit(f"    - {gap}")
 
     for result in results:
         step = result.step
@@ -364,6 +397,7 @@ def run_ladder(
         reset_peak_fn()
         started = clock()
         model = None
+        gen_context_factory = None
         try:
             result.phase = "load"
             model, gen_context_factory = loaders[step.loader]()
@@ -371,17 +405,10 @@ def run_ladder(
             result.phase = "synchronize_after_load"
             synchronize_fn()
 
-            # Telemetry is captured after load and before generation: this is the
-            # only moment where the model exists, its placement is resolved, and
-            # nothing has faulted yet. Capturing it later would mean capturing
-            # nothing on the step that crashes — which is what happened to the
-            # probe.
-            result.telemetry = telemetry_fn(model)
-            gaps = gpu_telemetry.unavailable_fields(result.telemetry)
-            if gaps:
-                emit(f"  telemetry gaps ({len(gaps)}) — these are unmeasured, not zero:")
-                for gap in gaps:
-                    emit(f"    - {gap}")
+            # After load, before the dangerous call. This is the last moment the
+            # model provably exists and placement is resolved, so it is written
+            # to disk here rather than accumulated in memory.
+            snapshot(result, "after_load", model)
 
             result.phase = "generate"
             with gen_context_factory():
@@ -389,6 +416,11 @@ def run_ladder(
 
             result.phase = "synchronize_after_generate"
             synchronize_fn()
+
+            # After the operation: this is the snapshot that carries the rung's
+            # true peak VRAM (the after_load one cannot, generation had not run)
+            # and any ECC/Xid counters the operation itself moved.
+            snapshot(result, "after_generate", model)
 
             result.status = "passed"
             result.phase = ""
@@ -401,16 +433,41 @@ def run_ladder(
             emit("")
             emit(f"  FAIL during phase '{result.phase}' after {clock() - started:.1f}s")
             emit(f"  {result.error}")
+
+            # Post-fault evidence, best effort. torch's device queries will
+            # likely fail on a poisoned CUDA context and come back `unavailable`
+            # — but nvidia-smi and the kernel log are separate processes, and
+            # the Xid code the driver just logged is the single most diagnostic
+            # thing available. Not attempting to read it because torch is broken
+            # would discard the evidence for being adjacent to the failure.
+            try:
+                synchronize_fn()
+            except BaseException:  # noqa: BLE001 - already failing; this is expected to fail too
+                pass
+            snapshot(result, "on_failure", model)
+
             emit("")
             emit(f"  ISOLATION VERDICT — branch {step.index} ({step.name}):")
             emit(f"    {step.verdict_on_failure}")
         finally:
             result.seconds = clock() - started
-            if model is not None:
+            had_model = model is not None
+            # Drop every reference this frame holds BEFORE teardown runs.
+            # gen_context_factory is `model.disable_adapter` on rung 3 — a bound
+            # method, which pins the model just as firmly as the model variable.
+            model = None
+            gen_context_factory = None
+            if had_model:
                 try:
-                    release_fn(model)
+                    release_fn()
                 except Exception as exc:  # pragma: no cover - best effort teardown
                     emit(f"  (teardown after step {step.index} raised {exc!r}; continuing)")
+            # Persist the summary after every rung, not once at the end: a rung
+            # that kills the process must still leave the rungs before it on disk.
+            try:
+                progress_fn(results)
+            except Exception as exc:  # pragma: no cover
+                emit(f"  (progress write after step {step.index} raised {exc!r}; continuing)")
 
     return results
 
@@ -464,10 +521,12 @@ def _real_reset_peak():
         torch.cuda.reset_peak_memory_stats()
 
 
-def _real_release(model):
+def _real_release():
+    """Takes no model, by design — see run_ladder's docstring. The caller has
+    already dropped every reference it held; this only has to collect and hand
+    the freed blocks back to the driver."""
     import torch
 
-    del model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -484,23 +543,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="§0 smoke gate: four-rung isolation ladder for the CUDA illegal access."
     )
+    # Required for a real run, not optional. Evidence that can be lost is not
+    # evidence: the whole reason this exists is that the last run died and left
+    # nothing behind.
     parser.add_argument(
-        "--out",
+        "--out-dir",
         type=Path,
         default=None,
-        help="Write the JSON result here (default: stdout only).",
+        help="Directory for the summary, per-rung telemetry, and the raw nvidia-smi dump. "
+        "Required unless --dry-run. Put it on the persistent volume.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the ladder and exit. Loads nothing, needs no GPU, costs nothing.",
     )
-    parser.add_argument(
-        "--expect-prompt-tokens",
-        type=int,
-        default=EXPECTED_PROMPT_TOKENS,
-        help=f"Required token count for the first prompt (default {EXPECTED_PROMPT_TOKENS}).",
-    )
+    # There is deliberately no --expect-prompt-tokens flag. An operator able to
+    # bless an arbitrary prompt length can turn the gate green on a prompt that
+    # is not the one that crashed, which is the same as having no gate while
+    # the docs promise one. Tests inject the value through the function
+    # parameter instead.
     return parser
 
 
@@ -526,33 +588,75 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDRY RUN: nothing loaded, no GPU touched, no spend.")
         return EXIT_OK
 
+    if args.out_dir is None:
+        print(
+            "ERROR: --out-dir is required for a real run. The rung that kills the\n"
+            "       process is the one whose evidence matters, and evidence held in\n"
+            "       memory until the ladder returns is exactly the evidence that run\n"
+            "       never produces.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
     if needs_launch_blocking_reexec(os.environ):
         reexec_with_launch_blocking([__file__, *argv], os.environ)
         return EXIT_OK  # unreachable after a successful execve
 
     print_plan()
 
+    out_dir: Path = args.out_dir
+    telemetry_dir = out_dir / "telemetry"
+    summary_path = out_dir / "isolation_ladder.json"
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+
+    # Written once, before anything is loaded: the pre-run state of the card is
+    # the baseline every later reading is compared against, and it is also the
+    # only reading guaranteed to exist if load itself kills the process.
+    smi_status = gpu_telemetry.write_raw_smi_query(out_dir / "nvidia_smi_q_pre_run.txt")
+    print(f"\nraw nvidia-smi -q: {smi_status['status']}")
+    baseline = gpu_telemetry.collect_all(model=None, include_smi_raw=False, phase="pre_run")
+    baseline["libraries"] = gpu_telemetry.collect_library_versions()
+    gpu_telemetry.write_json_atomic(telemetry_dir / "step0_pre_run.json", baseline)
+
     print("\nLoading tokenizer and building the first production prompt...")
     tokenizer = _load_tokenizer()
     prompt_id, prompt = load_first_production_prompt(tokenizer)
     try:
-        token_count = assert_prompt_token_count(tokenizer, prompt, args.expect_prompt_tokens)
+        token_count = assert_prompt_token_count(tokenizer, prompt)
     except ValueError as exc:
         print(f"\nREFUSING TO RUN: {exc}", file=sys.stderr)
         return EXIT_PROMPT_MISMATCH
     print(f"  prompt id={prompt_id}, {token_count} tokens (asserted)")
 
+    def persist_snapshot(step: LadderStep, phase: str, model: Any) -> dict:
+        bundle = gpu_telemetry.collect_all(model, phase=phase)
+        gpu_telemetry.write_json_atomic(
+            telemetry_dir / f"step{step.index}_{phase}.json", bundle
+        )
+        return bundle
+
+    def persist_summary(results: list[StepResult]) -> None:
+        partial = summarise(results)
+        partial["prompt_id"] = prompt_id
+        partial["prompt_tokens"] = token_count
+        partial["complete"] = all(r.status in {"passed", "failed", "skipped"} for r in results)
+        gpu_telemetry.write_json_atomic(summary_path, partial)
+
     results = run_ladder(
         generate_fn=lambda model: _real_generate(model, tokenizer, prompt),
-        telemetry_fn=lambda model: gpu_telemetry.collect_all(model),
+        snapshot_fn=persist_snapshot,
         synchronize_fn=_real_synchronize,
         release_fn=_real_release,
         reset_peak_fn=_real_reset_peak,
+        progress_fn=persist_summary,
     )
 
     summary = summarise(results)
     summary["prompt_id"] = prompt_id
     summary["prompt_tokens"] = token_count
+    summary["complete"] = True
+    summary["raw_nvidia_smi_q"] = smi_status
+    gpu_telemetry.write_json_atomic(summary_path, summary)
 
     print("")
     print("=" * 72)
@@ -562,11 +666,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  step {result.step.index}: {result.status:<8} {result.step.name}")
     print("")
     print(summary["verdict"])
-
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-        print(f"\nwrote {args.out}")
+    print(f"\nwrote {summary_path}")
+    print(f"      {telemetry_dir}/ (per-rung snapshots)")
 
     return EXIT_OK if summary["failed_at_step"] is None else EXIT_LADDER_FAILED
 

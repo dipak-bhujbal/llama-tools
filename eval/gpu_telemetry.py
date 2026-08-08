@@ -29,9 +29,11 @@ is where they were in fact developed and tested, at zero cost.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 # `nvidia-smi --query-gpu=` fields. These come back as stable CSV, unlike the
@@ -360,27 +362,83 @@ def collect_model_placement(model: Any) -> dict:
     return result
 
 
-def collect_all(model: Any = None, device_index: int = 0, include_smi_raw: bool = False) -> dict:
-    """The full bundle for one ladder step.
+def collect_all(
+    model: Any = None,
+    device_index: int = 0,
+    include_smi_raw: bool = False,
+    phase: str = "",
+) -> dict:
+    """The full bundle for one ladder step at one phase.
 
-    `include_smi_raw` is off by default so the per-step records stay readable;
-    the ladder writes the raw `nvidia-smi -q` dump once, as its own artifact,
-    rather than repeating ~10 KB of text four times.
+    `include_smi_raw` is off by default so the per-step records stay readable.
+    The raw dump is not silently discarded: `write_raw_smi_query` persists it
+    once as its own artifact, and the ladder calls that. An earlier version of
+    this docstring claimed the ladder did so while no code did — a stated
+    guarantee with nothing behind it, which is the failure mode this whole
+    module was written to prevent, so it is named here rather than quietly
+    fixed.
+
+    Library versions are collected only when `include_smi_raw` is set (i.e. on
+    the one full bundle per run) because they cannot change between rungs, and
+    repeating them four times per rung buries the fields that do change.
     """
     smi = collect_nvidia_smi()
     if not include_smi_raw:
         smi.pop("smi_q_raw", None)
 
     bundle: dict = {
+        "phase": phase,
         "nvidia_smi": smi,
+        # Re-read at every phase, deliberately. A fault that bumps an ECC or Xid
+        # counter does so *during* the operation, so a single pre-operation
+        # sample would miss exactly the evidence worth having.
         "xid": collect_xid(),
         "torch_device": collect_torch_device_state(device_index),
-        "libraries": collect_library_versions(),
     }
+    if include_smi_raw:
+        bundle["libraries"] = collect_library_versions()
     bundle["model"] = collect_model_placement(model) if model is not None else unavailable(
         "no model loaded at this point"
     )
     return bundle
+
+
+def write_json_atomic(path: Path, payload: Any) -> Path:
+    """Write JSON via a temp file and rename.
+
+    Atomic because the process being observed is one that dies abruptly: a
+    SIGKILL landing mid-write would otherwise leave a truncated file that the
+    next reader parses as a fact. rename(2) within a directory is atomic, so a
+    reader sees either the previous complete file or the new complete one.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp.replace(path)
+    return path
+
+
+def write_raw_smi_query(path: Path) -> dict:
+    """Persist the full `nvidia-smi -q` dump once per run.
+
+    Kept out of the per-phase records because it is ~10 KB of mostly static
+    text, and kept as an artifact rather than dropped because it carries fields
+    no structured interface exposes — remapped rows, retired pages, per-
+    partition ECC, clock throttle reasons — and those are unrecoverable once
+    the pod is terminated.
+    """
+    path = Path(path)
+    okay, text = _run(["nvidia-smi", "-q"], 30)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if okay:
+        path.write_text(text, encoding="utf-8")
+        return ok(str(path))
+    path.write_text(f"nvidia-smi -q unavailable: {text}\n", encoding="utf-8")
+    return unavailable(text)
 
 
 def unavailable_fields(bundle: Any, path: str = "") -> list[str]:

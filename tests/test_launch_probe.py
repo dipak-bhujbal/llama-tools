@@ -397,3 +397,45 @@ def test_preflight_is_announced_before_any_git_mutation() -> None:
     out = combined_output(result)
     assert "PREFLIGHT" in out
     assert out.index("PREFLIGHT") < out.index("checkout --detach")
+
+
+# --- §0 smoke gate is folded into the launcher, not left to the operator -----
+def test_dry_run_runs_the_isolation_ladder() -> None:
+    """A gate that lives only in a runbook is not a gate. The failure it guards
+    against is a full probe launched straight into the same CUDA fault that
+    killed the last one, and 'the operator will remember' is exactly the
+    assumption that fails under time pressure on a billing pod."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "eval/isolation_ladder.py" in output
+    assert "--out-dir" in output
+
+
+def test_ladder_runs_after_verify_and_before_the_first_paid_generation() -> None:
+    """Ordering is the whole point: after verify because it reads the first
+    `multiple` prompt from the fixtures, before generation because aborting
+    afterwards would have already spent the money."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    ladder = output.index("isolation_ladder.py")
+    first_generation = output.index("--category multiple")
+    verify = output.index("--verify-only")
+    assert verify < ladder < first_generation
+
+
+def test_ladder_failure_has_its_own_exit_code() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "readonly EXIT_SMOKE_GATE_FAILED=69" in source
+    assert '"${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"' in source
+
+
+def test_there_is_no_flag_to_skip_the_gate() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    for escape_hatch in ("--skip-ladder", "--skip-smoke", "--no-gate", "SKIP_LADDER"):
+        assert escape_hatch not in source, escape_hatch
+
+
+def test_exit_inventory_lists_the_ladder_evidence() -> None:
+    """A run aborted at the gate has no generations to persist, so the ladder's
+    artifacts are its entire output — they must appear on the failure path too."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "isolation_ladder/isolation_ladder.json" in output
+    assert "isolation_ladder/telemetry/" in output

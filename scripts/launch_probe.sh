@@ -57,6 +57,7 @@ readonly EXIT_GIT_UNCLEAN=65    # checkout landed on the wrong SHA, or tree dirt
 readonly EXIT_ACQUIRE_FAILED=66 # fetch_pinned_bfcl.py (acquire) failed
 readonly EXIT_VERIFY_FAILED=67  # fetch_pinned_bfcl.py --verify-only failed
 readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the wall-clock timeout
+readonly EXIT_SMOKE_GATE_FAILED=69 # isolation ladder did not come back green
 
 # This script always operates on the repo it lives in, resolved from its own
 # path — not the caller's $PWD — so it behaves the same no matter where it
@@ -358,6 +359,21 @@ gen_common_args=(
   --sft-adapter-revision "b6f4da479f8c6fc044ee8b802a92f47780f970c5"
   --base-revision "0e9e39f249a16976918f6564b8830bc894c89659"
 )
+# The §0 smoke gate. This runs INSIDE the launcher, on the same node, in the
+# same process tree and against the same weights cache as the paid generation
+# that follows — not as a separate command an operator is trusted to remember.
+#
+# A gate that lives only in a runbook is not a gate: the failure it guards
+# against is a full probe launched straight into the same CUDA fault that killed
+# the last one, and "the operator will run the ladder first" is precisely the
+# assumption that fails under time pressure on a billing pod. Placing it here
+# also means a green result is same-run, same-GPU evidence rather than a receipt
+# from some earlier session on some other node.
+ladder_cmd=(
+  "${PYTHON}" "${REPO_ROOT}/eval/isolation_ladder.py"
+  --out-dir "${out_root}/isolation_ladder"
+)
+
 gen_multiple_cmd=(
   "${PYTHON}" "${REPO_ROOT}/eval/bfcl_simple.py"
   --category multiple
@@ -425,9 +441,10 @@ run_generation() {
 #   1. detached checkout + HEAD/clean-tree assertions      (Blocker 1)
 #   2. acquire pinned BFCL fixtures                          (Blocker 2)
 #   3. verify fixtures                                       (Blocker 2)
-#   4. paid generation: category=multiple                    (Blocker 3)
-#   5. verify fixtures again, immediately before the 2nd spend (Blocker 2)
-#   6. paid generation: category=simple_python                (Blocker 3)
+#   4. §0 isolation ladder smoke gate                        (Blocker 5)
+#   5. paid generation: category=multiple                    (Blocker 3)
+#   6. verify fixtures again, immediately before the 2nd spend (Blocker 2)
+#   7. paid generation: category=simple_python                (Blocker 3)
 # Any failure at any step aborts every step after it (Blocker 4).
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -481,6 +498,18 @@ on_exit() {
   echo "  plus: ${out_root}/pip_freeze.txt ${out_root}/gpu.txt ${out_root}/image_tag.txt"
   echo "  plus: ${out_root}/env_fingerprint.json ${out_root}/bundle_sha256.txt"
   echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
+  # The gate's evidence is listed even when the gate is what failed — especially
+  # then. A run aborted at the ladder has no generations to persist, and its
+  # entire value is in these files.
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "  plus: ${out_root}/isolation_ladder/isolation_ladder.json"
+    echo "  plus: ${out_root}/isolation_ladder/telemetry/ ${out_root}/isolation_ladder/nvidia_smi_q_pre_run.txt"
+  elif [[ -s "${out_root}/isolation_ladder/isolation_ladder.json" ]]; then
+    echo "  [present] ${out_root}/isolation_ladder/isolation_ladder.json"
+    echo "  [present] ${out_root}/isolation_ladder/telemetry/"
+  else
+    echo "  [MISSING] ${out_root}/isolation_ladder/isolation_ladder.json"
+  fi
   echo "  plus: this tmux session's stdout/stderr log"
   echo "====================================================================="
 
@@ -544,6 +573,13 @@ run_checked "acquire pinned BFCL fixtures" "${EXIT_ACQUIRE_FAILED}" "${acquire_c
 
 echo
 run_checked "verify pinned BFCL fixtures (pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
+
+# The gate. Runs after the fixtures exist (it reads the first `multiple` prompt)
+# and before the first paid generation. A non-zero exit aborts here, so a run
+# that would have reproduced the §0 crash spends four model loads and 32
+# generated tokens instead of 1,200 generations.
+echo
+run_checked "§0 isolation ladder (smoke gate)" "${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"
 
 echo
 run_generation "multiple" "${gen_multiple_cmd[@]}"

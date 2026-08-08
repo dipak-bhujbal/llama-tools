@@ -89,10 +89,13 @@ small and `df` reports the whole cluster, so it gives **no warning as it fills**
 
 ```bash
 # Base model is gated and the adapter is private, so a read token is required.
-# Type it at the prompt: `read -rs` echoes nothing and leaves no history entry.
-# `export HF_TOKEN=<value>` would write the token to shell history in cleartext
-# and expose it in `ps` while the command runs; a token in a file on the mounted
-# volume outlives the pod entirely.
+# Type it at the prompt: `read -rs` echoes nothing and leaves no history entry,
+# because the value arrives as stdin rather than as part of a command line.
+# `export HF_TOKEN=<value>` would echo the token on screen (so it persists in
+# scrollback and any recording) and write it to shell history in cleartext; a
+# token in a file on the mounted volume outlives the pod entirely. `export` is a
+# shell builtin and does not appear in `ps` — that exposure applies to external
+# commands taking the token as an argument, such as `hf auth login --token`.
 read -rsp 'HF read token: ' HF_TOKEN; echo
 export HF_TOKEN
 

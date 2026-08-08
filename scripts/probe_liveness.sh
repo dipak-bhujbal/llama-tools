@@ -57,23 +57,35 @@ readonly ERROR_MARKERS=(
 
 usage() {
   cat >&2 <<'USAGE'
-usage: probe_liveness.sh --log FILE --status-file FILE
-                        (--pid N | --tmux-session NAME)
-                        [--interval SECONDS] [--once]
+usage: probe_liveness.sh --log FILE --status-file FILE --pid N
+                        [--tmux-session NAME] [--interval SECONDS] [--once]
+                        [--allow-legacy-footer]
 
-  --log            stdout/stderr log of the watched run (scanned for the EXIT footer)
-  --status-file    JSON terminal status is written here, atomically
-  --pid            PID of the launcher to assert alive
-  --tmux-session   tmux session name to assert alive (use instead of, or with, --pid)
-  --interval       seconds between checks in loop mode (default 30)
-  --once           perform one assertion pass and exit with the state code
+  --log             stdout/stderr log of the watched run (scanned for the EXIT footer)
+  --status-file     JSON terminal status is written here, atomically
+  --pid             PID of the launcher. REQUIRED, and the sole liveness authority.
+  --tmux-session    tmux session name. Recorded as context ONLY -- never used to
+                    decide whether the run is alive. See the note below.
+  --interval        seconds between checks in loop mode (default 30)
+  --once            perform one assertion pass and exit with the state code
+  --allow-legacy-footer
+                    accept a prose "RUN COMPLETE"/"RUN DID NOT COMPLETE" footer that
+                    carries no PID. Off by default: such a footer cannot be attributed
+                    to this run, so a log appended by two consecutive runs would let
+                    the earlier run's outcome be reported as this one's.
+
+Why tmux is not a liveness signal: the runbook has the operator run this monitor
+from a second pane of the same session. The session therefore outlives the
+launcher by construction, so treating "session exists" as "run is alive" would
+report RUNNING forever after the launcher dies -- the one event this exists to
+catch.
 
 exit codes:
   0   watched process is alive
   64  usage error
-  70  process gone; terminal record reports exit 0
-  71  process gone; terminal record reports a nonzero exit
-  72  process gone with NO terminal record -- hard death, this is the alert
+  70  process gone; authenticated terminal record reports exit 0
+  71  process gone; authenticated terminal record reports a nonzero exit
+  72  process gone with no authenticated terminal record -- hard death, the alert
 USAGE
 }
 
@@ -83,6 +95,7 @@ watch_pid=""
 tmux_session=""
 interval=30
 once=0
+allow_legacy_footer=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +105,7 @@ while [[ $# -gt 0 ]]; do
     --tmux-session)  tmux_session="${2:-}"; shift 2 ;;
     --interval)      interval="${2:-}"; shift 2 ;;
     --once)          once=1; shift ;;
+    --allow-legacy-footer) allow_legacy_footer=1; shift ;;
     -h|--help)       usage; exit "${EXIT_USAGE}" ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage; exit "${EXIT_USAGE}" ;;
   esac
@@ -100,9 +114,7 @@ done
 missing=()
 [[ -z "${log_file}" ]] && missing+=("--log")
 [[ -z "${status_file}" ]] && missing+=("--status-file")
-if [[ -z "${watch_pid}" && -z "${tmux_session}" ]]; then
-  missing+=("--pid or --tmux-session")
-fi
+[[ -z "${watch_pid}" ]] && missing+=("--pid")
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "ERROR: missing required: ${missing[*]}" >&2
   usage
@@ -134,8 +146,17 @@ tmux_alive() {
   tmux has-session -t "${tmux_session}" 2>/dev/null
 }
 
+# The PID is the sole authority. tmux_alive is collected for the status file as
+# context, and deliberately NOT consulted here.
+#
+# An earlier version returned `pid_alive || tmux_alive`. Combined with the
+# runbook's own instruction to run this monitor from a second pane of the
+# watched session, that OR guaranteed the monitor would report RUNNING forever
+# after the launcher died: the session was being kept alive by the monitor
+# itself. A liveness check whose own presence satisfies its condition is not a
+# check.
 process_alive() {
-  pid_alive || tmux_alive
+  pid_alive
 }
 
 # ---------------------------------------------------------------------------
@@ -175,8 +196,18 @@ scan_footer() {
     return 0
   fi
 
-  # Fallback: the human footer, for logs from a launcher predating the record
-  # line. No pid to check against, so this is weaker evidence by construction.
+  # Fallback: the human footer, from a launcher predating the record line. It
+  # carries no pid, so it cannot be attributed to this run — an old footer left
+  # in a reused log would be accepted as this run's outcome, which is the same
+  # stale-evidence hole the pid check above closes. Off unless the operator
+  # explicitly opts in.
+  if [[ "${allow_legacy_footer}" -ne 1 ]]; then
+    if grep -qE "${FOOTER_FAIL}|${FOOTER_OK}" <<<"${tail_text}"; then
+      footer_state="unauthenticated"
+    fi
+    return 0
+  fi
+
   if grep -qF "${FOOTER_FAIL}" <<<"${tail_text}"; then
     footer_state="failed"
     # Footer form: "RUN DID NOT COMPLETE — exit 68, elapsed 64s"
@@ -278,10 +309,12 @@ check_once() {
   scan_error_markers
 
   if process_alive; then
-    local how=""
-    pid_alive && how="pid ${watch_pid} alive"
+    # Only the pid appears as the reason. tmux is appended as context and
+    # labelled as such, so nobody reading this line later concludes the session
+    # check contributed to the verdict.
+    local how="pid ${watch_pid} alive"
     if tmux_alive; then
-      how="${how:+${how}, }tmux session ${tmux_session} alive"
+      how="${how} (context: tmux session ${tmux_session} also present)"
     fi
     write_status "running" "" "false" "${how}"
     echo "[liveness] RUNNING — ${how}; error markers: ${marker_count}"
@@ -306,6 +339,17 @@ check_once() {
       echo "[liveness] ALERT: DIED HARD — process gone; the terminal record in" >&2
       echo "[liveness] this log carries a different pid, so it describes an" >&2
       echo "[liveness] earlier run appending to the same file, not this one." >&2
+      echo "[liveness] STOP THE POD AND CONFIRM BILLING STOPPED — a dead process" >&2
+      echo "[liveness] does not stop its own meter." >&2
+      return "${EXIT_DIED_HARD}"
+      ;;
+    unauthenticated)
+      write_status "died_hard" "" "true" \
+        "process gone; the log has a prose footer but no pid-bearing record, so it cannot be attributed to this run (pass --allow-legacy-footer to accept it)"
+      echo "[liveness] ALERT: DIED HARD — process gone. The log has a prose EXIT" >&2
+      echo "[liveness] footer but no pid-bearing PROBE_EXIT_RECORD, so it cannot" >&2
+      echo "[liveness] be attributed to this run. If this log is from a launcher" >&2
+      echo "[liveness] predating that record, re-run with --allow-legacy-footer." >&2
       echo "[liveness] STOP THE POD AND CONFIRM BILLING STOPPED — a dead process" >&2
       echo "[liveness] does not stop its own meter." >&2
       return "${EXIT_DIED_HARD}"

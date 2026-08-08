@@ -111,12 +111,19 @@ the first preflight artifact onward, not copied at the end and hoped for.
 export RUNPOD_IMAGE_NAME="<the exact template tag you launched>"
 
 # Type the token at the prompt. Do not paste it into an `export HF_TOKEN=...`
-# command and do not put it in a file. A token given as a command argument is
-# written to shell history in cleartext and is visible in `ps` to anything else
-# on the pod for as long as the command runs; a token in a file survives until
-# something deletes it, which on a volume that outlives the pod is indefinitely.
-# `read -rs` echoes nothing and never becomes a history entry, because the value
-# is stdin to a command rather than part of one.
+# command and do not put it in a file.
+#
+# `export HF_TOKEN=<value>` writes the token into shell history in cleartext and
+# echoes it on screen as you type or paste it, so it survives in scrollback, in
+# any terminal recording, and in whatever you copied it from. A token written to
+# a file on the mounted volume outlives the pod entirely. `read -rs` echoes
+# nothing and the value never becomes a history entry, because it arrives as
+# stdin rather than as part of a command line.
+#
+# (`export` is a shell builtin, so it does NOT appear in `ps` — an earlier
+# version of this note claimed it did. The `ps` exposure is real for external
+# commands that take the token as an argument, e.g. `hf auth login --token
+# $HF_TOKEN`, where the shell expands the value into the new process's argv.)
 read -rsp 'HF read token: ' HF_TOKEN; echo
 export HF_TOKEN
 
@@ -176,12 +183,21 @@ Rung 3 is what the probe's `base` candidate ran; rung 4 is what the mining pilot
 successfully on 2026-08-07. One 609-token prompt, 8 new tokens per rung, seconds of GPU
 time. It aborts at the first failure and prints the verdict for that branch.
 
+**`launch_probe.sh` runs the ladder itself**, as step 4, after fixture verification and
+before the first paid generation. A non-green ladder exits `69` and the probe never starts.
+You do not run it manually as part of a probe, and there is no flag to skip it — a gate an
+operator has to remember under time pressure on a billing pod is not a gate, and running it
+inside the launcher is also what makes a green result same-run, same-node evidence rather
+than a receipt from some earlier session on some other card.
+
 ```bash
-# Inspect the plan first — loads nothing, needs no GPU, and is reviewable off-pod.
+# Inspect the plan — loads nothing, needs no GPU, reviewable off-pod.
 .venv/bin/python eval/isolation_ladder.py --dry-run
 
+# Standalone, only when diagnosing outside a probe launch. --out-dir is required:
+# the rung that kills the process is the one whose evidence matters.
 .venv/bin/python eval/isolation_ladder.py \
-  --out /workspace/persist/study2/isolation_ladder.json
+  --out-dir /workspace/persist/study2/isolation_ladder
 ```
 
 The script re-execs itself with `CUDA_LAUNCH_BLOCKING=1`; do not set it yourself and do
@@ -193,29 +209,65 @@ postmortem could not name a cause.
 It refuses to run if the first prompt is not 609 tokens. That is intended: a pass on some
 other prompt is not evidence about the crash.
 
-Read `isolation_ladder.json` before deciding anything. Each rung carries its own telemetry
-— resolved `hf_device_map`, `_attn_implementation`, peak/reserved VRAM, free/total VRAM,
-GPU name and UUID, driver, ECC counters and Xid codes, library versions. **Fields that
-could not be measured say so.** A consumer card has no ECC, and an unprivileged container
-usually cannot read the kernel log for Xid codes; those come back as `unavailable` with a
-reason, never as zero. Do not read a missing measurement as a clean result.
+Evidence lands under `<out-root>/isolation_ladder/`:
+
+| File | Written |
+|---|---|
+| `nvidia_smi_q_pre_run.txt` | once, before anything loads — the card's baseline |
+| `telemetry/step0_pre_run.json` | once, with library versions |
+| `telemetry/stepN_after_load.json` | after each load, **before** the dangerous call |
+| `telemetry/stepN_after_generate.json` | after each successful generation — carries the rung's true peak VRAM |
+| `telemetry/stepN_on_failure.json` | best effort on the rung that faults |
+| `isolation_ladder.json` | rewritten after **every** rung, not once at the end |
+
+Every one of those is written atomically as it is produced, because the process being
+measured is one that has already died abruptly once and taken all of its evidence with it.
+A rung that kills the process still leaves the rungs before it, and its own after-load
+snapshot, on disk.
+
+The `on_failure` snapshot is the important one. torch's device queries will usually fail on
+a poisoned CUDA context and come back `unavailable` — but `nvidia-smi` and the kernel log
+are separate processes, so the **Xid code the driver just logged** is still readable, and
+it is the single most diagnostic thing available.
+
+Read `isolation_ladder.json` before deciding anything. **Fields that could not be measured
+say so.** A consumer card has no ECC, and an unprivileged container usually cannot read the
+kernel log for Xid codes; those come back `unavailable` with a reason, never as zero. Do
+not read a missing measurement as a clean result.
 
 ### Watch the run with the liveness monitor, not with your eyes
 
+Launch exactly as the **Pod: launch** section below specifies — that is the one authoritative
+invocation, with the absolute deadlines and the shared `--out-root`. Do not retype it here.
+Run it under tmux with its output teed to a log, then start the monitor from a second pane:
+
 ```bash
-# In the tmux session, note the launcher's PID, then from a second pane:
+# PID of the launcher started in the Pod: launch step. Capture it there if you can;
+# this recovers it if you did not.
+LAUNCHER_PID=$(pgrep -n -f 'scripts/launch_probe')
+
 bash scripts/probe_liveness.sh \
-  --log /workspace/persist/study2/probe.log \
-  --status-file /workspace/persist/study2/probe_status.json \
-  --pid <LAUNCHER_PID> --tmux-session probe --interval 30
+  --log "${PROBE_OUT_ROOT}/probe.log" \
+  --status-file "${PROBE_OUT_ROOT}/probe_status.json" \
+  --pid "${LAUNCHER_PID}" --tmux-session probe --interval 30
 ```
 
-It asserts positively: the process is alive, or a terminal record exists explaining why
-not, and that record carries an exit code. Exit `72` means the process is gone and left no
-account of itself — SIGKILL, the OOM killer, or host preemption. That is the one condition
-worth waking someone for, and it is the condition the previous mtime-watching monitor could
-not detect. **Log staleness is reported but never alerts**: a model load writes nothing for
-minutes while perfectly healthy.
+`--pid` is required and is the **sole** liveness authority. `--tmux-session` is recorded as
+context and never decides anything: you are told to run this monitor from a second pane of
+that same session, so the session outlives the launcher by construction — treating "session
+exists" as "run is alive" would report RUNNING forever after the death this exists to catch.
+
+It asserts positively: the process is alive, or an **authenticated** terminal record exists
+explaining why not, and that record carries an exit code. Authenticated means the
+`PROBE_EXIT_RECORD` line in the log carries the PID being watched. A footer from a different
+PID, or a prose-only footer with no PID at all, is *not* accepted — a log appended by two
+consecutive runs would otherwise let the earlier run's clean exit be reported as this one's
+outcome. Pass `--allow-legacy-footer` only for logs from a launcher predating that record.
+
+Exit `72` means the process is gone with no authenticated record — SIGKILL, the OOM killer,
+or host preemption. That is the one condition worth waking someone for, and the one the old
+mtime-watching monitor could not detect. **Log staleness is reported but never alerts**: an
+8B model load writes nothing for minutes while perfectly healthy.
 
 Monitor exit codes: `0` alive · `70` exited 0 · `71` exited nonzero · `72` died hard.
 

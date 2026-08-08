@@ -244,3 +244,49 @@ def test_to_json_round_trips() -> None:
 
     bundle = {"xid": gt.unavailable("denied"), "libraries": {"torch": gt.ok("2.4.0")}}
     assert json.loads(gt.to_json(bundle))["xid"]["value"] is None
+
+
+# --- persistence -------------------------------------------------------------
+def test_write_json_atomic_leaves_no_partial_file_and_no_debris(tmp_path) -> None:
+    """Atomic because the process being observed is one that dies abruptly. A
+    SIGKILL landing mid-write would otherwise leave a truncated file that the
+    next reader parses as a fact."""
+    import json
+
+    target = tmp_path / "nested" / "snapshot.json"
+    gt.write_json_atomic(target, {"xid": gt.unavailable("denied")})
+    assert json.loads(target.read_text())["xid"]["value"] is None
+    assert not list(target.parent.glob("*.tmp.*"))
+
+
+def test_write_json_atomic_overwrites_rather_than_appends(tmp_path) -> None:
+    import json
+
+    target = tmp_path / "s.json"
+    gt.write_json_atomic(target, {"n": 1})
+    gt.write_json_atomic(target, {"n": 2})
+    assert json.loads(target.read_text()) == {"n": 2}
+
+
+def test_raw_smi_dump_records_its_own_absence_rather_than_vanishing(tmp_path, monkeypatch) -> None:
+    """An earlier version's docstring claimed the ladder persisted this dump
+    while no code did — a stated guarantee with nothing behind it. It is now
+    written, and when nvidia-smi is unavailable the file says so instead of
+    being silently absent."""
+    monkeypatch.setattr(gt, "_run", lambda cmd, timeout=20: (False, "nvidia-smi not on PATH"))
+    target = tmp_path / "smi.txt"
+    status = gt.write_raw_smi_query(target)
+    assert status["status"] == "unavailable"
+    assert "not on PATH" in target.read_text()
+
+
+def test_collect_all_labels_its_phase_and_omits_static_libraries_per_rung() -> None:
+    bundle = gt.collect_all(model=None, phase="after_load")
+    assert bundle["phase"] == "after_load"
+    # Library versions cannot change between rungs; repeating them four times
+    # per rung buries the fields that do change.
+    assert "libraries" not in bundle
+
+
+def test_collect_all_includes_libraries_on_the_full_bundle() -> None:
+    assert "libraries" in gt.collect_all(model=None, include_smi_raw=True, phase="pre_run")

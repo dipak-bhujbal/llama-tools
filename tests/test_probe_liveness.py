@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -63,8 +64,10 @@ def read_status(status_file: Path) -> dict:
     [
         [],
         ["--log", "/tmp/x"],
-        ["--log", "/tmp/x", "--status-file", "/tmp/y"],  # no --pid or --tmux-session
+        ["--log", "/tmp/x", "--status-file", "/tmp/y"],  # no --pid
         ["--log", "/tmp/x", "--status-file", "/tmp/y", "--pid", "not-a-number"],
+        # tmux alone is not a watch target: it cannot authenticate a reused log.
+        ["--log", "/tmp/x", "--status-file", "/tmp/y", "--tmux-session", "probe"],
     ],
 )
 def test_incomplete_invocation_exits_usage(args: list[str]) -> None:
@@ -73,7 +76,7 @@ def test_incomplete_invocation_exits_usage(args: list[str]) -> None:
 
 def test_missing_watch_target_names_what_is_missing() -> None:
     result = run_monitor(["--log", "/tmp/x", "--status-file", "/tmp/y", "--once"])
-    assert "--pid or --tmux-session" in result.stderr
+    assert "--pid" in result.stderr
 
 
 # --- assertion 1: the process is alive --------------------------------------
@@ -162,16 +165,45 @@ def test_dead_process_with_failure_exit_record_carries_the_code(paths, dead_pid:
     assert record["alert"] is True
 
 
-def test_prose_footer_alone_still_yields_an_exit_code(paths, dead_pid: int) -> None:
-    """Logs from a launcher predating the machine-readable record must still be
-    readable; the fallback is weaker evidence but not no evidence."""
+def test_prose_footer_alone_is_rejected_by_default(paths, dead_pid: int) -> None:
+    """A prose footer carries no PID, so it cannot be attributed to this run.
+    An earlier version of this file asserted the opposite and so enshrined the
+    exact stale-evidence hole the PID check was added to close: a log appended
+    by two consecutive runs would let run A's outcome be read as run B's."""
     log, status = paths
     log.write_text("RUN DID NOT COMPLETE — exit 67, elapsed 12s\n", encoding="utf-8")
     result = run_monitor(
         ["--log", str(log), "--status-file", str(status), "--pid", str(dead_pid), "--once"]
     )
+    assert result.returncode == EXIT_DIED_HARD  # fails closed
+    record = read_status(status)
+    assert record["state"] == "died_hard"
+    assert record["exit_code"] is None
+    assert "--allow-legacy-footer" in result.stderr
+
+
+def test_prose_footer_is_accepted_only_behind_the_explicit_opt_in(paths, dead_pid: int) -> None:
+    log, status = paths
+    log.write_text("RUN DID NOT COMPLETE — exit 67, elapsed 12s\n", encoding="utf-8")
+    result = run_monitor(
+        [
+            "--log", str(log), "--status-file", str(status), "--pid", str(dead_pid),
+            "--allow-legacy-footer", "--once",
+        ]
+    )
     assert result.returncode == EXIT_COMPLETED_FAILED
     assert read_status(status)["exit_code"] == 67
+
+
+def test_clean_prose_footer_is_also_rejected_by_default(paths, dead_pid: int) -> None:
+    """Fail-closed must apply to the reassuring case too, or the hole survives
+    in the only direction that matters: silently reporting success."""
+    log, status = paths
+    log.write_text("RUN COMPLETE — elapsed 900s\n", encoding="utf-8")
+    result = run_monitor(
+        ["--log", str(log), "--status-file", str(status), "--pid", str(dead_pid), "--once"]
+    )
+    assert result.returncode == EXIT_DIED_HARD
 
 
 # --- the alert: died hard ---------------------------------------------------
@@ -207,6 +239,38 @@ def test_a_terminal_record_from_a_different_pid_does_not_count_as_ours(paths, de
     assert result.returncode == EXIT_DIED_HARD  # fails closed
     assert read_status(status)["state"] == "died_hard"
     assert "different pid" in result.stderr
+
+
+def test_a_live_tmux_session_cannot_mask_a_dead_launcher(paths, dead_pid: int) -> None:
+    """The regression for the OR bug. The runbook has the operator run this
+    monitor from a second pane of the watched session, so the session outlives
+    the launcher by construction. `pid_alive || tmux_alive` therefore reported
+    RUNNING forever after exactly the death this must alert on — the monitor's
+    own presence satisfied its liveness condition."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not installed")
+
+    session = f"liveness-test-{os.getpid()}"
+    subprocess.run(["tmux", "new-session", "-d", "-s", session, "sleep 60"], check=True)
+    try:
+        log, status = paths
+        log.write_text("Loading base model...\n", encoding="utf-8")
+        result = run_monitor(
+            [
+                "--log", str(log), "--status-file", str(status),
+                "--pid", str(dead_pid),            # launcher is dead
+                "--tmux-session", session,          # session is very much alive
+                "--once",
+            ]
+        )
+        assert result.returncode == EXIT_DIED_HARD
+        record = read_status(status)
+        assert record["state"] == "died_hard"
+        assert record["pid_alive"] is False
+        # tmux liveness is still recorded — as context, not as a verdict.
+        assert record["tmux_alive"] is True
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", session], check=False)
 
 
 def test_missing_log_file_with_a_dead_process_is_still_the_alert(paths, dead_pid: int) -> None:
