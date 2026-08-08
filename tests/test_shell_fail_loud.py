@@ -16,12 +16,39 @@ Two concrete instances motivate each rule, so none of this is hypothetical:
     pilot's library versions cannot be compared against the failed probe's
     today.
 
-Scope note: only `bootstrap_pod.sh` and `launch_probe.sh` are policed here.
-`probe_liveness.sh` retains stderr suppression on `kill -0`, `tmux
-has-session`, `command -v` and the BSD/GNU `stat` probe, where a non-zero exit
-IS the answer being asked for rather than a failure being hidden. Adding it to
-this list would require rewriting those four idioms for no gain in fail-loud
-behaviour, so it is excluded deliberately and not by omission.
+Scope note: only `bootstrap_pod.sh` and `launch_probe.sh` are policed here,
+which is the scope the owner named. `probe_liveness.sh` is excluded
+deliberately, and the exclusion is stated in full rather than summarised,
+because a scope note that undercounts what it is excusing is itself the kind of
+reassuring-but-wrong artifact these tests exist to catch.
+
+It retains **8 suppressions on 7 lines**, in three groups that are NOT equally
+benign:
+
+  * `kill -0` (140), `tmux has-session` (146), and the BSD/GNU `stat` probe
+    (266, two of them) — a non-zero exit IS the answer being asked for, and one
+    of the two `stat` forms always fails by design. Nothing is hidden.
+  * `tail -n 200 ... 2>/dev/null || true` (180) — guarded by `[[ -r ]]`. A
+    failure yields empty text, `footer_state` stays `absent`, and the monitor
+    fails CLOSED to its DIED HARD alert. Safe direction.
+  * The three `grep` calls in `scan_error_markers` (242, 248, 251) — **not
+    benign.** A grep that fails leaves `marker_count` at 0, which is then
+    reported as `"error markers: 0"` on the console and `error_markers_seen: 0`
+    in the status JSON. That is the same shape as the Xid-regex defect fixed in
+    8659fb0: a scan that did not run, reported as a clean result.
+
+    Verified bound on the damage: `marker_count` is consumed only by
+    `write_status` and the RUNNING console line. The verdict itself comes from
+    `process_alive` plus `footer_state`, so a swallowed grep cannot turn an
+    alert into silence — it can only under-report context in the reassuring
+    direction.
+
+`probe_liveness.sh` also still opens two `set +e` windows around `check_once`
+(396, 406), the same pattern removed from the launcher here.
+
+None of that is fixed in this commit because the owner scoped the sweep to the
+bootstrap and the launcher. It is written down so the exclusion cannot be read
+as a claim that the third script is clean.
 """
 
 from __future__ import annotations
