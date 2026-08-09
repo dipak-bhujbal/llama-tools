@@ -507,3 +507,84 @@ def test_exit_inventory_lists_the_ladder_evidence() -> None:
     output = combined_output(run_script(full_args(extra=["--dry-run"])))
     assert "isolation_ladder/isolation_ladder.json" in output
     assert "isolation_ladder/telemetry/" in output
+
+
+# --- ladder-only scope (C scope A) ------------------------------------------
+def test_stop_after_ladder_is_a_scope_selector_not_a_gate_bypass() -> None:
+    """The gate still runs. --stop-after-ladder chooses how far the run goes
+    AFTER a green gate; it can never skip it. The existing
+    test_there_is_no_flag_to_skip_the_gate covers the inverse."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    gate = source.index('"${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"')
+    stop = source.index('if [[ "${stop_after_ladder}" -eq 1 ]]; then\n  now_epoch=')
+    assert gate < stop, "the stop branch must come after the gate has run"
+
+
+def test_ladder_only_success_exits_zero_with_a_named_outcome() -> None:
+    """Non-zero would be classified `failed` by probe_liveness.sh, which derives
+    footer_state from the integer alone, and the runbook would then refuse to
+    collect the evidence of a successful run. The outcome string carries the
+    distinction instead."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'readonly OUTCOME_LADDER_ONLY="ladder_only_green"' in source
+    assert 'readonly OUTCOME_FULL="full_probe_complete"' in source
+    assert 'probe_outcome="${OUTCOME_LADDER_ONLY}"' in source
+    assert "outcome=${probe_outcome}" in source
+    stop_branch = source[source.index('LADDER-ONLY COMPLETE'):]
+    assert 'exit "${EXIT_OK}"' in stop_branch[: stop_branch.index("\nfi\n")]
+
+
+def test_evidence_is_scoped_per_invocation_so_a_second_run_cannot_overwrite() -> None:
+    """Two green ladders bracketing the paid work are only a before/after check
+    if both survive. A shared path would destroy the comparison."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'invocation_dir="${out_root}/invocations/${invocation_id}"' in source
+    assert '--out-dir "${invocation_dir}/isolation_ladder"' in source
+    assert "invocation=${invocation_id:-unset}" in source
+
+
+def test_a_ladder_only_run_records_its_own_receipt_not_a_bfcl_manifest() -> None:
+    """A ladder-only invocation produces no BFCL run manifest, so its
+    provenance cannot hang off one."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "ladder_only_receipt.txt" in source
+    assert "schema=ladder_only_receipt/v1" in source
+    for field in ("ladder_green_epoch=", "provider_deadline_epoch=",
+                  "script_remaining_seconds=", "commit="):
+        assert field in source, field
+
+
+def test_an_unwritable_receipt_refuses_rather_than_reporting_success() -> None:
+    """stdout does not survive the pod: a success whose only record is the
+    terminal is not a record."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "readonly EXIT_EVIDENCE_FAILED=71" in source
+    assert 'exit "${EXIT_EVIDENCE_FAILED}"' in source
+
+
+def test_the_runway_print_asserts_nothing_and_stops_nothing() -> None:
+    """Information, not a timer. A second terminating mechanism is the family
+    that failed on 2026-08-08; the provider deadline stays the only hard stop."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    stop_branch = source[source.index("LADDER-ONLY COMPLETE"):]
+    stop_branch = stop_branch[: stop_branch.index("\nfi\n")]
+    # Strip echoed prose first: the branch is allowed to *describe* the shutdown
+    # reserve, it is not allowed to *invoke* anything that terminates. Testing
+    # the executable lines is the point; matching the noun would only police
+    # vocabulary.
+    executable = "\n".join(
+        line for line in stop_branch.splitlines()
+        if not line.lstrip().startswith(("echo", "printf", "#"))
+    )
+    for forbidden in ("runpodctl", "shutdown", "poweroff", "kill ", "sleep ",
+                      "review_deadline", "trap "):
+        assert forbidden not in executable, forbidden
+
+
+def test_no_duration_is_hardcoded_in_the_stop_branch() -> None:
+    """The operator monitors durations; the script must not bake in 10/15/900."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    stop_branch = source[source.index("LADDER-ONLY COMPLETE"):]
+    stop_branch = stop_branch[: stop_branch.index("\nfi\n")]
+    for magic in ("900", "600", "15 min", "10 min"):
+        assert magic not in stop_branch, magic

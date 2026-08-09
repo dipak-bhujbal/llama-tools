@@ -63,6 +63,10 @@ readonly EXIT_SMOKE_GATE_FAILED=69 # isolation ladder did not come back green
 # be. It is a launcher/commit incompatibility, and it wants its own class so the
 # log does not send the operator looking for a checkout problem that isn't there.
 readonly EXIT_LAUNCH_INCOMPATIBLE=70
+# 71: the invocation's evidence directory or receipt could not be written. A
+# success whose only record is stdout is not a success -- stdout does not
+# survive the pod. 72 is taken by probe_liveness.sh (DIED HARD).
+readonly EXIT_EVIDENCE_FAILED=71
 
 # This script always operates on the repo it lives in, resolved from its own
 # path — not the caller's $PWD — so it behaves the same no matter where it
@@ -108,6 +112,19 @@ Required:
                           the in-process bound inside the external hard stop.
 
 Optional:
+  --stop-after-ladder     Run the mandatory ladder gate and stop cleanly after
+                          it, without invoking either generation command. Exits
+                          0 with outcome=ladder_only_green and prints the
+                          remaining runway so the operator can decide whether a
+                          full invocation still fits before the deadline. This
+                          is a scope selector, NOT a way to skip the gate: the
+                          gate always runs, and every later invocation reruns it.
+
+  --invocation-id <str>   Label for this invocation's evidence directory under
+                          <out-root>/invocations/. Defaults to a UTC timestamp.
+                          Pass the same value the caller used for its log
+                          redirect so one directory holds the whole invocation.
+
   --dry-run               Print every command that would run, in order, and
                           exit 0 without touching git, the network, or
                           spawning generation.
@@ -126,6 +143,18 @@ out_root=""
 deadline_epoch_input=""
 provider_deadline_epoch=""
 dry_run=0
+stop_after_ladder=0
+invocation_id=""
+# Named outcomes, so a reader never has to remember which integers are good.
+# Exit status stays 0 for BOTH successes: probe_liveness.sh derives
+# footer_state purely from the integer (0 -> complete, anything else ->
+# failed), so a deliberate ladder-only stop exiting non-zero would be
+# classified as a failure and the runbook would refuse to collect its
+# evidence. The outcome string is what distinguishes them.
+readonly OUTCOME_FULL="full_probe_complete"
+readonly OUTCOME_LADDER_ONLY="ladder_only_green"
+readonly OUTCOME_FAILED="failed"
+probe_outcome="${OUTCOME_FAILED}"
 
 # require_value aborts *before* `shift`ing past the end of $@ or silently
 # swallowing the next flag as a value (e.g. `--commit --deadline-epoch` should
@@ -160,6 +189,15 @@ while [[ $# -gt 0 ]]; do
     --provider-deadline-epoch)
       require_value "--provider-deadline-epoch" "${2:-}"
       provider_deadline_epoch="$2"
+      shift 2
+      ;;
+    --stop-after-ladder)
+      stop_after_ladder=1
+      shift
+      ;;
+    --invocation-id)
+      require_value "--invocation-id" "${2:-}"
+      invocation_id="$2"
       shift 2
       ;;
     --dry-run)
@@ -403,9 +441,28 @@ gen_common_args=(
 # assumption that fails under time pressure on a billing pod. Placing it here
 # also means a green result is same-run, same-GPU evidence rather than a receipt
 # from some earlier session on some other node.
+# Every invocation owns a directory. The same pod may run the ladder, pause for
+# the operator to read it, then run again for generation -- and the second run
+# must not overwrite the first's evidence. Two green ladders bracketing the paid
+# work are a before/after health check on one node; that only works if both
+# survive. A shared "latest" path would destroy exactly the comparison the pause
+# exists to enable.
+if [[ -z "${invocation_id}" ]]; then
+  invocation_id="$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+if ! [[ "${invocation_id}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "ERROR: --invocation-id must be [A-Za-z0-9._-]+, got: '${invocation_id}'" >&2
+  exit "${EXIT_USAGE}"
+fi
+invocation_dir="${out_root}/invocations/${invocation_id}"
+if [[ "${dry_run}" -eq 0 ]]; then
+  mkdir -p "${invocation_dir}" \
+    || { echo "ERROR: cannot create ${invocation_dir}" >&2; exit "${EXIT_EVIDENCE_FAILED}"; }
+fi
+
 ladder_cmd=(
   "${PYTHON}" "${REPO_ROOT}/eval/isolation_ladder.py"
-  --out-dir "${out_root}/isolation_ladder"
+  --out-dir "${invocation_dir}/isolation_ladder"
 )
 
 gen_multiple_cmd=(
@@ -512,9 +569,14 @@ on_exit() {
     # Still print the stop procedure in a dry run: it is part of the plan a
     # reviewer is being asked to approve, and hiding it would mean the most
     # cost-critical step never appears in the reviewable output.
+    if [[ "${stop_after_ladder}" -eq 1 ]]; then
+      echo "DRY RUN (--stop-after-ladder) — gate only; NO generation command would run."
+    else
+      echo "DRY RUN (full probe) — gate, then both generation commands."
+    fi
     echo "DRY RUN — the steps below are what a real run would print on exit."
   elif [[ "${completed_all_steps}" -eq 1 && "${status}" -eq 0 ]]; then
-    echo "RUN COMPLETE — elapsed ${elapsed}s"
+    echo "RUN COMPLETE — outcome=${probe_outcome}, elapsed ${elapsed}s"
   else
     echo "RUN DID NOT COMPLETE — exit ${status}, elapsed ${elapsed}s"
     echo "Partial evidence is preserved; it is not discarded."
@@ -567,7 +629,7 @@ on_exit() {
   # record read as a live one, which is the failure mode this whole exercise is
   # about. Absence of this line after the process is gone is itself the signal:
   # the trap never ran, so the process did not exit in an orderly way.
-  echo "PROBE_EXIT_RECORD pid=$$ exit=${status} elapsed=${elapsed}s completed_all_steps=${completed_all_steps} dry_run=${dry_run}"
+  echo "PROBE_EXIT_RECORD pid=$$ exit=${status} outcome=${probe_outcome} invocation=${invocation_id:-unset} elapsed=${elapsed}s completed_all_steps=${completed_all_steps} dry_run=${dry_run}"
   return "${status}"
 }
 trap on_exit EXIT
@@ -791,6 +853,84 @@ run_bounded "§0 isolation ladder (smoke gate)" "${EXIT_SMOKE_GATE_FAILED}" "${l
 # nothing in between — and the thing now in between loads 16 GB of weights and
 # writes to the same volume. Restoring the invariant costs a checksum pass.
 echo
+# --stop-after-ladder ends here: the gate has run and passed, and no generation
+# command has been invoked. This is a SUCCESS of the selected scope, so it exits
+# 0 -- see the OUTCOME_* comment above for why a distinct non-zero code would
+# make the monitor classify it as a failure and block its own evidence.
+#
+# What is printed is runway, not a countdown. It asserts nothing and terminates
+# nothing; the operator compares the numbers and decides. A second timer that
+# could stop the pod would be a mechanism that can silently fail, and the whole
+# reason this pause is safe is that the provider deadline is the only hard stop.
+if [[ "${stop_after_ladder}" -eq 1 ]]; then
+  now_epoch="$(date -u +%s)"
+  script_remaining=$(( deadline_epoch - now_epoch ))
+  provider_remaining=$(( provider_deadline_epoch - now_epoch ))
+  if ! now_utc="$(date -u -d "@${now_epoch}" +%Y-%m-%dT%H:%M:%SZ)" \
+     || ! script_deadline_utc="$(date -u -d "@${deadline_epoch}" +%Y-%m-%dT%H:%M:%SZ)" \
+     || ! provider_deadline_utc="$(date -u -d "@${provider_deadline_epoch}" +%Y-%m-%dT%H:%M:%SZ)"; then
+    echo "ERROR: GNU date could not format the deadlines. The runway figures" >&2
+    echo "       are the whole point of this stop; printing epochs alone would" >&2
+    echo "       leave the operator to convert them by hand under time pressure." >&2
+    exit "${EXIT_EVIDENCE_FAILED}"
+  fi
+
+  receipt="${invocation_dir}/ladder_only_receipt.txt"
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo
+    echo "DRY RUN: would stop here after a green ladder, write ${receipt},"
+    echo "         print the remaining runway, and exit 0 with"
+    echo "         outcome=${OUTCOME_LADDER_ONLY}. No generation command runs."
+    probe_outcome="${OUTCOME_LADDER_ONLY}"
+    completed_all_steps=1
+    exit "${EXIT_OK}"
+  fi
+  {
+    printf '%s\n' "schema=ladder_only_receipt/v1"
+    printf '%s\n' "invocation_id=${invocation_id}"
+    printf '%s\n' "outcome=${OUTCOME_LADDER_ONLY}"
+    printf '%s\n' "commit=${commit}"
+    printf '%s\n' "ladder_green_epoch=${now_epoch}"
+    printf '%s\n' "script_deadline_epoch=${deadline_epoch}"
+    printf '%s\n' "provider_deadline_epoch=${provider_deadline_epoch}"
+    printf '%s\n' "script_remaining_seconds=${script_remaining}"
+    printf '%s\n' "provider_remaining_seconds=${provider_remaining}"
+    printf '%s\n' "ladder_dir=${invocation_dir}/isolation_ladder"
+  } > "${receipt}.tmp.$$" && mv -f "${receipt}.tmp.$$" "${receipt}" || {
+    rm -f "${receipt}.tmp.$$"
+    echo "ERROR: could not write ${receipt}." >&2
+    echo "       Refusing to report a ladder-only success whose receipt does" >&2
+    echo "       not exist: the runway numbers below would be the only record," >&2
+    echo "       and stdout does not survive the pod." >&2
+    exit "${EXIT_EVIDENCE_FAILED}"
+  }
+
+  echo
+  echo "======================================================================"
+  echo "LADDER-ONLY COMPLETE — gate green, no generation invoked"
+  echo "======================================================================"
+  echo "  invocation      : ${invocation_id}"
+  echo "  evidence        : ${invocation_dir}"
+  echo "  receipt         : ${receipt}"
+  echo
+  echo "  now             : ${now_utc} (${now_epoch})"
+  echo "  script deadline : ${script_deadline_utc} (${deadline_epoch}) — ${script_remaining}s left"
+  echo "  provider deadline: ${provider_deadline_utc} (${provider_deadline_epoch}) — ${provider_remaining}s left"
+  echo
+  echo "  A full second invocation needs, from its own start: the ladder again"
+  echo "  (mandatory, never skipped), then both generation commands, then the"
+  echo "  shutdown reserve. It refuses on its own if that does not fit -- this"
+  echo "  script does not decide for you and does not stop the pod."
+  echo
+  echo "  No duration is hardcoded here. Compare the runway above against your"
+  echo "  own measured ladder time from this invocation."
+  echo "======================================================================"
+
+  probe_outcome="${OUTCOME_LADDER_ONLY}"
+  completed_all_steps=1
+  exit "${EXIT_OK}"
+fi
+
 run_checked "verify pinned BFCL fixtures (post-gate, pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
 echo
@@ -808,4 +948,5 @@ if [[ "${dry_run}" -eq 1 ]]; then
 fi
 
 completed_all_steps=1
+probe_outcome="${OUTCOME_FULL}"
 exit "${EXIT_OK}"
