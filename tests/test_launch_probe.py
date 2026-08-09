@@ -434,18 +434,30 @@ def test_output_includes_stop_the_pod_reminder_and_artifact_paths() -> None:
     assert "/tmp/launch_probe_test_out_root/pip_freeze.txt" in output
 
 
-def test_the_inventory_does_not_advertise_a_file_nothing_writes() -> None:
-    """probe_timing.txt was listed as evidence for months and has no writer
-    anywhere in the repo -- the same defect that made the runbook require it on
-    a fresh pod where it could never exist. An inventory that names a
-    never-created file teaches a reader to ignore MISSING lines."""
+def test_this_launchers_inventory_does_not_advertise_probe_timing() -> None:
+    """Scoped claim, deliberately.
+
+    probe_timing.txt DOES have a writer -- an operator-pasted block in
+    docs/probe-bootstrap.md, which tests/test_probe_docs.py requires. What it
+    does not have is a writer in the Stage-2 execution path this launcher
+    drives: the Stage-2 runbook replaced it with deadline_derivation.txt. So
+    this launcher listing it as its own evidence named a file that its own run
+    never creates, and an inventory that names a never-created file teaches its
+    reader to ignore MISSING lines.
+
+    The assertion is therefore about THIS script only. It is not a claim that
+    the file is obsolete everywhere, and the historical references in
+    docs/postmortem-s0-probe-20260808.md are records, not defects.
+    """
     source = SCRIPT.read_text(encoding="utf-8")
     assert "probe_timing" not in source
-    written_by_repo = subprocess.run(
-        ["grep", "-rl", "probe_timing", "scripts", "eval", "mining", "train"],
+    executable_writers = subprocess.run(
+        ["grep", "-rl", "probe_timing", "scripts", "eval"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     ).stdout.strip()
-    assert not written_by_repo, f"probe_timing has a writer again: {written_by_repo}"
+    assert not executable_writers, (
+        "probe_timing reappeared in executable source: " + executable_writers
+    )
 
 
 def test_preflight_warns_in_dry_run_when_timeout_binary_is_absent(tmp_path) -> None:
@@ -529,7 +541,8 @@ def test_stop_after_ladder_is_a_scope_selector_not_a_gate_bypass() -> None:
     test_there_is_no_flag_to_skip_the_gate covers the inverse."""
     source = SCRIPT.read_text(encoding="utf-8")
     gate = source.index('"${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"')
-    stop = source.index('if [[ "${stop_after_ladder}" -eq 1 ]]; then\n  now_epoch=')
+    # the stop BRANCH (column 0), not the dry-run banner check inside on_exit
+    stop = source.index('\nif [[ "${stop_after_ladder}" -eq 1 ]]; then\n')
     assert gate < stop, "the stop branch must come after the gate has run"
 
 
@@ -601,3 +614,48 @@ def test_no_duration_is_hardcoded_in_the_stop_branch() -> None:
     stop_branch = stop_branch[: stop_branch.index("\nfi\n")]
     for magic in ("900", "600", "15 min", "10 min"):
         assert magic not in stop_branch, magic
+
+
+def test_a_reused_invocation_id_refuses_rather_than_sharing_a_directory(tmp_path) -> None:
+    """"The second cannot destroy the first" has to be enforced, not asserted.
+
+    mkdir -p would have accepted a reused id and let the second invocation
+    overwrite the first's ladder summary, pid and generations -- destroying the
+    before/after comparison the review pause exists to enable.
+    """
+    out_root = tmp_path / "out"
+    (out_root / "invocations" / "dup").mkdir(parents=True)
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "dup", "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
+    assert "already exists" in combined_output(result)
+    assert "distinct --invocation-id" in combined_output(result)
+
+
+def test_a_ladder_only_scope_lists_no_generation_files_as_missing() -> None:
+    """Six MISSING lines on a successful run is a false alarm, and a reader who
+    learns to ignore MISSING will ignore the one that matters."""
+    result = run_script(full_args(extra=["--stop-after-ladder", "--dry-run"]))
+    output = combined_output(result)
+    assert "generations.jsonl" not in output
+    assert "no generation outputs exist for this" in output
+    assert "outcome=ladder_only_green" in output
+
+
+def test_a_ladder_only_scope_does_not_order_the_pod_stopped() -> None:
+    """The pause is the point of this scope: the operator reads the telemetry
+    with the pod alive. Printing STOP THE POD NOW would tell them to destroy
+    the node whose green ladder is the evidence they came for."""
+    ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
+    full = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "STOP THE POD NOW" not in ladder
+    assert "STILL RUNNING AND STILL BILLING" in ladder
+    assert "STOP THE POD NOW" in full, "a full run must still order the stop"
+
+
+def test_dry_run_does_not_require_gnu_date() -> None:
+    """A plan that can only be printed on the pod cannot be reviewed before the
+    pod exists. The first draft formatted deadlines before the dry-run exit and
+    aborted on macOS with EXIT_EVIDENCE_FAILED."""
+    result = run_script(full_args(extra=["--stop-after-ladder", "--dry-run"]))
+    assert result.returncode == 0, combined_output(result)
