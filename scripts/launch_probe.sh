@@ -21,11 +21,17 @@
 #   *each* paid generation command, so a corrupted/tampered cache can never
 #   silently ride into a paid run — any verify failure aborts before spend.
 #
-# Blocker 3 ($2.50 hard cap approved but not mechanically enforced):
-#   We derive a wall-clock ceiling from --usd-cap and --usd-per-hour and run
-#   every paid generation command under `timeout`, so a hang or runaway
-#   generation cannot silently blow past the approved budget. The derived
-#   budget is printed clearly before any spend-capable step runs.
+# Blocker 3 (an approved ceiling that was not mechanically enforced):
+#   Every paid generation command runs under `timeout`, bounded by a REQUIRED
+#   --deadline-epoch, so a hang or runaway generation cannot run unbounded.
+#
+#   This script deliberately knows nothing about money. A dollar ceiling is a
+#   per-run approval, not a property of reusable source: converting an approved
+#   ceiling and a live pod rate into a wall-clock limit is the operator's job,
+#   and the result is recorded in run evidence. Baking rates or caps in here is
+#   how a superseded cap once stayed mechanically enforced after a smaller one
+#   had been approved: the source kept enforcing the number nobody had agreed
+#   to any more, and did it silently.
 #
 # Blocker 4 (must be fail-closed):
 #   `set -euo pipefail` plus explicit, distinct exit codes per failure class
@@ -50,7 +56,13 @@ readonly EXIT_USAGE=64          # missing/malformed CLI argument
 readonly EXIT_GIT_UNCLEAN=65    # checkout landed on the wrong SHA, or tree dirty
 readonly EXIT_ACQUIRE_FAILED=66 # fetch_pinned_bfcl.py (acquire) failed
 readonly EXIT_VERIFY_FAILED=67  # fetch_pinned_bfcl.py --verify-only failed
-readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the budget timeout
+readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the wall-clock timeout
+readonly EXIT_SMOKE_GATE_FAILED=69 # isolation ladder did not come back green
+# A commit that simply does not carry one of this launcher's entry points is not
+# an "unclean" tree — nothing is dirty and HEAD is exactly where it was asked to
+# be. It is a launcher/commit incompatibility, and it wants its own class so the
+# log does not send the operator looking for a checkout problem that isn't there.
+readonly EXIT_LAUNCH_INCOMPATIBLE=70
 
 # This script always operates on the repo it lives in, resolved from its own
 # path — not the caller's $PWD — so it behaves the same no matter where it
@@ -66,33 +78,43 @@ readonly REPO_ROOT
 readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
 
 # The probe runs two paid generation commands (category=multiple and
-# category=simple_python) sharing one approved dollar budget. Dividing the
-# derived wall-clock ceiling across both is what makes --usd-cap a true cap
-# on *total* spend for the probe, not a cap that could be paid twice over.
+# category=simple_python) under ONE shared deadline. Used for reporting only —
+# the bound is the deadline, not a per-command quotient, because the two
+# commands carry very different workloads (400 vs 800 generations).
 readonly NUM_PAID_COMMANDS=2
 
 usage() {
   cat <<'EOF'
-Usage: launch_probe.sh --commit <40-char-sha> --usd-cap <float> \
-       --usd-per-hour <float> --out-root <dir> \
-       [--max-seconds <int>] [--dry-run]
+Usage: launch_probe.sh --commit <40-char-sha> \
+       --provider-deadline-epoch <int> --deadline-epoch <int> \
+       --out-root <dir> [--dry-run]
 
 Required:
-  --commit <sha>        Full 40-character hex commit SHA to detach-checkout.
-  --usd-cap <float>      Approved dollar hard cap for this probe launch.
-  --usd-per-hour <float> Pod's hourly rate in USD; used to derive the
-                          wall-clock kill budget from --usd-cap.
-  --out-root <dir>       Root directory under which the two probe
-                          categories' --out-dir subdirectories are written.
+  --commit <sha>          Full 40-character hex commit SHA to detach-checkout.
+
+  --out-root <dir>        Root directory under which the two probe categories'
+                          --out-dir subdirectories are written.
+
+  --deadline-epoch <int>  Shared in-process deadline as Unix epoch seconds.
+                          Derive it OUTSIDE this script by subtracting the
+                          shutdown reserve from the provider deadline. Both
+                          paid commands share this exact absolute deadline;
+                          it never resets or shifts if launch is delayed.
+
+  --provider-deadline-epoch <int>
+                          Provider auto-termination deadline as Unix epoch
+                          seconds. The script refuses to run unless its shared
+                          deadline is strictly earlier, mechanically nesting
+                          the in-process bound inside the external hard stop.
 
 Optional:
-  --max-seconds <int>    Override the TOTAL derived wall-clock ceiling
-                          (seconds) instead of computing it from
-                          --usd-cap / --usd-per-hour. Still split evenly
-                          across the two paid generation commands.
   --dry-run               Print every command that would run, in order, and
                           exit 0 without touching git, the network, or
                           spawning generation.
+
+This script enforces wall-clock only. The monetary ceiling is a per-run
+approval recorded outside the source, and the provider-side auto-termination
+is the independent external hard stop that survives this process being killed.
 EOF
 }
 
@@ -100,15 +122,14 @@ EOF
 # Argument parsing
 # ---------------------------------------------------------------------------
 commit=""
-usd_cap=""
-usd_per_hour=""
 out_root=""
-max_seconds_override=""
+deadline_epoch_input=""
+provider_deadline_epoch=""
 dry_run=0
 
 # require_value aborts *before* `shift`ing past the end of $@ or silently
-# swallowing the next flag as a value (e.g. `--commit --usd-cap` should be
-# reported as a missing --commit value, not consume --usd-cap as the SHA).
+# swallowing the next flag as a value (e.g. `--commit --deadline-epoch` should
+# be reported as a missing --commit value, not consume the next flag as the SHA).
 require_value() {
   local flag="$1"
   local value="${2:-}"
@@ -126,24 +147,19 @@ while [[ $# -gt 0 ]]; do
       commit="$2"
       shift 2
       ;;
-    --usd-cap)
-      require_value "--usd-cap" "${2:-}"
-      usd_cap="$2"
-      shift 2
-      ;;
-    --usd-per-hour)
-      require_value "--usd-per-hour" "${2:-}"
-      usd_per_hour="$2"
-      shift 2
-      ;;
     --out-root)
       require_value "--out-root" "${2:-}"
       out_root="$2"
       shift 2
       ;;
-    --max-seconds)
-      require_value "--max-seconds" "${2:-}"
-      max_seconds_override="$2"
+    --deadline-epoch)
+      require_value "--deadline-epoch" "${2:-}"
+      deadline_epoch_input="$2"
+      shift 2
+      ;;
+    --provider-deadline-epoch)
+      require_value "--provider-deadline-epoch" "${2:-}"
+      provider_deadline_epoch="$2"
       shift 2
       ;;
     --dry-run)
@@ -167,8 +183,8 @@ done
 # to hit missing-flag errors one at a time.
 missing_flags=()
 [[ -z "${commit}" ]] && missing_flags+=("--commit")
-[[ -z "${usd_cap}" ]] && missing_flags+=("--usd-cap")
-[[ -z "${usd_per_hour}" ]] && missing_flags+=("--usd-per-hour")
+[[ -z "${deadline_epoch_input}" ]] && missing_flags+=("--deadline-epoch")
+[[ -z "${provider_deadline_epoch}" ]] && missing_flags+=("--provider-deadline-epoch")
 [[ -z "${out_root}" ]] && missing_flags+=("--out-root")
 if [[ ${#missing_flags[@]} -gt 0 ]]; then
   echo "ERROR: missing required flag(s): ${missing_flags[*]}" >&2
@@ -184,65 +200,69 @@ if ! [[ "${commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit "${EXIT_USAGE}"
 fi
 
-# --usd-cap / --usd-per-hour must be positive numbers — they feed directly
-# into the wall-clock budget derivation below, and a zero/negative/garbage
-# value there would either divide by zero or silently grant an unbounded
-# (or negative) run.
-if ! [[ "${usd_cap}" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="${usd_cap}" 'BEGIN{exit !(v>0)}'; then
-  echo "ERROR: --usd-cap must be a positive number, got: '${usd_cap}'" >&2
+# Both deadlines must be positive integer epochs. Invalid values would disable
+# or invert the only bounds this script enforces.
+# ---------------------------------------------------------------------------
+if ! [[ "${deadline_epoch_input}" =~ ^[0-9]+$ ]] || [[ "${deadline_epoch_input}" -le 0 ]]; then
+  echo "ERROR: --deadline-epoch must be a positive integer, got: '${deadline_epoch_input}'" >&2
   exit "${EXIT_USAGE}"
 fi
-if ! [[ "${usd_per_hour}" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="${usd_per_hour}" 'BEGIN{exit !(v>0)}'; then
-  echo "ERROR: --usd-per-hour must be a positive number, got: '${usd_per_hour}'" >&2
+if ! [[ "${provider_deadline_epoch}" =~ ^[0-9]+$ ]] || [[ "${provider_deadline_epoch}" -le 0 ]]; then
+  echo "ERROR: --provider-deadline-epoch must be a positive integer, got: '${provider_deadline_epoch}'" >&2
   exit "${EXIT_USAGE}"
-fi
-if [[ -n "${max_seconds_override}" ]]; then
-  if ! [[ "${max_seconds_override}" =~ ^[0-9]+$ ]] || [[ "${max_seconds_override}" -le 0 ]]; then
-    echo "ERROR: --max-seconds must be a positive integer, got: '${max_seconds_override}'" >&2
-    exit "${EXIT_USAGE}"
-  fi
 fi
 
 # ---------------------------------------------------------------------------
-# Blocker 3: derive and print the wall-clock budget BEFORE anything that can
-# spend money runs. hours_affordable = usd_cap / usd_per_hour; floor (not
-# round) the resulting seconds so we never grant more wall-clock than the
-# cap actually covers, then split evenly across the two paid commands so
-# --usd-cap bounds *total* probe spend, not spend-per-category.
+# Blocker 3: bound the whole paid sequence by ONE absolute deadline, stamped
+# once here and never reset.
+#
+# The two absolute deadlines arrive already derived. This script does not
+# compute them from money: a monetary ceiling is a per-run approval, not a
+# property of reusable source. Nor does it carry a sanity ceiling of its own.
+# Absolute epochs are used instead of a relative duration so pausing between
+# derivation and launch cannot silently move the bound later.
+#
+# A SHARED DEADLINE, NOT A PER-COMMAND BUDGET. An earlier version split
+# the allowed duration evenly across the two paid commands, which is wrong for this
+# workload: category=multiple is 200 prompts x 2 candidates = 400 generations,
+# category=simple_python is 400 x 2 = 800. An even split hands the command with
+# twice the work the same allowance, so the probe would reliably be killed
+# mid-simple_python having already paid for it. Each command instead gets
+# whatever is left of the shared deadline, so slack from a fast first command
+# flows to the second and the sequence as a whole is what is bounded.
 # ---------------------------------------------------------------------------
-derived_max_seconds=$(awk -v cap="${usd_cap}" -v rate="${usd_per_hour}" \
-  'BEGIN { printf "%d", (cap / rate) * 3600 }')
-
-# --max-seconds may only REDUCE the rate-derived ceiling, never enlarge it.
-# An override that raises the ceiling would silently authorise spending above
-# the approved cap, which makes the cap advisory rather than mechanical --
-# exactly the property it exists to have.
-if [[ -n "${max_seconds_override}" ]]; then
-  if [[ "${max_seconds_override}" -gt "${derived_max_seconds}" ]]; then
-    echo "ERROR: --max-seconds ${max_seconds_override} exceeds the affordable ceiling" >&2
-    echo "       of ${derived_max_seconds}s derived from --usd-cap ${usd_cap}" >&2
-    echo "       at --usd-per-hour ${usd_per_hour}." >&2
-    echo "       The override may only reduce the budget, never enlarge it." >&2
-    exit "${EXIT_USAGE}"
-  fi
-  total_max_seconds="${max_seconds_override}"
-  echo "BUDGET: override reduces ceiling ${derived_max_seconds}s -> ${total_max_seconds}s"
-else
-  total_max_seconds="${derived_max_seconds}"
-fi
-per_command_max_seconds=$(( total_max_seconds / NUM_PAID_COMMANDS ))
-
-if [[ "${per_command_max_seconds}" -le 0 ]]; then
-  echo "ERROR: derived per-command wall-clock budget is ${per_command_max_seconds}s (<=0)." >&2
-  echo "       usd-cap=${usd_cap} usd-per-hour=${usd_per_hour} total_max_seconds=${total_max_seconds}" >&2
-  echo "       Raise --usd-cap, lower --usd-per-hour, or pass a larger --max-seconds." >&2
+derivation_epoch=$(date +%s)
+deadline_epoch="${deadline_epoch_input}"
+total_max_seconds=$(( deadline_epoch - derivation_epoch ))
+if [[ "${total_max_seconds}" -le 0 ]]; then
+  echo "ERROR: --deadline-epoch ${deadline_epoch} has already passed" >&2
+  echo "       (current epoch ${derivation_epoch}); refusing to launch." >&2
   exit "${EXIT_USAGE}"
 fi
+if [[ "${deadline_epoch}" -ge "${provider_deadline_epoch}" ]]; then
+  echo "ERROR: script deadline ${deadline_epoch} is not earlier than provider deadline" >&2
+  echo "       ${provider_deadline_epoch}. Re-derive --deadline-epoch by" >&2
+  echo "       subtracting the shutdown reserve; refusing to launch." >&2
+  exit "${EXIT_USAGE}"
+fi
+readonly total_max_seconds derivation_epoch deadline_epoch provider_deadline_epoch
+
+# Seconds left before the shared deadline. Monotonically shrinking across the
+# run by construction — there is no path that extends it.
+remaining_seconds() {
+  local now
+  now=$(date +%s)
+  echo $(( deadline_epoch - now ))
+}
 
 echo "====================================================================="
-echo "BUDGET: usd-cap=\$${usd_cap} usd-per-hour=\$${usd_per_hour}/hr paid_commands=${NUM_PAID_COMMANDS}"
-echo "BUDGET: total_max_seconds=${total_max_seconds} per_command_max_seconds=${per_command_max_seconds}"
-echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours total wall-clock ceiling)"
+echo "BUDGET: wall-clock only; ${NUM_PAID_COMMANDS} paid commands share ONE deadline"
+echo "BUDGET: derivation_epoch=${derivation_epoch} total_max_seconds=${total_max_seconds}"
+echo "BUDGET: deadline_epoch=${deadline_epoch} provider_deadline_epoch=${provider_deadline_epoch}"
+echo "        ($(awk -v s="${total_max_seconds}" 'BEGIN{printf "%.3f", s/3600}') hours from now, absolute)"
+echo "NOTE: this script enforces wall-clock only. The monetary ceiling and the"
+echo "      provider-side auto-termination are enforced outside it, and the"
+echo "      provider deadline is the bound that survives this process dying."
 echo "====================================================================="
 
 # ---------------------------------------------------------------------------
@@ -262,6 +282,16 @@ announce() {
 # status. Centralizing this is what makes --dry-run a true simulation: every
 # side-effecting call in this script funnels through here or run_generation
 # below, so nothing can execute for real while --dry-run is set.
+#
+# ERREXIT IS NEVER TURNED OFF. The previous form of this function, and of the
+# two below it, wrapped the call in `set +e` / `set -e` to capture the exit
+# status. That opens a window in which the script's central guarantee — Blocker
+# 4, "nothing is allowed to fail silently and let a later, more expensive step
+# run anyway" — is not in force, and the window is exactly where the risky
+# command runs. It also restores `set -e` unconditionally rather than to its
+# prior value. `cmd || status=$?` captures the same status with errexit on for
+# the whole file, so "set -euo pipefail throughout" is true of the runtime and
+# not only of line 46.
 run_checked() {
   local label="$1" code="$2"
   shift 2
@@ -269,10 +299,8 @@ run_checked() {
   if [[ "${dry_run}" -eq 1 ]]; then
     return 0
   fi
-  set +e
-  "$@"
-  local status=$?
-  set -e
+  local status=0
+  "$@" || status=$?
   if [[ "${status}" -ne 0 ]]; then
     echo "ERROR: ${label} failed (exit ${status}) — aborting before any further spend" >&2
     exit "${code}"
@@ -298,25 +326,46 @@ step_git_checkout() {
     return 0
   fi
 
-  set +e
-  "${checkout_cmd[@]}"
-  local checkout_status=$?
-  set -e
+  local checkout_status=0
+  "${checkout_cmd[@]}" || checkout_status=$?
   if [[ "${checkout_status}" -ne 0 ]]; then
     echo "ERROR: git checkout --detach ${commit} failed (exit ${checkout_status})" >&2
     exit "${EXIT_GIT_UNCLEAN}"
   fi
 
-  local actual_head
-  actual_head="$("${head_cmd[@]}")"
+  # rev-parse and status are classified failures too. Previously both were bare
+  # command substitutions: if either git call itself failed, `set -e` aborted
+  # with git's exit code and printed nothing, so a broken *assertion* was
+  # indistinguishable in the log from the assertion having caught a real
+  # problem. The two demand opposite responses — one is a sick pod, the other is
+  # a wrong tree — and they must never present identically.
+  local actual_head="" head_status=0
+  actual_head="$("${head_cmd[@]}")" || head_status=$?
+  if [[ "${head_status}" -ne 0 ]]; then
+    echo "ERROR: git rev-parse HEAD failed (exit ${head_status}) after checkout." >&2
+    echo "       The checked-out SHA cannot be asserted, so it is not asserted." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
+  # Shape check before equality. An empty or truncated rev-parse result would
+  # otherwise be reported as a SHA mismatch — blaming the checkout for a read
+  # that returned nothing.
+  if ! [[ "${actual_head}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "ERROR: git rev-parse HEAD returned '${actual_head}', not a 40-char SHA." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
   if [[ "${actual_head}" != "${commit}" ]]; then
     echo "ERROR: HEAD is ${actual_head} after checkout, expected ${commit}." >&2
     echo "       Refusing to run a paid probe against an unpinned tree." >&2
     exit "${EXIT_GIT_UNCLEAN}"
   fi
 
-  local dirty
-  dirty="$("${status_cmd[@]}")"
+  local dirty="" dirty_status=0
+  dirty="$("${status_cmd[@]}")" || dirty_status=$?
+  if [[ "${dirty_status}" -ne 0 ]]; then
+    echo "ERROR: git status --porcelain failed (exit ${dirty_status}) after checkout." >&2
+    echo "       Tree cleanliness cannot be asserted, so it is not asserted." >&2
+    exit "${EXIT_GIT_UNCLEAN}"
+  fi
   if [[ -n "${dirty}" ]]; then
     echo "ERROR: working tree is dirty after checkout — refusing to run a paid probe" >&2
     echo "       against a non-reproducible tree. git status --porcelain:" >&2
@@ -344,6 +393,21 @@ gen_common_args=(
   --sft-adapter-revision "b6f4da479f8c6fc044ee8b802a92f47780f970c5"
   --base-revision "0e9e39f249a16976918f6564b8830bc894c89659"
 )
+# The §0 smoke gate. This runs INSIDE the launcher, on the same node, in the
+# same process tree and against the same weights cache as the paid generation
+# that follows — not as a separate command an operator is trusted to remember.
+#
+# A gate that lives only in a runbook is not a gate: the failure it guards
+# against is a full probe launched straight into the same CUDA fault that killed
+# the last one, and "the operator will run the ladder first" is precisely the
+# assumption that fails under time pressure on a billing pod. Placing it here
+# also means a green result is same-run, same-GPU evidence rather than a receipt
+# from some earlier session on some other node.
+ladder_cmd=(
+  "${PYTHON}" "${REPO_ROOT}/eval/isolation_ladder.py"
+  --out-dir "${out_root}/isolation_ladder"
+)
+
 gen_multiple_cmd=(
   "${PYTHON}" "${REPO_ROOT}/eval/bfcl_simple.py"
   --category multiple
@@ -357,15 +421,41 @@ gen_simple_python_cmd=(
   --out-dir "${out_root}/study2_probe_simple_python"
 )
 
-# run_generation wraps a paid command in `timeout` so the derived wall-clock
-# budget (Blocker 3) is mechanically enforced rather than just documented.
+# run_generation wraps a paid command in `timeout`, bounded by whatever is left
+# of the shared deadline at the moment it starts — never by a fresh allowance.
 # --kill-after guarantees a SIGKILL follows if the process ignores SIGTERM
-# (e.g. mid CUDA-context teardown) — a timeout that doesn't actually stop
-# the meter is not a cap.
-run_generation() {
+# (e.g. mid CUDA-context teardown) — a timeout that doesn't actually stop the
+# meter is not a bound.
+#
+# The remaining time is checked BEFORE spending, not after: if the deadline has
+# already passed, launching would buy generation that is certain to be killed
+# and is billed anyway.
+# run_bounded wraps every billed model-execution command in `timeout`, bounded
+# by whatever is left of the shared deadline at the moment it starts.
+#
+# The exit class is a parameter rather than hardcoded to EXIT_GENERATION_FAILED
+# because the smoke gate is billed too and must be under the same bound, but a
+# gate failure and a generation failure are different diagnoses and must not
+# collapse into one code. The gate does four model loads and four generations on
+# a metered pod: leaving it on the unbounded `run_checked` path meant a hung
+# CUDA load could sail past the script deadline and eat the shutdown reserve
+# until the provider killed the pod.
+run_bounded() {
   local label="$1"
-  shift
-  announce "${timeout_bin}" --kill-after=30 "${per_command_max_seconds}" "$@"
+  local failure_code="$2"
+  shift 2
+  local budget
+  budget=$(remaining_seconds)
+
+  if [[ "${budget}" -le 0 ]]; then
+    echo "ERROR: the shared wall-clock deadline passed before ${label} started" >&2
+    echo "       (${budget}s remaining). Refusing to launch: this command" >&2
+    echo "       would be billed and then killed. Re-derive --deadline-epoch" >&2
+    echo "       from the provider deadline and shutdown reserve, then re-run." >&2
+    exit "${failure_code}"
+  fi
+
+  announce "${timeout_bin}" --kill-after=30 "${budget}" "$@"
   if [[ "${dry_run}" -eq 1 ]]; then
     return 0
   fi
@@ -375,19 +465,17 @@ run_generation() {
     exit "${EXIT_USAGE}"
   fi
 
-  echo "---- launching paid generation: ${label} (budget ${per_command_max_seconds}s) ----"
-  set +e
-  "${timeout_bin}" --kill-after=30 "${per_command_max_seconds}" "$@"
-  local status=$?
-  set -e
+  echo "---- launching billed command: ${label} (${budget}s left of shared deadline) ----"
+  local status=0
+  "${timeout_bin}" --kill-after=30 "${budget}" "$@" || status=$?
   if [[ "${status}" -eq 124 ]]; then
-    echo "ERROR: ${label} hit the ${per_command_max_seconds}s wall-clock budget and was killed." >&2
-    echo "       This is the \$${usd_cap} hard cap doing its job, not a crash. Aborting remaining" >&2
-    echo "       steps rather than spending further." >&2
-    exit "${EXIT_GENERATION_FAILED}"
+    echo "ERROR: ${label} exhausted the shared wall-clock deadline and was killed" >&2
+    echo "       after ${budget}s. This is the bound doing its job, not a crash." >&2
+    echo "       Aborting remaining steps rather than spending further." >&2
+    exit "${failure_code}"
   elif [[ "${status}" -ne 0 ]]; then
     echo "ERROR: ${label} exited with status ${status}" >&2
-    exit "${EXIT_GENERATION_FAILED}"
+    exit "${failure_code}"
   fi
 }
 
@@ -396,9 +484,11 @@ run_generation() {
 #   1. detached checkout + HEAD/clean-tree assertions      (Blocker 1)
 #   2. acquire pinned BFCL fixtures                          (Blocker 2)
 #   3. verify fixtures                                       (Blocker 2)
-#   4. paid generation: category=multiple                    (Blocker 3)
-#   5. verify fixtures again, immediately before the 2nd spend (Blocker 2)
-#   6. paid generation: category=simple_python                (Blocker 3)
+#   4. §0 isolation ladder smoke gate, wall-clock bounded    (Blocker 5)
+#   5. verify fixtures again, immediately before the 1st full generation (Blocker 2)
+#   6. paid generation: category=multiple                    (Blocker 3)
+#   7. verify fixtures again, immediately before the 2nd spend (Blocker 2)
+#   8. paid generation: category=simple_python                (Blocker 3)
 # Any failure at any step aborts every step after it (Blocker 4).
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -431,7 +521,7 @@ on_exit() {
   fi
   echo
   echo "STOP THE POD NOW, then CONFIRM IN THE CONSOLE THAT BILLING STOPPED."
-  echo "Approved cap is \$${usd_cap}. A process that has been killed cannot"
+  echo "A process that has been killed cannot"
   echo "stop its own billing — only the provider-side control can."
   echo
   echo "Record into the run evidence: actual elapsed ${elapsed}s, the actual"
@@ -449,23 +539,54 @@ on_exit() {
       fi
     done
   done
-  echo "  plus: eval/out/pip_freeze.txt eval/out/gpu.txt eval/out/image_tag.txt"
+  echo "  plus: ${out_root}/pip_freeze.txt ${out_root}/gpu.txt ${out_root}/image_tag.txt"
+  echo "  plus: ${out_root}/env_fingerprint.json ${out_root}/bundle_sha256.txt"
+  echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
+  echo "  plus: ${out_root}/launcher.pid (the exact pid this run published)"
+  # The gate's evidence is listed even when the gate is what failed — especially
+  # then. A run aborted at the ladder has no generations to persist, and its
+  # entire value is in these files.
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "  plus: ${out_root}/isolation_ladder/isolation_ladder.json"
+    echo "  plus: ${out_root}/isolation_ladder/telemetry/ ${out_root}/isolation_ladder/nvidia_smi_q_pre_run.txt"
+  elif [[ -s "${out_root}/isolation_ladder/isolation_ladder.json" ]]; then
+    echo "  [present] ${out_root}/isolation_ladder/isolation_ladder.json"
+    echo "  [present] ${out_root}/isolation_ladder/telemetry/"
+  else
+    echo "  [MISSING] ${out_root}/isolation_ladder/isolation_ladder.json"
+  fi
   echo "  plus: this tmux session's stdout/stderr log"
   echo "====================================================================="
+
+  # Machine-readable terminal record, carrying this shell's PID.
+  #
+  # scripts/probe_liveness.sh reads this line and checks the pid against the one
+  # it was told to watch. Without the pid a monitor can only match on the prose
+  # footer above, and a log file appended by two consecutive runs would let it
+  # report the FIRST run's clean exit as the second run's outcome — a stale
+  # record read as a live one, which is the failure mode this whole exercise is
+  # about. Absence of this line after the process is gone is itself the signal:
+  # the trap never ran, so the process did not exit in an orderly way.
+  echo "PROBE_EXIT_RECORD pid=$$ exit=${status} elapsed=${elapsed}s completed_all_steps=${completed_all_steps} dry_run=${dry_run}"
   return "${status}"
 }
 trap on_exit EXIT
 
-# Blocker 3, preflight half. The wall-clock cap is enforced by `timeout`, so a
-# missing `timeout` binary means the approved $2.50 ceiling is unenforceable.
+# Blocker 3, preflight half. The wall-clock bound is enforced by `timeout`, so
+# a missing `timeout` binary means --deadline-epoch is unenforceable and the only
+# remaining stop is the provider's.
 # This is checked HERE, before the detached checkout and before anything is
 # fetched, because discovering it later would leave the repo on a detached HEAD
 # and a pod billing for a download that can never be used. macOS ships coreutils
 # as `gtimeout`; the Linux pod images have `timeout`. Accept either, fail if
 # neither, and never fall back to running uncapped.
+# `command -v` writes the resolved path to stdout and nothing to stderr, so the
+# `2>&1` this used to carry never discarded a diagnostic. It is dropped anyway:
+# leaving one instance in the file makes the pattern citable as precedent, and
+# the pattern is what this audit exists to remove.
 timeout_bin=""
 for candidate in timeout gtimeout; do
-  if command -v "${candidate}" >/dev/null 2>&1; then
+  if command -v "${candidate}" >/dev/null; then
     timeout_bin="${candidate}"
     break
   fi
@@ -478,12 +599,12 @@ if [[ -z "${timeout_bin}" ]]; then
     timeout_bin="timeout"
     echo "PREFLIGHT WARNING: neither 'timeout' nor 'gtimeout' found on this host." >&2
     echo "                  A real run here would REFUSE to start, because the" >&2
-    echo "                  approved spend cap is enforced by wall-clock timeout." >&2
+    echo "                  --deadline-epoch is enforced by wall-clock timeout." >&2
   else
     echo "ERROR: neither 'timeout' nor 'gtimeout' is on PATH." >&2
-    echo "       The approved spend cap is enforced by a wall-clock timeout;" >&2
-    echo "       without it the cap cannot be enforced, so this refuses to run" >&2
-    echo "       rather than run uncapped." >&2
+    echo "       --deadline-epoch is enforced by a wall-clock timeout; without it" >&2
+    echo "       the only remaining stop is the provider deadline, so this" >&2
+    echo "       refuses to run rather than run unbounded." >&2
     echo "       Debian/Ubuntu pods: apt-get install coreutils." >&2
     echo "       macOS: brew install coreutils (provides gtimeout)." >&2
     exit "${EXIT_USAGE}"
@@ -492,9 +613,160 @@ fi
 readonly timeout_bin
 echo "PREFLIGHT: wall-clock enforcement via '${timeout_bin}'"
 
+# Blocker 4, existence half. Every command this script runs is `${PYTHON}` plus
+# a script path, and neither was ever asserted to exist. A missing interpreter
+# or entry point therefore surfaced as whatever the *first* step that used it
+# happened to report: bash's "No such file or directory" (exit 127) funnelled
+# through run_checked and relabelled "acquire pinned BFCL fixtures failed",
+# which names the wrong thing. On a billing pod the operator then debugs the
+# fetcher instead of the venv.
+#
+# The interpreter is checked here, before the detached checkout, for the same
+# reason the timeout binary is: discovering it afterwards leaves the repo on a
+# detached HEAD with nothing to run.
+if [[ "${dry_run}" -eq 0 ]]; then
+  if [[ ! -x "${PYTHON}" ]]; then
+    echo "ERROR: no executable interpreter at ${PYTHON}." >&2
+    echo "       This script never falls back to whatever 'python' is on PATH —" >&2
+    echo "       a fresh pod's system python is not this project's environment." >&2
+    echo "       Run scripts/bootstrap_pod.sh first." >&2
+    exit "${EXIT_USAGE}"
+  fi
+  echo "PREFLIGHT: interpreter ${PYTHON}"
+else
+  echo "PREFLIGHT: would assert an executable interpreter at ${PYTHON}"
+fi
+
+# assert_entrypoint checks one script path and says which step needed it.
+# Called AFTER the detached checkout, because the question is whether the
+# REVIEWED tree carries these files — asserting against the pre-checkout tree
+# would answer a question nobody asked.
+#
+# WHAT THIS CHECKS DEPENDS ON THE MODE, AND IT SAYS WHICH.
+#
+# A real run reaches here only after step_git_checkout has asserted HEAD equals
+# --commit and the tree is clean, so the working tree IS the commit's tree and a
+# plain `-f` test is a statement about the commit.
+#
+# A dry run performs no checkout. The previous version tested the same `-f` on
+# whatever the current working tree happened to be and then printed "all three
+# entry points present at ${commit}" — a claim about a commit it had not looked
+# at. `--commit 000…000 --dry-run` produced a confident OK for a SHA that does
+# not exist. So in dry-run the commit's tree is read directly and read-only via
+# `git cat-file`, and when the commit is not in this repo at all the output says
+# that instead of claiming anything.
+entrypoint_check_mode=""        # set by assert_entrypoint, reported in the summary
+entrypoint_check_diagnostic=""  # git's own words when it could not resolve the commit
+
+assert_entrypoint() {
+  local rel="$1" purpose="$2"
+
+  if [[ "${dry_run}" -eq 0 ]]; then
+    entrypoint_check_mode="the checked-out tree at ${commit}"
+    if [[ ! -f "${REPO_ROOT}/${rel}" ]]; then
+      echo "ERROR: ${purpose} entry point is missing: ${rel}" >&2
+      echo "       HEAD is ${commit} and the tree is clean, so this commit does" >&2
+      echo "       not carry a file this launcher requires. That is a launcher/" >&2
+      echo "       commit incompatibility, not a bad checkout: either the SHA" >&2
+      echo "       predates the file, or this launcher is newer than the tree." >&2
+      exit "${EXIT_LAUNCH_INCOMPATIBLE}"
+    fi
+    return 0
+  fi
+
+  # Dry run. Is the commit even present locally to be inspected?
+  #
+  # git's stderr is CAPTURED and then ACTUALLY PRINTED. The previous version
+  # captured it and threw it away, then mapped every non-zero result onto the
+  # single sentence "commit is not in this repository" — so a git that failed
+  # for any other reason (a broken object database, an unreadable repo, an I/O
+  # error) was reported as a clean, ordinary absence, and the one line
+  # explaining what really happened was discarded. Capturing a diagnostic and
+  # not showing it is the same defect as suppressing it, wearing a disguise.
+  #
+  # The label does not overclaim, because it CANNOT be resolved from the exit
+  # code: `git cat-file -e` returns 128 both for a commit that does not exist
+  # and for a repository it could not read. So this says only what is true —
+  # the commit could not be resolved — and hands the operator git's own words
+  # to tell the two apart.
+  local err="" status=0
+  err="$(git -C "${REPO_ROOT}" cat-file -e "${commit}^{commit}" 2>&1)" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    entrypoint_check_mode="NOT VERIFIED — git could not resolve commit ${commit} (exit ${status})"
+    entrypoint_check_diagnostic="${err}"
+    return 0
+  fi
+
+  entrypoint_check_mode="commit ${commit}, read-only via git cat-file"
+  status=0
+  err="$(git -C "${REPO_ROOT}" cat-file -e "${commit}:${rel}" 2>&1)" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    echo "ERROR: ${purpose} entry point is missing from commit ${commit}: ${rel}" >&2
+    echo "       Read directly from the commit's tree, so this is not a working-" >&2
+    echo "       directory artefact. A real run would abort here having spent" >&2
+    echo "       nothing. Launcher/commit incompatibility." >&2
+    [[ -n "${err}" ]] && echo "       git said: ${err}" >&2
+    exit "${EXIT_LAUNCH_INCOMPATIBLE}"
+  fi
+}
+
+# Publish this shell's PID before any risky work, so the monitor is handed an
+# exact number instead of guessing with `pgrep -n -f`, which cannot recover a
+# launcher that has already died and can match an unrelated process.
+#
+# This is NOT a liveness claim and must never be read as one: a process cannot
+# update a file after being SIGKILLed, which is exactly how the 2026-08-08 probe
+# came to have a PID file pointing at nothing. The file is the *source of the
+# number*; probe_liveness.sh still decides liveness with `kill -0` on it.
+launcher_pid_file="${out_root}/launcher.pid"
+if [[ "${dry_run}" -eq 1 ]]; then
+  echo "DRY RUN: would write this launcher's PID to ${launcher_pid_file}"
+else
+  mkdir -p "${out_root}"
+  # Written atomically: a monitor reading a half-written pid would kill -0 a
+  # truncated number, i.e. some other process entirely.
+  printf '%s\n' "$$" > "${launcher_pid_file}.tmp.$$"
+  mv -f "${launcher_pid_file}.tmp.$$" "${launcher_pid_file}"
+  # Asserted, not assumed. The monitor is started from this file; if it is
+  # absent the operator gets "PID file not found" minutes later and has no way
+  # to recover the number, because the process that knew it is the one being
+  # watched. A launch that cannot be monitored must not proceed to spend.
+  if [[ ! -s "${launcher_pid_file}" ]]; then
+    echo "ERROR: ${launcher_pid_file} is missing or empty after being written." >&2
+    echo "       The run would be unmonitorable; refusing to proceed to spend." >&2
+    exit "${EXIT_USAGE}"
+  fi
+  echo "Launcher PID $$ recorded at ${launcher_pid_file}"
+fi
+
 echo
 echo "Planned steps (in order):"
 step_git_checkout
+
+# Checked in BOTH modes, deliberately. A dry run whose printed plan references a
+# script the commit does not carry is not a reviewable plan — it is a plan that
+# will fail on the pod, reviewed as though it would work.
+assert_entrypoint "eval/fetch_pinned_bfcl.py" "fixture acquire/verify"
+assert_entrypoint "eval/isolation_ladder.py"  "§0 smoke gate"
+assert_entrypoint "eval/bfcl_simple.py"       "paid generation"
+# The summary names what was actually inspected. It used to say "present at
+# ${commit}" unconditionally, which in a dry run was a claim about a commit that
+# had never been read — and was printed even for a SHA that does not exist.
+if [[ "${entrypoint_check_mode}" == NOT\ VERIFIED* ]]; then
+  echo "WARNING: entry points ${entrypoint_check_mode}." >&2
+  # git's own message, printed rather than swallowed. It is what distinguishes
+  # "that SHA does not exist here" from "this repository is broken", which the
+  # exit code cannot: cat-file returns 128 for both.
+  if [[ -n "${entrypoint_check_diagnostic}" ]]; then
+    echo "         git said: ${entrypoint_check_diagnostic}" >&2
+  fi
+  echo "         The plan below is printed UNVERIFIED against that SHA. If the" >&2
+  echo "         message above is anything other than an unknown object, treat" >&2
+  echo "         this repository as suspect before trusting any dry run from it." >&2
+  echo "         A real run cannot reach this state: it checks out first." >&2
+else
+  echo "OK: all three entry points present in ${entrypoint_check_mode}."
+fi
 
 echo
 run_checked "acquire pinned BFCL fixtures" "${EXIT_ACQUIRE_FAILED}" "${acquire_cmd[@]}"
@@ -502,14 +774,33 @@ run_checked "acquire pinned BFCL fixtures" "${EXIT_ACQUIRE_FAILED}" "${acquire_c
 echo
 run_checked "verify pinned BFCL fixtures (pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
+# The gate. Runs after the fixtures exist (it reads the first `multiple` prompt)
+# and before the full probe. A non-zero exit aborts here, so a run that would
+# have reproduced the §0 crash spends four model loads and 32 generated tokens
+# instead of 1,200 generations.
+#
+# It goes through run_bounded, not run_checked: the ladder is itself a billed
+# command that loads an 8B model four times and generates, so an unbounded gate
+# could hang past the script deadline and consume the shutdown reserve.
 echo
-run_generation "multiple" "${gen_multiple_cmd[@]}"
+run_bounded "§0 isolation ladder (smoke gate)" "${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"
+
+# Verify AGAIN, immediately before the first full generation. Inserting the gate
+# between the earlier verify and this generation broke the standing invariant
+# that a checksum check sits immediately before *each* paid generation, with
+# nothing in between — and the thing now in between loads 16 GB of weights and
+# writes to the same volume. Restoring the invariant costs a checksum pass.
+echo
+run_checked "verify pinned BFCL fixtures (post-gate, pre-flight: multiple)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
+
+echo
+run_bounded "paid generation: multiple" "${EXIT_GENERATION_FAILED}" "${gen_multiple_cmd[@]}"
 
 echo
 run_checked "verify pinned BFCL fixtures (pre-flight: simple_python)" "${EXIT_VERIFY_FAILED}" "${verify_cmd[@]}"
 
 echo
-run_generation "simple_python" "${gen_simple_python_cmd[@]}"
+run_bounded "paid generation: simple_python" "${EXIT_GENERATION_FAILED}" "${gen_simple_python_cmd[@]}"
 
 if [[ "${dry_run}" -eq 1 ]]; then
   echo

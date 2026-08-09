@@ -88,7 +88,19 @@ small and `df` reports the whole cluster, so it gives **no warning as it fills**
 ## On the pod, before the miner
 
 ```bash
-export HF_TOKEN=...                          # base model is gated, adapter private
+# Base model is gated and the adapter is private, so a read token is required.
+# Type it at the prompt: `read -rs` echoes nothing and leaves no history entry,
+# because the value arrives as stdin rather than as part of a command line.
+# `export HF_TOKEN=<value>` would echo the token on screen (so it persists in
+# scrollback and any recording) and write it to shell history in cleartext; a
+# token in a file on the mounted volume outlives the pod entirely. `export` is a
+# shell builtin and does not appear in `ps` — that exposure applies to external
+# commands taking the token as an argument, such as `hf auth login --token`.
+# `&&`, not `;`: on EOF (Ctrl-D) or a closed stdin `read` fails, and an
+# unconditional `export` would then publish an empty or stale value and let
+# the run proceed on it. Export only on a successful read.
+read -rsp 'HF read token: ' HF_TOKEN && echo && export HF_TOKEN
+
 export HF_HOME=/root/.cache/huggingface      # keep 16 GB of weights off the volume
 python3 -m venv --system-site-packages .venv # preserve the image's CUDA torch
 .venv/bin/pip install -r requirements-probe.txt

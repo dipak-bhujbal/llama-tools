@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -22,15 +23,29 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "launch_probe.sh"
 
-# A syntactically valid 40-char hex SHA. It does not need to exist as a real
-# commit for --dry-run: the script never calls `git checkout` for real in
-# dry-run mode, it only prints the command it would run.
-VALID_SHA = "1f0850103660ab46dc489a4c91280190b4da6620"
+# This used to be a hardcoded SHA, with a comment saying it "does not need to
+# exist as a real commit for --dry-run". That stopped being true when the
+# launcher started reading the commit's tree read-only instead of testing the
+# working directory — and the hardcoded value turned out to be a real ancestor
+# that predates `eval/isolation_ladder.py`, so every dry-run test began (rightly)
+# exiting 70 for launcher/commit incompatibility.
+#
+# HEAD is used instead: it is a commit that genuinely carries all three entry
+# points, so these tests now exercise the real verification path rather than
+# routing around it. The absent-commit and missing-entry-point paths are covered
+# in tests/test_shell_fail_loud.py.
+VALID_SHA = subprocess.run(
+    ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+TEST_NOW = int(time.time())
+TEST_SCRIPT_DEADLINE = TEST_NOW + 1800
+TEST_PROVIDER_DEADLINE = TEST_NOW + 3600
 
 REQUIRED_FLAGS = {
     "--commit": VALID_SHA,
-    "--usd-cap": "2.50",
-    "--usd-per-hour": "0.44",
+    "--provider-deadline-epoch": str(TEST_PROVIDER_DEADLINE),
+    "--deadline-epoch": str(TEST_SCRIPT_DEADLINE),
     "--out-root": "/tmp/launch_probe_test_out_root",
 }
 
@@ -190,57 +205,170 @@ def test_dry_run_orders_acquire_before_verify_before_first_generation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Budget derivation: printed, and scales the right direction.
+# The wall-clock bound: supplied, not derived. The script deliberately knows
+# nothing about money — a per-run dollar approval is not a property of the
+# source, and baking one in means the source silently enforces a stale approval.
 # ---------------------------------------------------------------------------
 
-_MAX_SECONDS_RE = re.compile(r"per_command_max_seconds=(\d+)")
+_TIMEOUT_RE = re.compile(r"timeout --kill-after=30 (\d+)")
 
 
-def _derived_per_command_seconds(usd_cap: str, usd_per_hour: str) -> int:
+def test_deadline_epoch_is_required() -> None:
+    result = run_script(full_args(omit={"--deadline-epoch"}, extra=["--dry-run"]))
+    assert result.returncode != 0
+    assert "--deadline-epoch" in combined_output(result)
+
+
+def test_every_billed_model_execution_shares_one_deadline_rather_than_splitting_it() -> None:
+    """The billed model-execution commands carry very different workloads.
+
+    category=multiple is 200 prompts x 2 candidates = 400 generations;
+    category=simple_python is 400 x 2 = 800. An even split would hand the
+    command with twice the work the same allowance, so the probe would be
+    killed mid-simple_python having already paid for it. Each command instead
+    gets what is left of one shared deadline.
+
+    The smoke gate is counted here too. It loads an 8B model four times and
+    generates on a metered pod, so it is a billed command like any other; it
+    was briefly on the unbounded path, where a hung CUDA load could have run
+    past the script deadline and eaten the shutdown reserve.
+    """
+    result = run_script(full_args(extra=["--dry-run"]))
+    output = combined_output(result)
+    assert result.returncode == 0, output
+    budgets = [int(x) for x in _TIMEOUT_RE.findall(output)]
+    # ladder + multiple + simple_python
+    assert len(budgets) == 3, output
+    # None is a fraction of the whole, and none resets. Dry-run spends almost no
+    # time between them but may cross an epoch-second boundary, so each
+    # allowance may shrink and must never grow.
+    assert budgets == sorted(budgets, reverse=True), output
+    assert 900 < budgets[-1] <= budgets[0] <= 1800, output
+    assert "share ONE deadline" in output
+
+
+def test_the_smoke_gate_is_wall_clock_bounded_like_every_other_billed_command() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'run_bounded "§0 isolation ladder (smoke gate)"' in source
+    assert 'run_checked "§0 isolation ladder' not in source
+
+
+def test_a_checksum_verify_sits_immediately_before_each_paid_generation() -> None:
+    """The standing invariant: nothing runs between a fixture verify and the
+    generation it guards. Inserting the gate between the first verify and the
+    first generation broke it — and the thing inserted loads 16 GB of weights
+    and writes to the same volume."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+
+    def positions(needle: str) -> list[int]:
+        found, start = [], 0
+        while (i := output.find(needle, start)) != -1:
+            found.append(i)
+            start = i + 1
+        return found
+
+    verifies = positions("--verify-only")
+    ladder = output.index("isolation_ladder.py")
+    multiple = output.index("--category multiple")
+    simple = output.index("--category simple_python")
+
+    # Three verifies now: before the gate, between the gate and the first
+    # generation, and before the second generation.
+    assert len(verifies) == 3, output
+    assert verifies[0] < ladder < verifies[1] < multiple < verifies[2] < simple, output
+
+
+def test_the_launcher_publishes_its_own_pid_for_the_monitor() -> None:
+    """`pgrep -n -f` cannot recover a launcher that already died and can match
+    an unrelated process. The file is the source of the number only — liveness
+    is still decided by kill -0, because a SIGKILLed process cannot update a
+    file, which is how the 2026-08-08 probe came to have a PID file pointing at
+    nothing."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "launcher.pid" in output
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'printf \'%s\\n\' "$$" > "${launcher_pid_file}.tmp.$$"' in source
+    assert 'mv -f "${launcher_pid_file}.tmp.$$" "${launcher_pid_file}"' in source
+
+
+def test_the_pid_file_is_not_written_during_a_dry_run() -> None:
+    """A dry run must not leave an artifact a monitor could pick up as real."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "would write this launcher's PID" in output
+
+
+def test_script_deadline_must_be_nested_inside_provider_deadline() -> None:
+    now = int(time.time())
     result = run_script(
         full_args(
-            overrides={"--usd-cap": usd_cap, "--usd-per-hour": usd_per_hour},
+            overrides={
+                "--provider-deadline-epoch": str(now + 60),
+                "--deadline-epoch": str(now + 120),
+            },
             extra=["--dry-run"],
         )
     )
-    output = combined_output(result)
-    assert result.returncode == 0, output
-    match = _MAX_SECONDS_RE.search(output)
-    assert match, output
-    return int(match.group(1))
+    assert result.returncode != 0, combined_output(result)
+    assert "not earlier than provider deadline" in combined_output(result)
 
 
-def test_derived_budget_is_printed() -> None:
+def test_the_deadline_is_absolute_and_printed_before_anything_can_spend() -> None:
     result = run_script(full_args(extra=["--dry-run"]))
     output = combined_output(result)
-    assert "BUDGET" in output
-    assert _MAX_SECONDS_RE.search(output), output
+    assert re.search(r"deadline_epoch=\d{10}", output), output
+    # Printed before the first paid command is even announced.
+    assert output.index("deadline_epoch=") < output.index("--category multiple"), output
 
 
-def test_derived_budget_scales_correctly_with_hourly_rate() -> None:
-    # A cheaper hourly rate affords more wall-clock time for the same
-    # dollar cap, so the derived --max-seconds budget must be strictly
-    # larger for --usd-per-hour 0.44 than for --usd-per-hour 1.00.
-    cheap_rate_seconds = _derived_per_command_seconds("2.50", "0.44")
-    expensive_rate_seconds = _derived_per_command_seconds("2.50", "1.00")
-    assert cheap_rate_seconds > expensive_rate_seconds
+def test_invalid_or_expired_deadline_epoch_is_rejected() -> None:
+    for bad in ("0", "-1", "1800.5", "later", str(int(time.time()) - 1)):
+        result = run_script(
+            full_args(overrides={"--deadline-epoch": bad}, extra=["--dry-run"])
+        )
+        assert result.returncode != 0, bad
+        assert "--deadline-epoch" in combined_output(result), bad
 
 
-def test_zero_or_negative_usd_cap_is_rejected() -> None:
-    result = run_script(full_args(overrides={"--usd-cap": "0"}, extra=["--dry-run"]))
-    assert result.returncode != 0
-    assert "--usd-cap" in combined_output(result)
+def test_no_wall_clock_ceiling_is_hardcoded_in_the_script() -> None:
+    """A far-future deadline is accepted: the script has no opinion on scale.
 
-    result = run_script(full_args(overrides={"--usd-cap": "-1"}, extra=["--dry-run"]))
-    assert result.returncode != 0
-    assert "--usd-cap" in combined_output(result)
+    A built-in ceiling would be a policy claim in reusable source ("longer than
+    any approved probe"), which is the same staleness failure money was removed
+    for. The provider deadline and the externally derived remaining duration
+    are the authoritative bounds.
+    """
+    now = int(time.time())
+    result = run_script(full_args(overrides={
+        "--deadline-epoch": str(now + 999999),
+        "--provider-deadline-epoch": str(now + 1000000),
+    }, extra=["--dry-run"]))
+    assert result.returncode == 0, combined_output(result)
+    source = SCRIPT.read_text()
+    assert "HARD_LIMIT" not in source
 
 
-def test_zero_or_negative_usd_per_hour_is_rejected() -> None:
-    result = run_script(full_args(overrides={"--usd-per-hour": "0"}, extra=["--dry-run"]))
-    assert result.returncode != 0
-    assert "--usd-per-hour" in combined_output(result)
+def test_probe_shell_sources_carry_no_monetary_literals() -> None:
+    """Money is a per-run approval; it may live in docs, never in the source.
 
+    Enforced as a test rather than a convention because the failure mode is
+    silent: a stale figure in the source keeps being *mechanically enforced*
+    long after the approval it encoded was superseded, and every downstream
+    artifact still looks correct. The check is written as an invariant with no
+    amount named — quoting the superseded or the current figure here would
+    reintroduce, in the test suite, the duplicate source of truth this removes.
+
+    `bootstrap_pod.sh` is covered too — it does not spend directly, but it is
+    where the operator reads what the ceiling is before setting the provider
+    deadline, so a stale number there misinforms the one bound that survives
+    this process being SIGKILLed.
+    """
+    for script in (SCRIPT, SCRIPT.parent / "bootstrap_pod.sh"):
+        source = script.read_text()
+        for forbidden in ("usd", "USD", "per-hour"):
+            assert forbidden not in source, f"{script.name}: {forbidden}"
+        # `$1`/`${1}` are bash positional parameters, not money. A decimal
+        # point after the digits is what distinguishes a currency amount.
+        assert not re.search(r"\$[0-9]+\.[0-9]", source), f"{script.name}: dollar amount"
 
 # ---------------------------------------------------------------------------
 # --dry-run must not create the out-root directory or modify git state.
@@ -303,12 +431,14 @@ def test_output_includes_stop_the_pod_reminder_and_artifact_paths() -> None:
     assert "STOP THE POD" in output
     assert "study2_probe_multiple/generations.jsonl" in output
     assert "study2_probe_simple_python/generations.jsonl" in output
+    assert "probe_timing.txt" in output
+    assert "/tmp/launch_probe_test_out_root/pip_freeze.txt" in output
 
 
 def test_preflight_warns_in_dry_run_when_timeout_binary_is_absent(tmp_path) -> None:
-    """The approved spend cap is enforced by `timeout`. A host without it must
-    be told, because a plan that prints fine here would refuse to start on a
-    pod. Dry run warns rather than fails so the plan stays reviewable off-pod.
+    """The script's wall-clock bound is enforced by `timeout`. A host without
+    it must be told, because a plan that prints fine here would refuse to start
+    on a pod. Dry run warns rather than fails so the plan stays reviewable off-pod.
     """
     # Stripping PATH down to a stub dir is not viable: the script legitimately
     # needs dirname/awk too, so a minimal PATH fails for the wrong reason.
@@ -335,3 +465,45 @@ def test_preflight_is_announced_before_any_git_mutation() -> None:
     out = combined_output(result)
     assert "PREFLIGHT" in out
     assert out.index("PREFLIGHT") < out.index("checkout --detach")
+
+
+# --- §0 smoke gate is folded into the launcher, not left to the operator -----
+def test_dry_run_runs_the_isolation_ladder() -> None:
+    """A gate that lives only in a runbook is not a gate. The failure it guards
+    against is a full probe launched straight into the same CUDA fault that
+    killed the last one, and 'the operator will remember' is exactly the
+    assumption that fails under time pressure on a billing pod."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "eval/isolation_ladder.py" in output
+    assert "--out-dir" in output
+
+
+def test_ladder_runs_after_verify_and_before_the_first_paid_generation() -> None:
+    """Ordering is the whole point: after verify because it reads the first
+    `multiple` prompt from the fixtures, before generation because aborting
+    afterwards would have already spent the money."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    ladder = output.index("isolation_ladder.py")
+    first_generation = output.index("--category multiple")
+    verify = output.index("--verify-only")
+    assert verify < ladder < first_generation
+
+
+def test_ladder_failure_has_its_own_exit_code() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "readonly EXIT_SMOKE_GATE_FAILED=69" in source
+    assert '"${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"' in source
+
+
+def test_there_is_no_flag_to_skip_the_gate() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    for escape_hatch in ("--skip-ladder", "--skip-smoke", "--no-gate", "SKIP_LADDER"):
+        assert escape_hatch not in source, escape_hatch
+
+
+def test_exit_inventory_lists_the_ladder_evidence() -> None:
+    """A run aborted at the gate has no generations to persist, so the ladder's
+    artifacts are its entire output — they must appear on the failure path too."""
+    output = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "isolation_ladder/isolation_ladder.json" in output
+    assert "isolation_ladder/telemetry/" in output

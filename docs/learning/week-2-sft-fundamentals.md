@@ -92,11 +92,20 @@ Do these in order. Estimated time: 3-4 hours including debugging.
   cd llama-tools
   pip install --upgrade pip
   pip install -e ".[train]"
-  export HF_TOKEN=<paste your token>
-  export WANDB_API_KEY=<paste your key>
-  hf auth login --token $HF_TOKEN
-  wandb login $WANDB_API_KEY
+
+  # Type each secret at the prompt. `read -rs` echoes nothing and takes no
+  # argument, so neither value reaches the screen, the shell history, or any
+  # process's argv.
+  read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN
+  read -rsp 'wandb key: ' WANDB_API_KEY && echo && export WANDB_API_KEY
+
+  # `hf auth login` is an ALTERNATIVE to the HF_TOKEN export, not a step
+  # after it: in huggingface_hub 1.24 it returns immediately when a token is
+  # already visible in the environment, so it neither logs in nor persists
+  # anything. Use one or the other.
   ```
+
+  > **Corrected 2026-08-08.** This block originally read `export HF_TOKEN=<paste your token>` followed by `hf auth login --token $HF_TOKEN` and `wandb login $WANDB_API_KEY`. Every one of those puts a live credential somewhere it outlives the command: a pasted literal goes into shell history, and `--token $HF_TOKEN` is expanded by the shell *before* exec, so the value sits in the new process's argv where any `ps` on the pod can read it. The original wording is preserved in git history.
 
 - [ ] **Verify GPU visibility:**
   ```bash

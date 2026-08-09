@@ -13,8 +13,8 @@ loading two full 8B copies onto a single 48GB card.
 Prereqs on the pod:
 - Week 4 SFT complete; `outputs/sft-full/` present with the LoRA adapter files.
 - `pip install -e ".[train]"` completed
-- `hf auth login --token $HF_TOKEN` succeeded
-- `wandb login $WANDB_API_KEY` (optional)
+- `hf auth login` succeeded (interactive; set HF_TOKEN via `read -rs`, never `--token`)
+- `wandb login` (optional; interactive, reads WANDB_API_KEY from the environment)
 - `data/processed/preferences_dpo.jsonl` present on the pod
 
 Usage:

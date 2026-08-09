@@ -5,8 +5,8 @@ hardware: 1x RTX A6000 48GB (Runpod). Expected wall-clock: ~6-8 hours.
 
 Prereqs on the pod:
 - `pip install -e ".[train]"` completed
-- `hf auth login --token $HF_TOKEN` succeeded
-- `wandb login $WANDB_API_KEY` succeeded (optional; skipped if var absent)
+- `hf auth login` succeeded (interactive; set HF_TOKEN via `read -rs`, never `--token`)
+- `wandb login` succeeded (optional; interactive. Skipped if the var is absent)
 - Llama-3.1-8B-Instruct license accepted on HF
 - `data/processed/sft_dedup.jsonl` present on the pod (rsync it up before run)
 

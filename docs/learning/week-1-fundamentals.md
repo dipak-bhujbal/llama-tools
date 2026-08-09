@@ -59,11 +59,17 @@ Do not let unfamiliar acronyms in this list stress you. We only cover them if an
 Do these in order. Estimated time: 2-3 hours total including account creation and troubleshooting.
 
 - [ ] **HuggingFace account:** already exist as `centuriandip`. Log in.
-- [ ] **HuggingFace API token:** at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with "write" access. Save to your shell:
+- [ ] **HuggingFace API token:** at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with "write" access. Put it in your shell **without ever typing the value into a command**:
   ```bash
-  export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX
+  read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN
   ```
-  Add that to `~/.zshrc` (or wherever you keep environment variables). You'll use this token in code and in `huggingface-cli login`.
+  `read -rs` echoes nothing and takes no argument, so the token reaches neither your screen, your shell history, nor any process's argv. `&&` rather than `;` so a failed read (Ctrl-D, closed stdin) does not export an empty value and let you carry on believing it worked.
+
+  `hf auth login` is the **alternative** to this, not a next step. It prompts for the token and caches it on disk, which survives new shells — but in `huggingface_hub` 1.24 it returns immediately when `HF_TOKEN` is already visible in the environment, so running it *after* the export does nothing and saves nothing. Pick one.
+
+  > **Corrected 2026-08-08.** This step originally read `export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX` and told you to add that line to `~/.zshrc`. Both are wrong and this journal is public: a literal assignment lands in `~/.zsh_history` in cleartext, and a token in a shell rc file is a long-lived secret at rest in a file that gets backed up, synced, and screen-shared. The original wording is preserved in git history rather than pretended away.
+  >
+  > The same edit changed one other line in this file, under **Common failures** below: the HuggingFace 401 entry originally ended `re-run \`hf auth login --token $HF_TOKEN\``. That flag is expanded by the shell *before* exec, so the token sits in the new process's argv where any `ps` can read it. It is noted here rather than left as a silent rewrite — a correction that annotates one line and quietly fixes another is not a corrected record.
 - [ ] **Accept Llama 3.1 license:** visit [huggingface.co/meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and accept the license terms. Meta requires this before you can download the model. Approval is usually near-instant to a few minutes.
       - Note: the smoke test does NOT use Llama — it uses SmolLM2-135M (non-gated, tiny, fast) — because the smoke test's job is to verify your environment, not test a specific model's access. Llama-3.1-8B is verified separately as part of environment setup.
 - [ ] **Runpod account:** sign up at [runpod.io](https://runpod.io). Add payment method (add $50 to start, top up as needed — don't add $1000 upfront). Familiarize with the console but do NOT launch a pod yet.
@@ -106,7 +112,7 @@ First run downloads the model (~300 MB) into `~/.cache/huggingface/`. Subsequent
 **Common failures:**
 - **`AttributeError` on tokenizer.apply_chat_template:** transformers version mismatch — reinstall with `.venv/bin/pip install -U transformers`.
 - **Package import error:** you're not in the repo's virtualenv. Either activate it (`source .venv/bin/activate`) or invoke Python via `.venv/bin/python smoke.py`.
-- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env` and re-run `hf auth login --token $HF_TOKEN`.
+- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env` and re-set it with `read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN`. (Or, in a shell where it is *not* already exported, `hf auth login` to prompt and cache it. Never `--token`.)
 
 ---
 
