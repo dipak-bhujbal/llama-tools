@@ -452,9 +452,26 @@ else
       echo "ABORT: launcher exited during the 1s settle (exit $launcher_st)."
       if [[ -r /workspace/persist/study2/probe.log \
             && -s /workspace/persist/study2/probe.log ]]; then
-        echo "       probe.log begins:"
-        sed -n '1,20p' /workspace/persist/study2/probe.log \
-          || echo "ABORT: probe.log became unreadable while collecting the diagnosis"
+        RAW_EXCERPT=$(sed -n '1,20p' /workspace/persist/study2/probe.log); read_st=$?
+        if [[ "$read_st" -ne 0 ]]; then
+          unset RAW_EXCERPT
+          echo "ABORT: could not read the bounded probe.log excerpt (exit $read_st)"
+        else
+          MASKED_EXCERPT=$(sed -E \
+              -e 's/hf_[A-Za-z0-9]{20,}/[REDACTED_HF_TOKEN]/g' \
+              -e 's/Bearer[[:space:]]+[^[:space:]]+/Bearer [REDACTED]/g' \
+              <<< "$RAW_EXCERPT"); mask_st=$?
+          unset RAW_EXCERPT
+          if [[ "$mask_st" -ne 0 ]]; then
+            unset MASKED_EXCERPT
+            echo "ABORT: credential masking failed (exit $mask_st); excerpt withheld"
+          else
+            echo "       probe.log begins (first 20 lines; best-effort credential mask):"
+            printf '%s\n' "$MASKED_EXCERPT" \
+              || echo "ABORT: could not display the masked probe.log excerpt"
+            unset MASKED_EXCERPT
+          fi
+        fi
       else
         echo "ABORT: probe.log is absent, unreadable, or empty — no startup diagnosis"
       fi
@@ -472,6 +489,14 @@ printing the positive token. **`LAUNCHED` means only that the launcher is runnin
 startup settle; it does not mean the run is healthy.** §8 is the continuing-health control.
 The deadline guards duplicate checks the launcher already makes internally — deliberately,
 so the failure costs a shell round-trip instead of a process start on a billing pod.
+
+The startup excerpt is **orientation for the live operator, not evidence**, precisely because
+it is truncated to 20 lines and applies only a best-effort mask for common Hugging Face and
+bearer-token shapes. Raw bytes are held in an unexported shell variable; the mask's status is
+checked before anything is displayed, and a mask failure withholds the excerpt rather than
+failing open. The full, unredacted `probe.log` remains on the pod and is collected in §10's
+explicit hashed artifact inventory; diagnosis must cite that artifact rather than the screen
+excerpt.
 
 > **Why not `tmux new-session -d -s run …`.** §2 already started the tmux **server**. A
 > session created later does not inherit this pane's exports — it inherits the *server's*
