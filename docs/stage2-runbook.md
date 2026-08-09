@@ -1,7 +1,9 @@
 # Stage 2 — one retry pod, RunPod UI + tmux
 
-**Status: DRAFT, pending @claude review under the three-cycle role reversal. Do not execute
-until both agents have signed off.**
+**Status: REVIEWED — @codex-2 and @claude signed off on the operational content at
+`2c7a189d3e6363401c7de8cab5cfaa1c808b2a0c`. Review is not deployment or spend
+authorization; do not execute until the live console rate is known, both agents agree the
+resulting estimate, and the owner explicitly approves that estimate.**
 
 Operator: the owner, driving the RunPod web console and a terminal.
 Reviewed commit for this run: **`08be5d3b0c1293ac229fe7b04e2931f14bd149d0`** (on `main`).
