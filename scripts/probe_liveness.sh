@@ -325,7 +325,7 @@ log_age_seconds() {
 # One prior version "handled" this by replacing `"` with `'` in a single field,
 # which mangles the data and still leaves backslashes and newlines broken.
 json_escape() {
-  local s="$1" out="" i c
+  local s="$1" out="" i c code
   s="${s//\\/\\\\}"      # backslash FIRST, or it doubles the escapes added below
   s="${s//\"/\\\"}"
   s="${s//$'\b'/\\b}"
@@ -335,16 +335,22 @@ json_escape() {
   s="${s//$'\t'/\\t}"
   # Any remaining C0 control character has no short form and must be \u00XX,
   # or the artifact is invalid JSON for a reason nobody will guess.
-  if [[ "${s}" == *[$'\x01'-$'\x1f']* ]]; then
-    for (( i=0; i<${#s}; i++ )); do
-      c="${s:i:1}"
-      if [[ "${c}" == [$'\x01'-$'\x1f'] ]]; then
-        printf -v c '\\u%04x' "'${c}"
-      fi
-      out+="${c}"
-    done
-    s="${out}"
-  fi
+  #
+  # Do NOT express this as `[$'\x01'-$'\x1f']`. Bash interprets a bracket
+  # range using the active locale's collation order, not numeric byte order.
+  # Under en_US.UTF-8 that range omitted vertical tab (U+000B), so the same
+  # input produced valid JSON under LC_ALL=C and invalid JSON on a pod whose
+  # locale was never pinned. Numeric comparison makes the property independent
+  # of locale. Bash strings cannot contain NUL, hence the lower bound is 1.
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    printf -v code '%d' "'${c}"
+    if (( code >= 1 && code <= 31 )); then
+      printf -v c '\\u%04x' "${code}"
+    fi
+    out+="${c}"
+  done
+  s="${out}"
   printf '%s' "${s}"
 }
 

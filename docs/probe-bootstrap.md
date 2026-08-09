@@ -150,7 +150,7 @@ fail after the meter was already running:
 | 4 | clone, detach at the SHA, assert `rev-parse HEAD` and a clean tree | exit 67 |
 | 5 | venv created here; exact probe spec installed | — |
 | 6 | GNU `timeout --kill-after` works; exact version tuple imports; CUDA visible; HF reaches the gated base **and** the private adapter | exit 68 |
-| 7 | `pip_freeze.txt`, `gpu.txt`, `image_tag.txt`, `env_fingerprint.json`, `bundle_sha256.txt`, attestation → persistent root | — |
+| 7 | `pip_freeze.txt`, `gpu.txt`, `image_tag.txt`, `env_fingerprint.json` (including locale variables/effective collation), `bundle_sha256.txt`, attestation → persistent root | — |
 
 **An unknown image tag fails.** It is not recorded as `"unknown"` and treated as evidence —
 a run whose environment cannot be named cannot be reproduced.

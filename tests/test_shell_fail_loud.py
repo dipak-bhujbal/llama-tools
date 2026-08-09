@@ -169,6 +169,15 @@ def test_bootstrap_asserts_every_environment_receipt_exists_and_is_non_empty() -
     assert '[[ -s "${path}" ]] || die' in source
 
 
+def test_environment_fingerprint_records_locale_provenance() -> None:
+    """Locale demonstrably changed monitor output, so it belongs in the receipt."""
+    source = BOOTSTRAP.read_text(encoding="utf-8")
+    assert "import json, locale, os, sys" in source
+    assert 'for name in ("LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE")' in source
+    assert "locale.setlocale(locale.LC_COLLATE)" in source
+    assert "locale.setlocale(locale.LC_CTYPE)" in source
+
+
 def test_launcher_checks_its_entry_points_and_says_what_it_checked() -> None:
     """Three modes, three honest messages.
 
@@ -456,6 +465,13 @@ HOSTILE_NAMES = [
     ("double-backslash", r"back\\slash.log"),
     ("tab", "tab\ted.log"),
     ("newline", "line\nbreak.log"),
+    ("vertical-tab", "vertical\vtab.log"),
+    ("delete", "delete\x7fchar.log"),
+    # These must remain literal after decoding. Escaping an emitted `\u00XX`
+    # before an input backslash would silently turn path text into a control.
+    ("literal-unicode-escape", r"literal\u000b.log"),
+    ("literal-newline-escape", r"literal\n.log"),
+    ("quote-backslash-mix", 'quote"\\mix.log'),
 ]
 
 
@@ -491,6 +507,112 @@ def test_status_file_survives_a_hostile_scan_detail(tmp_path: Path) -> None:
     parsed = json.loads(status.read_text(encoding="utf-8"))
     assert parsed["error_marker_scan_detail"], "detail must say why"
     assert '"' in parsed["error_marker_scan_detail"] or "\\" in parsed["error_marker_scan_detail"]
+
+
+def _json_test_locales() -> list[str]:
+    """Use a collating UTF-8 locale when the host provides one.
+
+    The old range happened to work in C/C.UTF-8 and failed in en_US.UTF-8.
+    Linux CI images do not always install an en_US locale, so the source-shape
+    guard below remains mandatory even when only C is available there.
+    """
+    result = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=True)
+    available = set(result.stdout.splitlines())
+    locales = ["C"]
+    for candidate in ("en_US.UTF-8", "en_US.utf8"):
+        if candidate in available:
+            locales.append(candidate)
+            break
+    return locales
+
+
+@pytest.mark.parametrize("locale_name", _json_test_locales())
+@pytest.mark.parametrize("vector", ("log", "tmux"))
+def test_every_c0_character_is_json_safe_in_every_test_locale(
+    tmp_path: Path, locale_name: str, vector: str
+) -> None:
+    """Exercise the property, not only the character that exposed the defect.
+
+    `[$'\\x01'-$'\\x1f']` is a locale-collated range in Bash. Under
+    en_US.UTF-8 it omitted U+000B even though the same code passed under C, so
+    a monitor could exit 72 while writing an unparseable terminal artifact.
+    Test all non-NUL C0 characters through both documented input vectors.
+    """
+    env = {**os.environ, "LANG": locale_name, "LC_ALL": locale_name}
+    for code in range(1, 32):
+        control = chr(code)
+        status = tmp_path / f"{vector}-{locale_name.replace('/', '_')}-{code:02x}.json"
+        log = tmp_path / (f"probe{control}run.log" if vector == "log" else "missing.log")
+        command = [
+            "bash", str(LIVENESS), "--log", str(log),
+            "--status-file", str(status), "--pid", "999999", "--once",
+        ]
+        if vector == "tmux":
+            command += ["--tmux-session", f"probe{control}1"]
+
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert result.returncode == 72, result.stdout + result.stderr
+        parsed = json.loads(status.read_text(encoding="utf-8"))
+        if vector == "log":
+            assert parsed["log_file"] == str(log)
+        else:
+            assert parsed["tmux_session"] == f"probe{control}1"
+
+
+@pytest.mark.parametrize("locale_name", _json_test_locales())
+def test_failed_grep_detail_with_vertical_tab_is_json_safe(
+    tmp_path: Path, locale_name: str
+) -> None:
+    """Exercise the least-controlled string: a subprocess's stderr verbatim."""
+    log = tmp_path / "probe.log"
+    log.write_text("ordinary log text\n", encoding="utf-8")
+    status = tmp_path / f"grep-detail-{locale_name}.json"
+    fake_bin = tmp_path / f"bin-{locale_name}"
+    fake_bin.mkdir()
+    fake_grep = fake_bin / "grep"
+    fake_grep.write_text(
+        "#!/usr/bin/env bash\n"
+        'for arg in "$@"; do\n'
+        '  if [[ "$arg" == "${FAIL_LOG_FOR_TEST}" ]]; then\n'
+        "    printf 'grep injected\\vdetail\\n' >&2\n"
+        "    exit 2\n"
+        "  fi\n"
+        "done\n"
+        f'exec "{shutil.which("grep")}" "$@"\n',
+        encoding="utf-8",
+    )
+    fake_grep.chmod(0o755)
+    env = {
+        **os.environ,
+        "LANG": locale_name,
+        "LC_ALL": locale_name,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAIL_LOG_FOR_TEST": str(log),
+    }
+
+    result = subprocess.run(
+        ["bash", str(LIVENESS), "--log", str(log),
+         "--status-file", str(status), "--pid", "999999", "--once"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert result.returncode == 72, result.stdout + result.stderr
+    parsed = json.loads(status.read_text(encoding="utf-8"))
+    assert parsed["error_marker_scan"] == "failed"
+    assert "grep injected\vdetail" in parsed["error_marker_scan_detail"]
+
+
+def test_json_escaping_does_not_depend_on_a_locale_collated_range() -> None:
+    """Keep the known-bad mechanism out even on hosts lacking en_US.UTF-8."""
+    source = LIVENESS.read_text(encoding="utf-8")
+    executable = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+    control_range = re.compile(
+        r"\[\$'\\x[0-9a-fA-F]{2}'-\$'\\x[0-9a-fA-F]{2}'\]"
+    )
+    assert not control_range.search(executable)
 
 
 def test_a_git_failure_that_is_not_a_missing_object_is_reported_as_such(tmp_path: Path) -> None:

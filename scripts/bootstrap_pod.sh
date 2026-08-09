@@ -402,7 +402,7 @@ if [[ "${dry_run}" -eq 0 ]]; then
   # constant, so renumbering EXIT_ENV cannot leave a stale 68 behind here.
   env_preflight_status=0
   llama-tools/.venv/bin/python - "${out_root}" <<'PY' || env_preflight_status=$?
-import json, sys
+import json, locale, os, sys
 from importlib.metadata import version
 
 out_root = sys.argv[1]
@@ -426,6 +426,21 @@ fingerprint = {
     "transformers": transformers.__version__,
     "peft": peft.__version__,
     "accelerate": accelerate.__version__,
+    # Locale is execution provenance, not decoration. probe_liveness.sh once
+    # changed JSON-escaping behaviour solely with LC_COLLATE, and the pod's
+    # locale was neither pinned nor recorded. Capture both the controlling
+    # environment variables and the effective categories so an unset variable
+    # is distinguishable from an unknown runtime setting.
+    "locale": {
+        "environment": {
+            name: os.environ.get(name)
+            for name in ("LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE")
+        },
+        "effective": {
+            "LC_COLLATE": locale.setlocale(locale.LC_COLLATE),
+            "LC_CTYPE": locale.setlocale(locale.LC_CTYPE),
+        },
+    },
 }
 with open(f"{out_root}/env_fingerprint.json", "w") as f:
     json.dump(fingerprint, f, indent=2, sort_keys=True)
