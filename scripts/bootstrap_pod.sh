@@ -345,6 +345,9 @@ if [[ "${dry_run}" -eq 0 ]]; then
   [[ -f llama-tools/requirements-probe.txt ]] \
     || die "llama-tools/requirements-probe.txt is missing at ${commit}; the checkout is not the reviewed tree" \
            "${EXIT_GIT}"
+  [[ -f llama-tools/eval/environment_fingerprint.py ]] \
+    || die "llama-tools/eval/environment_fingerprint.py is missing at ${commit}; locale provenance cannot be collected" \
+           "${EXIT_GIT}"
 fi
 
 run_classified "python3 -m venv" "${EXIT_ENV}" \
@@ -402,10 +405,14 @@ if [[ "${dry_run}" -eq 0 ]]; then
   # constant, so renumbering EXIT_ENV cannot leave a stale 68 behind here.
   env_preflight_status=0
   llama-tools/.venv/bin/python - "${out_root}" <<'PY' || env_preflight_status=$?
-import json, locale, os, sys
+import json, sys
 from importlib.metadata import version
 
 out_root = sys.argv[1]
+sys.path.insert(0, "llama-tools")
+
+from eval.environment_fingerprint import collect_locale_provenance
+
 expected = {
     "transformers": "5.14.1",
     "peft": "0.19.1",
@@ -418,6 +425,7 @@ assert not bad, f"probe version tuple mismatch: {bad}"
 import accelerate, peft, torch, transformers  # imports must actually work
 assert torch.cuda.is_available(), "no CUDA device visible"
 
+locale_provenance = collect_locale_provenance()
 fingerprint = {
     "python": sys.version.split()[0],
     "torch": torch.__version__,          # from the image, not pinned by us
@@ -426,23 +434,12 @@ fingerprint = {
     "transformers": transformers.__version__,
     "peft": peft.__version__,
     "accelerate": accelerate.__version__,
-    # Locale is execution provenance, not decoration. probe_liveness.sh once
-    # changed JSON-escaping behaviour solely with LC_COLLATE, and the pod's
-    # locale was neither pinned nor recorded. Capture both the controlling
-    # environment variables and the effective categories so an unset variable
-    # is distinguishable from an unknown runtime setting.
-    "locale": {
-        "environment": {
-            name: os.environ.get(name)
-            for name in ("LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE")
-        },
-        "effective": {
-            "LC_COLLATE": locale.setlocale(locale.LC_COLLATE),
-            "LC_CTYPE": locale.setlocale(locale.LC_CTYPE),
-        },
-    },
+    # Locale is execution provenance, not decoration. Ask the shell's `locale`
+    # resolver rather than CPython: Python can report LC_COLLATE=C even while
+    # Bash is using en_US.UTF-8 from the same environment.
+    "locale": locale_provenance,
 }
-with open(f"{out_root}/env_fingerprint.json", "w") as f:
+with open(f"{out_root}/env_fingerprint.json", "w", encoding="utf-8") as f:
     json.dump(fingerprint, f, indent=2, sort_keys=True)
 print("  versions + imports + CUDA OK:", fingerprint["gpu"], "| CUDA", fingerprint["cuda"])
 PY
@@ -487,6 +484,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "STEP 7 — environment evidence -> ${out_root}"
+locale_gap_reason=""
 if [[ "${dry_run}" -eq 0 ]]; then
   pip_freeze_status=0
   llama-tools/.venv/bin/pip freeze > "${out_root}/pip_freeze.txt" || pip_freeze_status=$?
@@ -534,6 +532,34 @@ if [[ "${dry_run}" -eq 0 ]]; then
   assert_file "${out_root}/reviewed_commit.txt"            "reviewed-commit receipt"   "${EXIT_ENV}"
   assert_file "${out_root}/env_fingerprint.json"           "environment fingerprint"   "${EXIT_ENV}"
   assert_file "${out_root}/bundle_sha256.txt"              "bundle hash receipt"       "${EXIT_ENV}"
+
+  # Locale collection is best-effort telemetry, not a correctness gate. The
+  # monitor's JSON escaping is locale-independent now, so a minimal image that
+  # lacks the `locale` utility costs one provenance field but does not invalidate
+  # the run. Keep that gap visible and durable without burning a billed
+  # bootstrap. An unknown/corrupt status still fails loudly.
+  locale_gap_status=0
+  locale_gap_reason="$(
+    llama-tools/.venv/bin/python - "${out_root}/env_fingerprint.json" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    provenance = json.load(handle)["locale"]
+status = provenance.get("status")
+if status == "unavailable":
+    print(str(provenance.get("reason") or "reason missing"))
+elif status != "ok":
+    raise RuntimeError(f"unknown locale provenance status: {status!r}")
+PY
+  )" || locale_gap_status=$?
+  [[ "${locale_gap_status}" -eq 0 ]] \
+    || die "locale provenance status could not be read from env_fingerprint.json (exit ${locale_gap_status})" \
+           "${EXIT_ENV}"
+  if [[ -n "${locale_gap_reason}" ]]; then
+    formatted_locale_gap="${locale_gap_reason//$'\n'/$'\n      '}"
+    echo "  EVIDENCE GAP — locale provenance unavailable; unmeasured, not defaulted:"
+    echo "    - ${formatted_locale_gap}"
+  fi
   echo "  all 7 environment receipts asserted present and non-empty"
   ls -1 "${out_root}"
 else

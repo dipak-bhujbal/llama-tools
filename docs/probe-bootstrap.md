@@ -155,6 +155,12 @@ fail after the meter was already running:
 **An unknown image tag fails.** It is not recorded as `"unknown"` and treated as evidence —
 a run whose environment cannot be named cannot be reproduced.
 
+Locale provenance follows the telemetry-gap contract: if the image's `locale` resolver is
+missing, fails, or returns malformed output, `env_fingerprint.json` records
+`status: unavailable`, the reason, and `shell_resolved: null`; STEP 7 prints the gap and
+continues. The liveness monitor is locale-independent, so this is an evidence gap rather
+than a correctness failure, and it does not discard an otherwise valid billed bootstrap.
+
 ### About the dependency spec
 
 `requirements-probe.txt` is a **new probe environment**, explicitly not study-1 provenance.

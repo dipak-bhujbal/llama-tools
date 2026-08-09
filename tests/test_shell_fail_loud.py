@@ -172,10 +172,16 @@ def test_bootstrap_asserts_every_environment_receipt_exists_and_is_non_empty() -
 def test_environment_fingerprint_records_locale_provenance() -> None:
     """Locale demonstrably changed monitor output, so it belongs in the receipt."""
     source = BOOTSTRAP.read_text(encoding="utf-8")
-    assert "import json, locale, os, sys" in source
-    assert 'for name in ("LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE")' in source
-    assert "locale.setlocale(locale.LC_COLLATE)" in source
-    assert "locale.setlocale(locale.LC_CTYPE)" in source
+    assert "from eval.environment_fingerprint import collect_locale_provenance" in source
+    assert "locale_provenance = collect_locale_provenance()" in source
+    assert '"locale": locale_provenance' in source
+    assert "locale.setlocale" not in source
+    assert "llama-tools/eval/environment_fingerprint.py is missing" in source
+    assert "EVIDENCE GAP — locale provenance unavailable; unmeasured, not defaulted" in source
+    assert 'if status == "unavailable":' in source
+    assert 'elif status != "ok":' in source
+    assert "locale provenance unavailable:" not in source
+    assert 'if [[ -n "${locale_gap_reason}" ]]' in source
 
 
 def test_launcher_checks_its_entry_points_and_says_what_it_checked() -> None:
