@@ -1,6 +1,7 @@
 # Stage 2 — one retry pod, RunPod UI + tmux
 
-**Status: DRAFT, pending @codex review. Do not execute until both agents have signed off.**
+**Status: DRAFT, pending @claude review under the three-cycle role reversal. Do not execute
+until both agents have signed off.**
 
 Operator: the owner, driving the RunPod web console and a terminal.
 Reviewed commit for this run: **`08be5d3b0c1293ac229fe7b04e2931f14bd149d0`** (on `main`).
@@ -72,11 +73,9 @@ That was a different card class from the A6000/A100 above and a *different revie
    console displays local time, a relative countdown, or omits seconds, do the conversion
    here, on paper, where a mistake costs nothing. §6 rejects anything else and will not hand
    an unverified deadline to the launcher.
-5. Deploy. **Billing starts now** — clone, venv, pip and the 16 GB download are all
-   billed. There is no free setup phase.
 
 **Record before continuing:** `<RATE>` (e.g. `0.79`), `<IMAGE_TAG>`,
-`<TERMINATE_UTC>` (e.g. `2026-08-09T04:15:00Z`).
+`<TERMINATE_UTC>` (e.g. `2026-08-09T04:15:00Z`). **Do not click Deploy yet.**
 
 ### Capture the provider evidence **now, before you click Deploy**
 
@@ -99,6 +98,32 @@ Then capture into it, from the console, **before deploying**:
 These three are the only provider proof of what this run was priced at and bounded by. The
 in-pod `auto_terminate_attestation.txt` receipt is **operator-entered** — it records what you
 typed, and is not evidence of either. §11 collects the termination and settlement halves.
+
+Verify the three files on your laptop before starting the meter. Edit `<DATE>` first:
+
+```bash
+bash <<'SH'
+DEST=~/Documents/llama-tools-artifacts/probe-<DATE>/cost_evidence
+if ! cd "$DEST"; then
+  echo "ABORT: $DEST does not exist — do not deploy"
+else
+  BAD=()
+  for f in 01_rate_at_creation.png 02_image_selected.png 03_auto_terminate_set.png; do
+    [[ -f "$f" && -s "$f" ]] || BAD+=("missing, non-regular, or empty: $f")
+  done
+  if [[ "${#BAD[@]}" -eq 0 ]]; then
+    echo "PRE-DEPLOY EVIDENCE READY (01-03 present and non-empty)"
+  else
+    printf 'ABORT: %s\n' "${BAD[@]}"
+  fi
+fi
+SH
+```
+
+5. **Only after `PRE-DEPLOY EVIDENCE READY`: click Deploy.** Billing starts now — clone,
+   venv, pip and the 16 GB download are all billed. There is no free setup phase. If the
+   token did not print, do not deploy; fix the evidence capture while the creation view is
+   still available.
 
 ---
 
@@ -542,8 +567,8 @@ so the retry is already approved — no new approval needed unless scope changes
 computes the reproduction gate rather than asserting it in prose:
 
 ```bash
-python3 - <<'PY'
-import collections, hashlib, json, pathlib, sys
+/workspace/llama-tools/.venv/bin/python - <<'PY'
+import collections, hashlib, json, pathlib, subprocess, sys
 
 ROOT = pathlib.Path("/workspace/persist/study2")
 REPO = pathlib.Path("/workspace/llama-tools")
@@ -559,6 +584,7 @@ EXPECT_MODEL = {
     "sft_adapter": "centuriandip/llama-3.1-8b-tools-sft",
     "sft_adapter_subfolder": "adapter",
     "sft_adapter_revision": "b6f4da479f8c6fc044ee8b802a92f47780f970c5",
+    "base_candidate_realization": "peft_model_with_adapter_disabled",
 }
 REPRO_DIR, REPRO_CAND, REPRO_WANT = "study2_probe_simple_python", "sft", 369
 
@@ -567,6 +593,30 @@ rescored = {}   # dir -> {(id, candidate): overall_ok recomputed here}
 def check(cond, msg):
     if not cond:
         fail.append(msg)
+
+
+# The launcher asserted this before generation. Assert it again immediately
+# before importing the parser/scorer: a post-run edit must not define the audit
+# while the manifests continue to claim REV.
+try:
+    head = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "-C", str(REPO), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+except subprocess.CalledProcessError as e:
+    detail = (e.stderr or e.stdout or "").strip()
+    print(f"FAIL: cannot assert acceptance source (git exit {e.returncode}): {detail}")
+    sys.exit(1)
+if head != REV:
+    print(f"FAIL: acceptance source HEAD {head!r} != reviewed {REV}")
+    sys.exit(1)
+if dirty:
+    print(f"FAIL: acceptance source tree is dirty; refusing an unpinned re-score:\n{dirty}")
+    sys.exit(1)
 
 if not PINS.exists():
     print(f"FAIL: pin manifest absent at {PINS}"); sys.exit(1)
@@ -634,6 +684,12 @@ for d, cat in RUNS.items():
           f"{d}: status={m.get('status')!r}, expected 'complete'")
     check(m.get("code_revision") == REV,
           f"{d}: code_revision={m.get('code_revision')!r}, expected {REV}")
+    check(m.get("category") == cat,
+          f"{d}: category={m.get('category')!r}, expected {cat!r}")
+    check(m.get("candidates") == ["base", "sft"],
+          f"{d}: candidates={m.get('candidates')!r}, expected ['base', 'sft']")
+    check(m.get("decoding") == {"do_sample": False, "max_new_tokens": 512},
+          f"{d}: decoding={m.get('decoding')!r}, expected greedy/512")
     for k, v in EXPECT_MODEL.items():
         check(m.get(k) == v, f"{d}: {k}={m.get(k)!r}, pinned {v!r}")
     inputs = m.get("inputs") or {}
@@ -649,6 +705,8 @@ for d, cat in RUNS.items():
           f"{d}: expected_rows={m.get('expected_rows')}, pins imply {len(expected_pairs)}")
     check(m.get("rows_written") == m.get("expected_rows"),
           f"{d}: rows_written={m.get('rows_written')} != expected_rows={m.get('expected_rows')}")
+    check((m.get("validation") or {}).get("ok") is True,
+          f"{d}: manifest validation.ok is not true")
 
     # --- coverage recounted from disk; the manifest is corroboration only ----
     rows = [json.loads(l) for l in gen_p.read_text().splitlines() if l.strip()]
@@ -677,8 +735,12 @@ for d, cat in RUNS.items():
             continue                      # already reported as an unexpected pair
         _, _, ok, why = score(extract_json(r.get("output") or ""), gt)
         here[(rid, r["model_name"])] = ok
-        if ok is not bool(r.get("overall_ok")):
-            disagree.append(f"{rid}/{r['model_name']} stored={r.get('overall_ok')!r} "
+        stored = r.get("overall_ok")
+        if type(stored) is not bool:
+            disagree.append(f"{rid}/{r['model_name']} stored overall_ok is not a JSON "
+                            f"boolean: {stored!r}")
+        elif ok != stored:
+            disagree.append(f"{rid}/{r['model_name']} stored={stored!r} "
                             f"recomputed={ok} ({why or 'ok'})")
     rescored[d] = here
     check(not disagree,
@@ -713,6 +775,10 @@ echo "acceptance exit: $?"
 **`acceptance exit: 0` and `ACCEPTANCE PASS` are the only results that let these numbers be
 reported.**
 
+The acceptance step uses the repository's exact `.venv` interpreter, not ambient `python3`.
+Importing `bfcl_simple` pulls in torch/Transformers/PEFT; the launcher proved those packages
+exist in `.venv`, not in the image's unrelated system interpreter.
+
 **It checks identity, not just cardinality.** An earlier version compared counts — rows,
 unique pairs, candidate names — which 200 *entirely wrong* IDs would satisfy perfectly. The
 expected ID set is now derived from the pinned questions file, after that file's own
@@ -721,10 +787,12 @@ and the run must cover **exactly** that set × `{base, sft}` — missing and une
 are reported separately. Duplicates are still checked apart from the total, because a
 duplicate can mask a missing pair while the count still looks right.
 
-**Provenance is asserted live, not inherited.** `code_revision`, the base model and revision,
-and the adapter repo/subfolder/revision must match what the launcher pins; the manifest's own
-`validation` block is treated as corroboration, since it records what a past process
-concluded, and disk is recounted here regardless.
+**Provenance is asserted live, not inherited.** Immediately before importing the parser and
+scorer, the acceptance step re-asserts that `/workspace/llama-tools` is at the reviewed SHA
+with a clean tree. `code_revision`, the base model and revision, and the adapter
+repo/subfolder/revision must match what the launcher pins; the manifest's own `validation`
+block is treated as corroboration, since it records what a past process concluded, and disk
+is recounted here regardless.
 
 **The score itself is recomputed, not read back.** Pinning the questions proves *which items*
 were asked; it says nothing about the key that decided *what counted as right*, and here that
@@ -733,8 +801,10 @@ scores **368, not 369**. So the canonical answer key is verified byte-for-byte a
 digest against the pin manifest, the run manifest's `inputs.answer_key.sha256` must equal that
 same canonical hash, scoring against the release-commit key is called out by name rather than
 just failing, and then every row is **re-parsed from its raw `output` with the pinned
-`extract_json` and re-scored with the pinned `score()`**. The stored `overall_ok` must agree
-with that recount row by row. The reproduction figure is the **recomputed** one, with its
+`extract_json` and re-scored with the pinned `score()`**. The stored `overall_ok` must be an
+actual JSON boolean and agree exactly with that recount row by row — missing values, `0`/`1`,
+and truthy strings are rejected rather than coerced. The reproduction figure is the
+**recomputed** one, with its
 denominator taken from the pin rather than hard-coded — a run scored against the wrong key
 cannot reach `ACCEPTANCE PASS` by carrying its own verdicts.
 
@@ -747,6 +817,7 @@ with `2>/dev/null` cannot distinguish "hashed everything" from "matched nothing"
 hashing it then produces a manifest that is false seconds later, before the `scp`.
 
 ```bash
+unset MONITOR_TERMINAL_OK MONITOR_TERMINAL_PID
 for _ in $(seq 1 60); do
   tmux has-session -t watch 2>/dev/null || break
   sleep 5
@@ -758,30 +829,74 @@ if tmux has-session -t watch 2>/dev/null; then
   echo "       session is being held open by something else (tmux ls; tmux capture-pane"
   echo "       -pt watch). Do not proceed until it is gone."
 else
-  python3 - "${LAUNCHER_PID:-$(cat /workspace/persist/study2/launcher.pid 2>/dev/null)}" \
-           /workspace/persist/study2/liveness.json <<'PY'
-import json, sys
-pid, path = sys.argv[1], sys.argv[2]
+  CURRENT_LAUNCHER_PID=$(cat /workspace/persist/study2/launcher.pid 2>/dev/null || true)
+  if [[ ! "$CURRENT_LAUNCHER_PID" =~ ^[0-9]+$ ]]; then
+    echo "ABORT: launcher.pid is missing or non-numeric — no current run identity"
+  elif [[ -n "${LAUNCHER_PID:-}" && "$LAUNCHER_PID" != "$CURRENT_LAUNCHER_PID" ]]; then
+    echo "ABORT: shell launcher pid $LAUNCHER_PID != file pid $CURRENT_LAUNCHER_PID"
+  elif python3 - "$CURRENT_LAUNCHER_PID" \
+           /workspace/persist/study2/liveness.json \
+           /workspace/persist/study2/deadline_derivation.txt <<'PY'
+import datetime, json, sys
+pid, path, deadline_path = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     d = json.load(open(path))
 except Exception as e:
     print(f"ABORT: cannot read liveness.json: {e}"); sys.exit(1)
-ok = (d.get("state") == "exited" and d.get("exit_code") == 0
-      and str(d.get("watched_pid")) == str(pid))
-print("MONITOR TERMINAL OK" if ok else
-      f"ABORT: liveness not terminal-clean — state={d.get('state')!r} "
-      f"exit_code={d.get('exit_code')!r} watched_pid={d.get('watched_pid')!r} "
-      f"(want exited / 0 / {pid})")
-sys.exit(0 if ok else 1)
+try:
+    receipt = {}
+    for line in open(deadline_path):
+        key, value = line.rstrip("\n").split("=", 1)
+        receipt[key] = value
+    derivation_epoch = int(receipt["derivation_epoch"])
+    provider_epoch = int(receipt["provider_termination_epoch"])
+    checked_epoch = int(datetime.datetime.strptime(
+        d["checked_at_utc"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=datetime.timezone.utc).timestamp())
+except Exception as e:
+    print(f"ABORT: cannot tie liveness to deadline_derivation.txt: {e}"); sys.exit(1)
+
+checks = {
+    "liveness schema": d.get("schema") == "probe_liveness/v1",
+    "state": d.get("state") == "exited",
+    "exit_code": d.get("exit_code") == 0,
+    "watched_pid": str(d.get("watched_pid")) == str(pid),
+    "authenticated footer": d.get("footer_state") == "complete",
+    "pid no longer alive": d.get("pid_alive") is False,
+    "no terminal alert": d.get("alert") is False,
+    "deadline schema": receipt.get("schema") == "deadline_derivation/v1",
+    "same-run lower clock bound": checked_epoch >= derivation_epoch,
+    "provider upper clock bound": checked_epoch <= provider_epoch,
+}
+bad = [name for name, ok in checks.items() if not ok]
+if bad:
+    print("ABORT: liveness is not terminal-clean/current: " + ", ".join(bad))
+    sys.exit(1)
+print(f"MONITOR TERMINAL OK (pid={pid}; checked_epoch={checked_epoch}; "
+      f"derivation_epoch={derivation_epoch})")
 PY
+  then
+    MONITOR_TERMINAL_OK=1
+    MONITOR_TERMINAL_PID=$CURRENT_LAUNCHER_PID
+  else
+    unset MONITOR_TERMINAL_OK MONITOR_TERMINAL_PID
+  fi
 fi
 ```
 
 **`MONITOR TERMINAL OK` is required before hashing.** It also proves the terminal record
-belongs to *this* PID, so a `liveness.json` left by an earlier attempt cannot be accepted.
+belongs to *this* PID and was written no earlier than this run's deadline derivation, so a
+matching stale `launcher.pid` + `liveness.json` pair from an earlier pod cannot be accepted.
+The shell variables set on success mechanically gate the next block; opening a new shell
+requires re-running this validation rather than carrying the token by memory.
 
 ```bash
-if ! cd /workspace/persist/study2; then
+CURRENT_LAUNCHER_PID=$(cat /workspace/persist/study2/launcher.pid 2>/dev/null || true)
+if [[ "${MONITOR_TERMINAL_OK:-}" != 1 \
+      || ! "${MONITOR_TERMINAL_PID:-}" =~ ^[0-9]+$ \
+      || "$MONITOR_TERMINAL_PID" != "$CURRENT_LAUNCHER_PID" ]]; then
+  echo "ABORT: terminal monitor validation is absent or no longer matches launcher.pid"
+elif ! cd /workspace/persist/study2; then
   echo "ABORT: evidence root missing — not hashing whatever directory this shell is in"
 else
 REQUIRED=(
@@ -902,15 +1017,29 @@ else
             04_termination_confirmed 05_billing_stopped 07_elapsed_derived"
   BAD=(); N=0; SETTLED=no
   TMP=$(mktemp ./cost_evidence_sha256.XXXXXX) || BAD+=("could not create temp file")
+  shopt -s nullglob
   for want in $REQUIRED; do
-    found=no
-    for f in "$want"*; do [[ -f "$f" ]] && found=yes; done
-    [[ "$found" == yes ]] || BAD+=("required evidence missing: $want*")
+    matches=( "$want"* )
+    if [[ "${#matches[@]}" -ne 1 ]]; then
+      BAD+=("required evidence must have exactly one match: $want* (found ${#matches[@]})")
+    elif [[ ! -f "${matches[0]}" || ! -s "${matches[0]}" ]]; then
+      BAD+=("required evidence is non-regular or empty: ${matches[0]}")
+    fi
   done
+  settled_matches=( 06_settled_charge* )
+  if [[ "${#settled_matches[@]}" -eq 1 \
+        && -f "${settled_matches[0]}" && -s "${settled_matches[0]}" ]]; then
+    SETTLED=yes
+  elif [[ "${#settled_matches[@]}" -gt 0 ]]; then
+    BAD+=("settled charge must have exactly one non-empty regular file when present")
+  fi
   for f in *; do
     [[ -f "$f" ]] || continue
     case "$f" in cost_evidence_sha256.*) continue ;; esac   # never hash itself
-    case "$f" in 06_settled_charge*) SETTLED=yes ;; esac
+    if [[ ! -s "$f" ]]; then
+      BAD+=("empty evidence file: $f")
+      continue
+    fi
     shasum -a 256 "$f" >> "$TMP" || BAD+=("shasum failed (exit $?): $f")
     N=$((N+1))
   done
@@ -932,10 +1061,11 @@ SH
 **A count is not a checklist.** The previous version accepted any one file as evidence, so a
 folder holding only `07_elapsed_derived.txt` — the one row that is *not* provider proof —
 printed a clean manifest. Each of `01`–`05` and `07` must now be present by name before the
-token appears. `06_settled_charge` stays optional **only** while every cost statement remains
-explicitly unsettled, and the token says which of those two worlds you are in rather than
-leaving it to memory. Re-running after the charge lands re-hashes and flips `PENDING` to
-`PRESENT`.
+token appears, with **exactly one non-empty regular file per slot**; zero-byte placeholders
+and conflicting duplicate captures refuse. `06_settled_charge` stays optional **only** while
+every cost statement remains explicitly unsettled; when present it has the same exactly-one,
+non-empty rule. The token says which of those two worlds you are in rather than leaving it to
+memory. Re-running after the charge lands re-hashes and flips `PENDING` to `PRESENT`.
 
 **Capture timing is not a detail.** `01_rate_at_creation.png` and `03_auto_terminate_set.png`
 belong to §1 **before Deploy** — after termination those views are gone, and a rate you can
@@ -961,7 +1091,7 @@ word did not appear, treat it as failure even when nothing looked wrong:
 
 | Step | Must print | Absent ⇒ |
 |---|---|---|
-| §1 | `01`–`03` captured **before Deploy** | the rate and auto-terminate can never be evidenced again |
+| §1 | `PRE-DEPLOY EVIDENCE READY` **before Deploy** | the rate and auto-terminate can never be evidenced again |
 | §3 | `SOURCE PINNED` | do not run bootstrap — the source is not pinned to the reviewed SHA |
 | §5 | `BOOTSTRAP COMPLETE` | stop, post the output, terminate |
 | §6 | `round-trip OK` **and** `DEADLINES OK` | no deadlines exist; §7 will refuse |
