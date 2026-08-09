@@ -91,9 +91,9 @@ Then capture into it, from the console, **before deploying**:
 
 | File | What it must show |
 |---|---|
-| `01_rate_at_creation.png` | the selected card and its **$/hr as displayed**, on the creation screen |
-| `02_image_selected.png` | the exact image tag being deployed |
-| `03_auto_terminate_set.png` | the auto-terminate setting **and** the resulting termination time |
+| `01_rate_at_creation.png` (or `.jpg`) | the selected card and its **$/hr as displayed**, on the creation screen |
+| `02_image_selected.png` (or `.jpg`) | the exact image tag being deployed |
+| `03_auto_terminate_set.png` (or `.jpg`) | the auto-terminate setting **and** the resulting termination time |
 
 These three are the only provider proof of what this run was priced at and bounded by. The
 in-pod `auto_terminate_attestation.txt` receipt is **operator-entered** — it records what you
@@ -108,8 +108,14 @@ if ! cd "$DEST"; then
   echo "ABORT: $DEST does not exist — do not deploy"
 else
   BAD=()
-  for f in 01_rate_at_creation.png 02_image_selected.png 03_auto_terminate_set.png; do
-    [[ -f "$f" && -s "$f" ]] || BAD+=("missing, non-regular, or empty: $f")
+  shopt -s nullglob
+  for want in 01_rate_at_creation 02_image_selected 03_auto_terminate_set; do
+    matches=( "$want"* )
+    if [[ "${#matches[@]}" -ne 1 ]]; then
+      BAD+=("must have exactly one capture: $want* (found ${#matches[@]})")
+    elif [[ ! -f "${matches[0]}" || ! -s "${matches[0]}" ]]; then
+      BAD+=("capture is non-regular or empty: ${matches[0]}")
+    fi
   done
   if [[ "${#BAD[@]}" -eq 0 ]]; then
     echo "PRE-DEPLOY EVIDENCE READY (01-03 present and non-empty)"
@@ -402,10 +408,14 @@ precondition is missing, the `nohup` line is never reached, because it lives ins
 `else`. Nothing is deleted and nothing is spent on a failed check.
 
 ```bash
-cd /workspace/llama-tools
-unset LAUNCHER_BG_PID
+unset LAUNCHER_BG_PID CANDIDATE_PID
 
-if [[ -z "${HF_TOKEN:-}" ]]; then
+if ! cd /workspace/llama-tools; then
+  echo "ABORT: /workspace/llama-tools is unavailable. Not launching from another directory."
+elif [[ ! -f scripts/launch_probe.sh || ! -s scripts/launch_probe.sh \
+        || ! -r scripts/launch_probe.sh ]]; then
+  echo "ABORT: scripts/launch_probe.sh is not a readable, non-empty regular file."
+elif [[ -z "${HF_TOKEN:-}" ]]; then
   echo "ABORT: HF_TOKEN not set in this shell — redo §4. Not launching."
 elif [[ -z "${PROVIDER_EPOCH:-}" || -z "${DEADLINE_EPOCH:-}" ]]; then
   echo "ABORT: §6 did not complete — no verified deadlines. Not launching."
@@ -419,22 +429,49 @@ elif [[ $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) -lt 45 ]]; then
   unset PROVIDER_EPOCH DEADLINE_EPOCH
 else
   # Only now, past every guard: clear any pid from an earlier attempt and launch.
-  rm -f /workspace/persist/study2/launcher.pid
-  nohup bash scripts/launch_probe.sh \
-    --commit 08be5d3b0c1293ac229fe7b04e2931f14bd149d0 \
-    --provider-deadline-epoch "$PROVIDER_EPOCH" \
-    --deadline-epoch "$DEADLINE_EPOCH" \
-    --out-root /workspace/persist/study2 \
-    > /workspace/persist/study2/probe.log 2>&1 &
-  LAUNCHER_BG_PID=$!
-  echo "LAUNCHED; shell-visible pid $LAUNCHER_BG_PID"
+  if ! rm -f /workspace/persist/study2/launcher.pid; then
+    echo "ABORT: could not clear the prior launcher.pid. Not launching."
+  else
+    nohup bash scripts/launch_probe.sh \
+      --commit 08be5d3b0c1293ac229fe7b04e2931f14bd149d0 \
+      --provider-deadline-epoch "$PROVIDER_EPOCH" \
+      --deadline-epoch "$DEADLINE_EPOCH" \
+      --out-root /workspace/persist/study2 \
+      > /workspace/persist/study2/probe.log 2>&1 &
+    CANDIDATE_PID=$!
+    # A background launch returns a pid even when bash exits immediately. Give
+    # fast failures time to settle, then make process liveness part of the token.
+    sleep 1
+    if kill -0 "$CANDIDATE_PID" 2>/dev/null; then
+      LAUNCHER_BG_PID=$CANDIDATE_PID
+      echo "LAUNCHED; shell-visible pid $LAUNCHER_BG_PID (alive after 1s settle)"
+    else
+      launcher_st=0
+      wait "$CANDIDATE_PID" || launcher_st=$?
+      unset LAUNCHER_BG_PID CANDIDATE_PID
+      echo "ABORT: launcher exited during the 1s settle (exit $launcher_st)."
+      if [[ -r /workspace/persist/study2/probe.log \
+            && -s /workspace/persist/study2/probe.log ]]; then
+        echo "       probe.log begins:"
+        sed -n '1,20p' /workspace/persist/study2/probe.log \
+          || echo "ABORT: probe.log became unreadable while collecting the diagnosis"
+      else
+        echo "ABORT: probe.log is absent, unreadable, or empty — no startup diagnosis"
+      fi
+      echo "       Not reporting LAUNCHED."
+    fi
+  fi
 fi
 ```
 
 **Proceed to §8 only on `LAUNCHED`.** `LAUNCHER_BG_PID` is unset first, so if the launch did
-not happen there is no pid for §8 to compare against and §8 stops too. The last two guards
-duplicate checks the launcher already makes internally — deliberately, so the failure costs
-a shell round-trip instead of a process start on a billing pod.
+not happen — including a script that exists but exits immediately — there is no pid for §8
+to compare against and §8 stops too. The path/readability check prevents the simplest false
+start; the one-second liveness check is what prevents a present-but-fast-failing script from
+printing the positive token. **`LAUNCHED` means only that the launcher is running after that
+startup settle; it does not mean the run is healthy.** §8 is the continuing-health control.
+The deadline guards duplicate checks the launcher already makes internally — deliberately,
+so the failure costs a shell round-trip instead of a process start on a billing pod.
 
 > **Why not `tmux new-session -d -s run …`.** §2 already started the tmux **server**. A
 > session created later does not inherit this pane's exports — it inherits the *server's*
@@ -934,9 +971,12 @@ GOT=$(grep -c . "$TMP")
 [[ "$GOT" -eq "$WANT" ]] || BAD+=("hashed $GOT entries, expected $WANT")
 
 if [[ "${#BAD[@]}" -eq 0 ]]; then
-  mv -f "$TMP" artifact_sha256.txt \
-    && echo "ARTIFACTS COMPLETE ($GOT entries)" \
-    || echo "ABORT: could not install artifact_sha256.txt"
+  if mv -f "$TMP" artifact_sha256.txt; then
+    echo "ARTIFACTS COMPLETE ($GOT entries)"
+  else
+    rm -f "$TMP"
+    echo "ABORT: could not install artifact_sha256.txt"
+  fi
 else
   rm -f "$TMP"; printf 'ABORT: %s\n' "${BAD[@]}"
 fi
