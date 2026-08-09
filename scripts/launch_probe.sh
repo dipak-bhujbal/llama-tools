@@ -655,7 +655,8 @@ fi
 # not exist. So in dry-run the commit's tree is read directly and read-only via
 # `git cat-file`, and when the commit is not in this repo at all the output says
 # that instead of claiming anything.
-entrypoint_check_mode=""   # set by assert_entrypoint, reported in the summary
+entrypoint_check_mode=""        # set by assert_entrypoint, reported in the summary
+entrypoint_check_diagnostic=""  # git's own words when it could not resolve the commit
 
 assert_entrypoint() {
   local rel="$1" purpose="$2"
@@ -675,14 +676,24 @@ assert_entrypoint() {
 
   # Dry run. Is the commit even present locally to be inspected?
   #
-  # git's stderr is CAPTURED, never discarded: `2>&1` inside a command
-  # substitution folds it into a variable this function can print, which is the
-  # opposite of `2>/dev/null`. A missing object is an expected answer here and
-  # needs no diagnostic; anything else does, and would otherwise vanish.
+  # git's stderr is CAPTURED and then ACTUALLY PRINTED. The previous version
+  # captured it and threw it away, then mapped every non-zero result onto the
+  # single sentence "commit is not in this repository" — so a git that failed
+  # for any other reason (a broken object database, an unreadable repo, an I/O
+  # error) was reported as a clean, ordinary absence, and the one line
+  # explaining what really happened was discarded. Capturing a diagnostic and
+  # not showing it is the same defect as suppressing it, wearing a disguise.
+  #
+  # The label does not overclaim, because it CANNOT be resolved from the exit
+  # code: `git cat-file -e` returns 128 both for a commit that does not exist
+  # and for a repository it could not read. So this says only what is true —
+  # the commit could not be resolved — and hands the operator git's own words
+  # to tell the two apart.
   local err="" status=0
   err="$(git -C "${REPO_ROOT}" cat-file -e "${commit}^{commit}" 2>&1)" || status=$?
   if [[ "${status}" -ne 0 ]]; then
-    entrypoint_check_mode="NOT CHECKED — commit ${commit} is not in this repository"
+    entrypoint_check_mode="NOT VERIFIED — git could not resolve commit ${commit} (exit ${status})"
+    entrypoint_check_diagnostic="${err}"
     return 0
   fi
 
@@ -741,10 +752,18 @@ assert_entrypoint "eval/bfcl_simple.py"       "paid generation"
 # The summary names what was actually inspected. It used to say "present at
 # ${commit}" unconditionally, which in a dry run was a claim about a commit that
 # had never been read — and was printed even for a SHA that does not exist.
-if [[ "${entrypoint_check_mode}" == NOT\ CHECKED* ]]; then
+if [[ "${entrypoint_check_mode}" == NOT\ VERIFIED* ]]; then
   echo "WARNING: entry points ${entrypoint_check_mode}." >&2
-  echo "         The plan below is printed unverified against that SHA. A real" >&2
-  echo "         run cannot reach this state: it checks out the commit first." >&2
+  # git's own message, printed rather than swallowed. It is what distinguishes
+  # "that SHA does not exist here" from "this repository is broken", which the
+  # exit code cannot: cat-file returns 128 for both.
+  if [[ -n "${entrypoint_check_diagnostic}" ]]; then
+    echo "         git said: ${entrypoint_check_diagnostic}" >&2
+  fi
+  echo "         The plan below is printed UNVERIFIED against that SHA. If the" >&2
+  echo "         message above is anything other than an unknown object, treat" >&2
+  echo "         this repository as suspect before trusting any dry run from it." >&2
+  echo "         A real run cannot reach this state: it checks out first." >&2
 else
   echo "OK: all three entry points present in ${entrypoint_check_mode}."
 fi

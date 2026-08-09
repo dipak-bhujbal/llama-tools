@@ -120,9 +120,17 @@ run_classified() {
 # assert_file exists so "the step ran without erroring" is never mistaken for
 # "the step produced its artifact". That distinction is not hypothetical here:
 # the retained mining-pilot artifact directory has no env_fingerprint.json,
-# pip_freeze.txt or gpu.txt, so the pilot's library versions are not traceably
-# measurable today. Nothing failed loudly at the time; the files just were not
-# there, and nothing asserted that they should be.
+# pip_freeze.txt or gpu.txt. Nothing failed loudly at the time; the files just
+# were not there, and nothing asserted that they should be.
+#
+# What that actually cost, stated precisely — an earlier version of this comment
+# said the pilot's versions were "not traceably measurable today", which is
+# false. They were recoverable from owner-pasted console output in the chat
+# archive, and the comparison against the probe has since been completed:
+# transformers, peft and accelerate all match, and torch does not (2.8.0 against
+# the probe's 2.9.1). The cost of the missing receipts is that the evidence
+# lives in a chat log instead of beside the run it describes — recoverable by
+# someone who knows to look, and lost to everyone else.
 assert_file() {
   local path="$1" what="$2" code="$3"
   [[ -f "${path}" ]] || die "${what} was not created at ${path}" "${code}"
@@ -211,20 +219,31 @@ echo "STEP 3 — bundle transfer receipt"
 if [[ "${dry_run}" -eq 0 ]]; then
   [[ -f "${bundle}" ]]          || die "bundle not found: ${bundle}" "${EXIT_BUNDLE}"
   [[ -f "${bundle_sha_file}" ]] || die "sidecar not found: ${bundle_sha_file}" "${EXIT_BUNDLE}"
-  # The WHOLE normalized receipt, not its first 64 characters.
+  # The WHOLE receipt, with only its OUTER whitespace trimmed.
   #
-  # This previously read `tr -d '[:space:]' < ... | cut -c1-64`, which made the
-  # shape check that follows unable to fail on the case it most needed to catch:
-  # `cut` discarded everything after character 64, so a sidecar holding a valid
-  # digest followed by anything at all — a second digest, a filename, a stray
-  # paste — was silently truncated to the valid prefix and accepted. The check
-  # was reporting on `cut`'s output, not on the file, so it certified a receipt
-  # it had never actually looked at. A receipt that is not exactly one digest is
-  # a receipt whose provenance is unknown, and the bundle it vouches for cannot
-  # be trusted on billed time.
-  expected_sha="$(tr -d '[:space:]' < "${bundle_sha_file}")"
+  # Two rounds of this check were wrong in the same direction — each normalised
+  # the input until the assertion could no longer fail on the case that mattered:
+  #
+  #   `tr -d '[:space:]' | cut -c1-64` — `cut` threw away everything past
+  #   character 64, so a digest followed by anything at all was truncated to the
+  #   valid prefix and accepted. The regex was validating cut's output, not the
+  #   file.
+  #
+  #   `tr -d '[:space:]'` alone — still strips INTERNAL whitespace, so a digest
+  #   split across two 32-character lines was reassembled into a valid one. The
+  #   bootstrap printed "bundle sha256 verified" and advanced to the clone.
+  #
+  # A digest that arrives in two pieces is not a digest that arrived; whatever
+  # produced or transported it did something nobody intended, and that is the
+  # signal. Only the outer whitespace is trimmed now — `$(< file)` drops trailing
+  # newlines, and the parameter expansions drop leading/trailing spaces and tabs.
+  # Any whitespace left inside the string fails the character-class check,
+  # because a newline is not in [0-9a-f].
+  expected_sha="$(< "${bundle_sha_file}")"
+  expected_sha="${expected_sha#"${expected_sha%%[![:space:]]*}"}"   # leading
+  expected_sha="${expected_sha%"${expected_sha##*[![:space:]]}"}"   # trailing
   [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]] \
-    || die "sidecar ${bundle_sha_file} must contain exactly one 64-char lowercase hex digest and nothing else (read ${#expected_sha} chars: '${expected_sha}')" \
+    || die "sidecar ${bundle_sha_file} must contain exactly one 64-char lowercase hex digest and nothing else — no second digest, no filename, no line break inside it (read ${#expected_sha} chars: '${expected_sha}')" \
            "${EXIT_BUNDLE}"
   # `command -v` writes its result to stdout and nothing to stderr, so the
   # discarded stream here never carried a diagnostic. Dropping the `2>&1` costs
@@ -415,10 +434,13 @@ PY
   [[ "${env_preflight_status}" -eq 0 ]] \
     || die "environment preflight failed (exit ${env_preflight_status}): version tuple, imports, or CUDA availability — see the traceback above" \
            "${EXIT_ENV}"
-  # The fingerprint is the artifact that makes this run comparable to any other.
-  # Asserting it landed is the whole point: an absent fingerprint is precisely
-  # why the mining pilot's library versions cannot be compared to the probe's
-  # today, and that gap was silent at the time it was created.
+  # The fingerprint is the artifact that makes this run comparable to any other,
+  # WITHOUT a later reader having to go excavating. The mining pilot is the
+  # counterexample: its fingerprint was never written, and the versions had to be
+  # reconstructed from console output pasted into chat months later. The
+  # comparison was possible; it just depended on someone remembering where to
+  # look. Asserting the file landed is what makes the next run's provenance
+  # self-contained, and that gap was silent at the time it was created.
   assert_file "${out_root}/env_fingerprint.json" "environment fingerprint" "${EXIT_ENV}"
 else
   announce "python -c 'assert exact version tuple, imports, torch.cuda.is_available()'"

@@ -311,6 +311,43 @@ log_age_seconds() {
   echo $(( now - mtime ))
 }
 
+# ---------------------------------------------------------------------------
+# JSON string escaping.
+#
+# Every dynamic string in the status file used to be interpolated raw with
+# `printf '"%s"'`. A log path containing a backslash — `/tmp/a\qb` — produced
+# `Invalid escape` and made the whole artifact unparseable: `jq empty` exited 5
+# while the monitor itself exited 72 believing it had written a clean record.
+# The status file is the durable output of a monitor watching a paid run, so it
+# has to survive exactly the inputs that show up when things are going wrong:
+# odd paths, quoted messages, and multi-line diagnostics from a failed scan.
+#
+# One prior version "handled" this by replacing `"` with `'` in a single field,
+# which mangles the data and still leaves backslashes and newlines broken.
+json_escape() {
+  local s="$1" out="" i c
+  s="${s//\\/\\\\}"      # backslash FIRST, or it doubles the escapes added below
+  s="${s//\"/\\\"}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  # Any remaining C0 control character has no short form and must be \u00XX,
+  # or the artifact is invalid JSON for a reason nobody will guess.
+  if [[ "${s}" == *[$'\x01'-$'\x1f']* ]]; then
+    for (( i=0; i<${#s}; i++ )); do
+      c="${s:i:1}"
+      if [[ "${c}" == [$'\x01'-$'\x1f'] ]]; then
+        printf -v c '\\u%04x' "'${c}"
+      fi
+      out+="${c}"
+    done
+    s="${out}"
+  fi
+  printf '%s' "${s}"
+}
+
 # Atomic write: a monitor that is itself killed mid-write must not leave a
 # half-parsed status file behind, because the next reader would draw a
 # conclusion from a truncated record.
@@ -323,7 +360,7 @@ write_status() {
     printf '{\n'
     printf '  "schema": "probe_liveness/v1",\n'
     printf '  "checked_at_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '  "state": "%s",\n' "${state}"
+    printf '  "state": "%s",\n' "$(json_escape "${state}")"
     if [[ -n "${exit_code}" ]]; then
       printf '  "exit_code": %s,\n' "${exit_code}"
     else
@@ -333,13 +370,13 @@ write_status() {
     printf '  "watched_pid": %s,\n' "${watch_pid:-null}"
     printf '  "pid_alive": %s,\n' "$(pid_alive && echo true || echo false)"
     if [[ -n "${tmux_session}" ]]; then
-      printf '  "tmux_session": "%s",\n' "${tmux_session}"
+      printf '  "tmux_session": "%s",\n' "$(json_escape "${tmux_session}")"
       printf '  "tmux_alive": %s,\n' "$(tmux_alive && echo true || echo false)"
     else
       printf '  "tmux_session": null,\n'
       printf '  "tmux_alive": null,\n'
     fi
-    printf '  "footer_state": "%s",\n' "${footer_state}"
+    printf '  "footer_state": "%s",\n' "$(json_escape "${footer_state}")"
     # null, not 0, when the scan did not complete. A reader cannot distinguish
     # "scanned, found nothing" from "never scanned" if both render as 0, and
     # only one of those is reassuring.
@@ -348,10 +385,10 @@ write_status() {
     else
       printf '  "error_markers_seen": null,\n'
     fi
-    printf '  "error_marker_scan": "%s",\n' "${marker_scan}"
-    printf '  "error_marker_scan_detail": "%s",\n' "${marker_scan_detail//\"/\'}"
-    printf '  "error_marker_names": "%s",\n' "${marker_names}"
-    printf '  "log_file": "%s",\n' "${log_file}"
+    printf '  "error_marker_scan": "%s",\n' "$(json_escape "${marker_scan}")"
+    printf '  "error_marker_scan_detail": "%s",\n' "$(json_escape "${marker_scan_detail}")"
+    printf '  "error_marker_names": "%s",\n' "$(json_escape "${marker_names}")"
+    printf '  "log_file": "%s",\n' "$(json_escape "${log_file}")"
     # Informational only. This field must never drive an alert: see the header.
     if [[ -n "${age}" ]]; then
       printf '  "log_age_seconds": %s,\n' "${age}"
@@ -359,7 +396,7 @@ write_status() {
       printf '  "log_age_seconds": null,\n'
     fi
     printf '  "log_age_is_not_an_alert_signal": true,\n'
-    printf '  "detail": "%s"\n' "${detail}"
+    printf '  "detail": "%s"\n' "$(json_escape "${detail}")"
     printf '}\n'
   } > "${tmp}"
   mv -f "${tmp}" "${status_file}"

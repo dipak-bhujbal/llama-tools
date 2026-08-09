@@ -17,9 +17,11 @@ Two concrete instances motivate the rules, so none of this is hypothetical:
     **Correction (this file previously said the pilot's libraries therefore
     "cannot be compared against the failed probe's today" — that is false.)**
     The versions were recorded in owner-pasted console output in the chat
-    archive, and the comparison has been made: transformers and peft match, GPU
-    class matches, and **torch does not — 2.8.0 on the pilot against 2.9.1 on
-    the probe.** Equality is disproven, not unmeasurable. What the missing
+    archive, and the comparison has been made: transformers, peft and
+    accelerate all match (the last confirmed from the probe's retained
+    `env_fingerprint.json`), GPU class matches, and **torch does not — 2.8.0 on
+    the pilot against 2.9.1 on the probe.** Torch is the only library difference
+    of the four. Equality is disproven, not unmeasurable. What the missing
     receipts actually cost is that the evidence lives in a chat log instead of
     alongside the run, which is what the assertions below prevent recurring.
 
@@ -43,6 +45,7 @@ No line numbers appear in this file. The previous version cited `set +e` at
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -200,9 +203,16 @@ def test_dry_run_does_not_claim_a_sha_it_never_read(tmp_path: Path) -> None:
     `OK: all three entry points present at 000…000`."""
     result = _dry_run("0" * 40, tmp_path)
     out = result.stdout + result.stderr
-    assert "NOT CHECKED" in out, out
-    assert "is not in this repository" in out, out
+    assert "NOT VERIFIED" in out, out
     assert "entry points present at" not in out, out
+    # git's own words are PRINTED, not merely captured. The previous version
+    # captured stderr into a variable, threw it away, and mapped every non-zero
+    # result onto "commit is not in this repository" — so a broken object
+    # database read as an ordinary absence. The label also no longer asserts
+    # which of the two it was, because `cat-file -e` returns 128 for both.
+    assert "git said:" in out, out
+    assert "Not a valid object name" in out, out
+    assert "is not in this repository" not in out, "label overclaims the cause"
     assert result.returncode == 0, out   # a dry run on an absent SHA still prints its plan
 
 
@@ -390,8 +400,139 @@ def test_a_sidecar_with_a_valid_digest_plus_garbage_is_rejected(tmp_path: Path) 
         (digest[:-1], "truncated"),
         ("", "empty"),
         (digest.upper(), "uppercase"),
+        # Internal whitespace. `tr -d '[:space:]'` deleted it and reassembled a
+        # valid digest out of pieces, so the bootstrap printed "bundle sha256
+        # verified" and advanced to the clone. A digest that arrives in two
+        # pieces is not a digest that arrived: something in the pipeline that
+        # produced or transported it did what nobody intended.
+        (f"{digest[:32]}\n{digest[32:]}", "split across two lines"),
+        (f"{digest[:32]} {digest[32:]}", "split by a space"),
+        (f"{digest[:20]}\t{digest[20:]}", "split by a tab"),
+        # Outer whitespace, by contrast, is normal and must still be accepted;
+        # covered by the leading/trailing case below.
     ]:
         result = run(bad)
         out = result.stdout + result.stderr
         assert result.returncode == 66, f"{label}: exit {result.returncode}\n{out}"
         assert "must contain exactly one 64-char" in out, f"{label}:\n{out}"
+
+
+def test_a_sidecar_with_only_outer_whitespace_is_accepted(tmp_path: Path) -> None:
+    """The split-digest fix must not overshoot: a trailing newline is what every
+    normal tool writes, and leading indentation is harmless. Rejecting those
+    would make the check correct and unusable, which is how strict checks get
+    reverted."""
+    bundle = tmp_path / "b.bundle"
+    bundle.write_bytes(b"contents")
+    digest = subprocess.run(["shasum", "-a", "256", str(bundle)],
+                            capture_output=True, text=True, check=True).stdout.split()[0]
+    side = tmp_path / "b.sha256"
+    work = tmp_path / "work"
+    work.mkdir()
+    for text, label in [(digest + "\n", "trailing newline"),
+                        ("  " + digest + "  \n", "leading and trailing spaces"),
+                        (digest, "no trailing newline at all")]:
+        side.write_text(text, encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(BOOTSTRAP), "--bundle", str(bundle),
+             "--bundle-sha256-file", str(side), "--commit", "0" * 40,
+             "--out-root", str(tmp_path / "out"),
+             "--auto-terminate-set", "2026-08-09T23:00:00Z@RATE"],
+            cwd=str(work), capture_output=True, text=True, timeout=60,
+            env={**os.environ, "RUNPOD_IMAGE_NAME": "test/image:1"},
+        )
+        out = result.stdout + result.stderr
+        assert "must contain exactly one 64-char" not in out, f"{label} was rejected:\n{out}"
+        assert "bundle sha256 verified" in out, f"{label}:\n{out}"
+
+
+# ---------------------------------------------------------------------------
+# The status artifact must stay parseable exactly when things are going wrong.
+# ---------------------------------------------------------------------------
+
+HOSTILE_NAMES = [
+    ("backslash", r"a\qb.log"),          # codex's reproduction: jq -> Invalid escape
+    ("quote", 'q"uote.log'),
+    ("double-backslash", r"back\\slash.log"),
+    ("tab", "tab\ted.log"),
+    ("newline", "line\nbreak.log"),
+]
+
+
+@pytest.mark.parametrize("label,name", HOSTILE_NAMES, ids=[n for n, _ in HOSTILE_NAMES])
+def test_status_file_is_valid_json_for_hostile_paths(tmp_path: Path, label: str, name: str) -> None:
+    """Every dynamic string was interpolated raw. A path with a backslash made
+    the whole artifact unparseable while the monitor exited 72 believing it had
+    written a clean record — a durable output that silently is not one."""
+    status = tmp_path / "status.json"
+    subprocess.run(
+        ["bash", str(LIVENESS), "--log", str(tmp_path / name),
+         "--status-file", str(status), "--pid", "999999", "--once"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert status.exists(), f"{label}: no status file written"
+    parsed = json.loads(status.read_text(encoding="utf-8"))   # raises if invalid
+    assert parsed["log_file"].endswith(name), parsed["log_file"]
+    assert parsed["error_markers_seen"] is None
+    assert parsed["error_marker_scan"] == "unreadable"
+
+
+def test_status_file_survives_a_hostile_scan_detail(tmp_path: Path) -> None:
+    """The detail field carries text this script did not author — git/grep
+    output, paths — which is precisely where quotes and backslashes come from."""
+    weird = tmp_path / 'dir"with\\odd\tchars'
+    weird.mkdir()
+    status = tmp_path / "status.json"
+    subprocess.run(
+        ["bash", str(LIVENESS), "--log", str(weird / "absent.log"),
+         "--status-file", str(status), "--pid", "999999", "--once"],
+        capture_output=True, text=True, timeout=30,
+    )
+    parsed = json.loads(status.read_text(encoding="utf-8"))
+    assert parsed["error_marker_scan_detail"], "detail must say why"
+    assert '"' in parsed["error_marker_scan_detail"] or "\\" in parsed["error_marker_scan_detail"]
+
+
+def test_a_git_failure_that_is_not_a_missing_object_is_reported_as_such(tmp_path: Path) -> None:
+    """codex's control: a `git` that fails for any other reason.
+
+    The previous version discarded git's stderr and reported every non-zero exit
+    as "commit is not in this repository", so an unreadable object database
+    presented as an ordinary absent SHA — a broken repo indistinguishable from a
+    typo'd commit, with the one line that explained it thrown away.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    # Fails only on cat-file, so the launcher still reaches the check normally.
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        'for a in "$@"; do\n'
+        '  if [[ "$a" == "cat-file" ]]; then\n'
+        '    echo "fatal: injected object database I/O failure" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
+        "done\n"
+        f'exec {shutil.which("git")} "$@"\n',
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    now = int(time.time())
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--commit", "0" * 40,
+         "--deadline-epoch", str(now + 1800),
+         "--provider-deadline-epoch", str(now + 3600),
+         "--out-root", str(tmp_path / "out"), "--dry-run"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+    out = result.stdout + result.stderr
+    assert "injected object database I/O failure" in out, (
+        "git's diagnostic was captured and then discarded:\n" + out
+    )
+    assert "NOT VERIFIED" in out, out
+    assert "is not in this repository" not in out, (
+        "a non-missing-object failure is still being labelled as an absent commit:\n" + out
+    )
+    assert "treat" in out and "suspect" in out, out
