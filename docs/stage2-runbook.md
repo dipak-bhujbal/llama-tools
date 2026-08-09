@@ -6,7 +6,16 @@ authorization; do not execute until the live console rate is known, both agents 
 resulting estimate, and the owner explicitly approves that estimate.**
 
 Operator: the owner, driving the RunPod web console and a terminal.
-Reviewed commit for this run: **`08be5d3b0c1293ac229fe7b04e2931f14bd149d0`** (on `main`).
+Reviewed commit for this run: **`61b6b19393a0c2cb2f73a44a91967cbe677d9d90`**
+(branch `study2/on-policy-dpo`).
+
+> **⛔ Precondition: that commit must be reachable on `origin` before you create a pod.**
+> §3 clones from `https://github.com/dipak-bhujbal/llama-tools.git` and checks this SHA out.
+> If it has not been pushed, the clone succeeds and the checkout fails — or worse, an older
+> pushed commit satisfies a stale pin and the pod silently runs superseded code. That is not
+> hypothetical: on 2026-08-09 the remote branch still pointed at a commit whose ladder
+> enforced the retired 609-token gate, so a pod would have reproduced that morning's
+> 11-second refusal exactly. **Pushing is an owner action; confirm it before §1.**
 
 Everything below is pasteable. `<ANGLE_BRACKETS>` are the only things you fill in, and
 each one says where the value comes from. If a step's expected evidence does not appear,
@@ -20,10 +29,39 @@ each one says where the value comes from. If a step's expected evidence does not
 |---|---|
 | Card | secure cloud, **A6000 or A100** — your choice, rate permitting |
 | Approved envelope | **up to $4 per pod** (#general msg 2981), covering the initial pod and the step-1 second-node retry |
-| Provider auto-terminate | **70 minutes** from pod creation, set **in the UI at creation** |
-| Launcher deadline | provider deadline **minus 180 s** (= minute 67) |
-| Planning basis | 1.1667 h × the live rate, plus any storage charge the console shows |
-| Rate ceiling | $4 ÷ 1.1667 ≈ **$3.43/hr** compute-only; storage reduces this |
+| Provider auto-terminate | **you choose it at creation**, and §6 derives everything from what you set. See "Sizing the window" below |
+| Launcher deadline | provider deadline **minus the shutdown reserve** (180 s) |
+| Planning basis | (chosen provider hours) × the live rate, plus any storage charge the console shows |
+| Rate ceiling | $4 ÷ (chosen provider hours); storage reduces it |
+
+### Sizing the window — no duration is prescribed here
+
+**Historical receipts, not instructions.** The 2026-08-09 attempt used **70 provider
+minutes / 67 launcher minutes**, and §7 carried a **45-minute** launch floor from
+`probe-20260808/study2/probe_timing.txt` (`launch_floor_seconds=2700`, basis
+`planning_40min_upper_plus_5min_buffer`). Those numbers describe what was set then. They
+are **not** an approved envelope for the next run and must not be pasted forward.
+
+Size the window from what the run actually needs:
+
+```
+provider duration >= bootstrap allowance
+                   + ladder invocation 1
+                   + however long you want to read the result
+                   + ladder invocation 2   (the second invocation reruns the gate)
+                   + generation commands
+                   + shutdown reserve
+```
+
+**Every term except the reserve is unmeasured or your choice.** Bootstrap has never been
+timed. The ladder's `~10 min` was an upper-bound assumption; **invocation 1 measures it for
+the first time**, so budget the second invocation against that number rather than the
+assumption. Generation has a measured `0.2573 s/gen` anchor; the 6× multiplier reaching
+`30.9 min` is an assumption.
+
+A same-pod ladder → review → generation lifecycle under the old assumptions came to roughly
+**69 minutes post-launch before bootstrap** — which is why 70 was not a defensible envelope
+for it. That figure is planning arithmetic, not a measurement, and not a new approval.
 
 ### The wall-clock envelope, separated by what is actually known
 
@@ -69,8 +107,9 @@ That was a different card class from the A6000/A100 above and a *different revie
    environment cannot be named cannot be reproduced.
 3. Container disk **≥ 60 GB** (16 GB weights + venv + headroom). A volume is optional;
    if you attach one, use it as `--out-root` so evidence survives a stop.
-4. **Set auto-terminate to 70 minutes at creation, before deploying.** This is the only
-   bound that survives a SIGKILL. Note the **exact UTC termination timestamp** the console
+4. **Set auto-terminate at creation, before deploying, to the window you sized in §0.**
+   This is the only bound that survives a SIGKILL, and it is the only hard stop in the whole
+   procedure — nothing in this runbook or the launcher will terminate the pod for you. Note the **exact UTC termination timestamp** the console
    shows, and **write it down normalized to RFC 3339 UTC — `YYYY-MM-DDTHH:MM:SSZ`.** If the
    console displays local time, a relative countdown, or omits seconds, do the conversion
    here, on paper, where a mistake costs nothing. §6 rejects anything else and will not hand
@@ -167,7 +206,7 @@ export RUNPOD_IMAGE_NAME='<IMAGE_TAG>'
 export HF_HOME=/root/.cache/huggingface
 mkdir -p "$HF_HOME" /workspace/persist/study2
 
-REV=08be5d3b0c1293ac229fe7b04e2931f14bd149d0
+REV=61b6b19393a0c2cb2f73a44a91967cbe677d9d90
 P=/workspace/persist/study2
 ERRS=()
 try(){ local l="$1"; shift; "$@"; local s=$?; [[ $s -eq 0 ]] || ERRS+=("$l exit $s"); return $s; }
@@ -258,7 +297,7 @@ separate pastes and the gap between them is exactly where a tree can change:
 
 ```bash
 cd /workspace
-REV=08be5d3b0c1293ac229fe7b04e2931f14bd149d0
+REV=61b6b19393a0c2cb2f73a44a91967cbe677d9d90
 H=$(git -C /workspace/src rev-parse HEAD); h_st=$?
 D=$(git -C /workspace/src status --porcelain); d_st=$?
 
@@ -286,7 +325,7 @@ tested. Suppressed stderr plus an empty result is indistinguishable from a clean
 and fell straight through to bootstrap.
 
 **Expected evidence, in order:** `STEP 0` acknowledges the attestation · `STEP 3` prints
-`bundle sha256 verified` · `STEP 4` prints `HEAD asserted: 08be5d3…` · `STEP 6` prints the
+`bundle sha256 verified` · `STEP 4` prints `HEAD asserted: 61b6b19…` · `STEP 6` prints the
 GPU name and CUDA version and `HF access OK` · `STEP 7` prints
 `all 7 environment receipts asserted present and non-empty` · then `BOOTSTRAP COMPLETE`.
 
@@ -311,6 +350,12 @@ below **fails closed** rather than parsing something it does not recognise.
 cd /workspace/llama-tools
 TERMINATE_UTC='<TERMINATE_UTC>'    # e.g. 2026-08-09T04:15:00Z
 RATE='<RATE>'                      # the $/hr the console showed, e.g. 0.79
+# Minimum minutes of work that must remain, or this block refuses to hand the
+# launcher a deadline. YOU set it for the scope you are about to run: a
+# ladder-only invocation needs far less than a full probe. The 2026-08-08
+# receipt recorded 45 (launch_floor_seconds=2700) for a FULL probe; that is a
+# historical value, not a default to paste forward.
+FLOOR_MINUTES='<FLOOR_MINUTES>'    # e.g. 45 for a full probe
 DDR=/workspace/persist/study2/deadline_derivation.txt
 
 unset PROVIDER_EPOCH DEADLINE_EPOCH
@@ -333,9 +378,12 @@ else
     echo "round-trip OK: $ROUND_TRIP"
     echo "provider=$PROVIDER_EPOCH launcher=$DEADLINE_EPOCH now=$NOW_EPOCH"
     echo "minutes of work left: $MINS_LEFT"
-    if [[ "$MINS_LEFT" -lt 45 ]]; then
+    if [[ ! "$FLOOR_MINUTES" =~ ^[0-9]+$ ]]; then
       unset PROVIDER_EPOCH DEADLINE_EPOCH
-      echo "ABORT: only $MINS_LEFT min of work left, need >= 45 — deadlines discarded"
+      echo "ABORT: FLOOR_MINUTES must be a bare integer — got '$FLOOR_MINUTES'"
+    elif [[ "$MINS_LEFT" -lt "$FLOOR_MINUTES" ]]; then
+      unset PROVIDER_EPOCH DEADLINE_EPOCH
+      echo "ABORT: only $MINS_LEFT min of work left, need >= $FLOOR_MINUTES — deadlines discarded"
     else
       NEW_DDR=$(printf '%s\n' \
         "schema=deadline_derivation/v1" \
@@ -344,9 +392,10 @@ else
         "derivation_epoch=$NOW_EPOCH" \
         "launcher_deadline_epoch=$DEADLINE_EPOCH" \
         "shutdown_reserve_seconds=180" \
-        "launch_floor_seconds=2700" \
-        "launch_floor_basis=planning_40min_upper_plus_5min_buffer" \
-        "launch_floor_source=probe-20260808/study2/probe_timing.txt" \
+        "launch_floor_seconds=$(( FLOOR_MINUTES * 60 ))" \
+        "launch_floor_minutes=$FLOOR_MINUTES" \
+        "launch_floor_basis=operator_set_for_this_scope" \
+        "launch_floor_historical_receipt=probe-20260808/study2/probe_timing.txt:launch_floor_seconds=2700" \
         "minutes_left_at_derivation=$MINS_LEFT" \
         "rate_per_hour=$RATE" \
         "rate_source=runpod_console_at_creation")
@@ -375,7 +424,8 @@ where the rate came from. It is written atomically, and if a receipt from anothe
 already present **this refuses rather than overwrites** — the alternative is a run whose
 timing evidence silently belongs to a different pod.
 
-An earlier draft required `probe_timing.txt` here instead. Nothing at `08be5d3` writes that
+An earlier draft required `probe_timing.txt` here instead. Nothing in the Stage-2
+execution path writes that
 file — the launcher only *names* it in an exit listing — so on a fresh pod §10 could never
 complete, and on a reused volume a stale one would have been misattributed to this run.
 
@@ -412,7 +462,19 @@ precondition is missing, the `nohup` line is never reached, because it lives ins
 ```bash
 unset LAUNCHER_BG_PID CANDIDATE_PID
 
-if ! cd /workspace/llama-tools; then
+# Which scope this invocation runs, and where its evidence goes.
+#   SCOPE_FLAG='--stop-after-ladder'  -> gate only; stops before any generation
+#   SCOPE_FLAG=''                     -> gate, then both generation commands
+# The gate ALWAYS runs. --stop-after-ladder chooses how far the run goes AFTER a
+# green gate; no flag skips it, and a second invocation reruns it deliberately —
+# two green ladders bracketing the paid work are a before/after health check on
+# this node, which the 2026-08-08 run never had.
+SCOPE_FLAG='--stop-after-ladder'
+INVOCATION_ID='<INVOCATION_ID>'    # e.g. 01-ladder ; MUST differ per invocation
+
+if [[ -z "$INVOCATION_ID" || "$INVOCATION_ID" == '<INVOCATION_ID>' ]]; then
+  echo "ABORT: set INVOCATION_ID to something distinct for this invocation."
+elif ! cd /workspace/llama-tools; then
   echo "ABORT: /workspace/llama-tools is unavailable. Not launching from another directory."
 elif [[ ! -f scripts/launch_probe.sh || ! -s scripts/launch_probe.sh \
         || ! -r scripts/launch_probe.sh ]]; then
@@ -425,21 +487,30 @@ elif [[ "$DEADLINE_EPOCH" -ge "$PROVIDER_EPOCH" ]]; then
   echo "ABORT: launcher deadline is not strictly earlier than the provider's. Not launching."
 elif [[ "$DEADLINE_EPOCH" -le "$(date -u +%s)" ]]; then
   echo "ABORT: launcher deadline has already passed. Not launching."
-elif [[ $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) -lt 45 ]]; then
+elif [[ $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) -lt "$FLOOR_MINUTES" ]]; then
   echo "ABORT: only $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) min left at launch time,"
-  echo "       floor is 45 (launch_floor_seconds=2700). Deadlines discarded; not launching."
+  echo "       floor is $FLOOR_MINUTES (the value you set in §6). Deadlines discarded; not launching."
   unset PROVIDER_EPOCH DEADLINE_EPOCH
 else
-  # Only now, past every guard: clear any pid from an earlier attempt and launch.
-  if ! rm -f /workspace/persist/study2/launcher.pid; then
-    echo "ABORT: could not clear the prior launcher.pid. Not launching."
+  # Only now, past every guard. Nothing is cleared: this invocation writes into
+  # its OWN directory, and the launcher refuses if that directory already
+  # exists. A second invocation on this pod must pass a new INVOCATION_ID, and
+  # deleting the first one's pid would be deleting the first one's evidence.
+  INVOCATION_DIR="/workspace/persist/study2/invocations/$INVOCATION_ID"
+  if ! mkdir -p "$INVOCATION_DIR"; then
+    echo "ABORT: could not create $INVOCATION_DIR. Not launching."
+  elif [[ -e "$INVOCATION_DIR/probe.log" ]]; then
+    echo "ABORT: $INVOCATION_DIR/probe.log already exists — INVOCATION_ID is in"
+    echo "       use. Choose a new one; do not overwrite an earlier invocation."
   else
     nohup bash scripts/launch_probe.sh \
-      --commit 08be5d3b0c1293ac229fe7b04e2931f14bd149d0 \
+      --commit 61b6b19393a0c2cb2f73a44a91967cbe677d9d90 \
       --provider-deadline-epoch "$PROVIDER_EPOCH" \
       --deadline-epoch "$DEADLINE_EPOCH" \
       --out-root /workspace/persist/study2 \
-      > /workspace/persist/study2/probe.log 2>&1 &
+      --invocation-id "$INVOCATION_ID" \
+      $SCOPE_FLAG \
+      > "$INVOCATION_DIR/probe.log" 2>&1 &
     CANDIDATE_PID=$!
     # A background launch returns a pid even when bash exits immediately. Give
     # fast failures time to settle, then make process liveness part of the token.
@@ -452,9 +523,9 @@ else
       wait "$CANDIDATE_PID" || launcher_st=$?
       unset LAUNCHER_BG_PID CANDIDATE_PID
       echo "ABORT: launcher exited during the 1s settle (exit $launcher_st)."
-      if [[ -r /workspace/persist/study2/probe.log \
-            && -s /workspace/persist/study2/probe.log ]]; then
-        RAW_EXCERPT=$(sed -n '1,20p' /workspace/persist/study2/probe.log); read_st=$?
+      if [[ -r "$INVOCATION_DIR/probe.log" \
+            && -s "$INVOCATION_DIR/probe.log" ]]; then
+        RAW_EXCERPT=$(sed -n '1,20p' "$INVOCATION_DIR/probe.log"); read_st=$?
         if [[ "$read_st" -ne 0 ]]; then
           unset RAW_EXCERPT
           echo "ABORT: could not read the bounded probe.log excerpt (exit $read_st)"
@@ -520,7 +591,7 @@ fixtures → verify → **isolation ladder (the gate)** → verify again → gen
 `multiple` → verify → generation `simple_python`. **The ladder is inside the launcher.**
 If all four rungs pass, the probe proceeds automatically — no further approval, as agreed.
 
-Watch it: `tail -f /workspace/persist/study2/probe.log`.
+Watch it: `tail -f "$INVOCATION_DIR/probe.log"`.
 
 ---
 
@@ -536,26 +607,26 @@ leave a paid launcher running with a monitor that was never there.
 ```bash
 unset LAUNCHER_PID
 for _ in $(seq 1 60); do
-  [[ -s /workspace/persist/study2/launcher.pid ]] && break
+  [[ -s "$INVOCATION_DIR/launcher.pid" ]] && break
   sleep 1
 done
-LAUNCHER_PID=$(cat /workspace/persist/study2/launcher.pid 2>/dev/null || true)
+LAUNCHER_PID=$(cat "$INVOCATION_DIR/launcher.pid" 2>/dev/null || true)
 
 if [[ -z "${LAUNCHER_BG_PID:-}" ]]; then
   echo "ABORT: §7 did not report LAUNCHED — nothing to monitor."
 elif [[ ! "$LAUNCHER_PID" =~ ^[0-9]+$ ]]; then
-  echo "ABORT: no usable launcher.pid after 60s — read probe.log. Monitor not started."
+  echo "ABORT: no usable launcher.pid after 60s — read $INVOCATION_DIR/probe.log."
 elif [[ "$LAUNCHER_PID" != "$LAUNCHER_BG_PID" ]]; then
   echo "ABORT: published pid $LAUNCHER_PID != launched pid $LAUNCHER_BG_PID"
   echo "       stale file or a second launcher. Monitor not started."
 elif ! kill -0 "$LAUNCHER_PID" 2>/dev/null; then
-  echo "ABORT: pid $LAUNCHER_PID is already gone — read probe.log. Monitor not started."
+  echo "ABORT: pid $LAUNCHER_PID is already gone — read $INVOCATION_DIR/probe.log."
 else
   tmux kill-session -t watch 2>/dev/null
   tmux new-session -d -s watch \
     "bash /workspace/llama-tools/scripts/probe_liveness.sh \
-       --log /workspace/persist/study2/probe.log \
-       --status-file /workspace/persist/study2/liveness.json \
+       --log "$INVOCATION_DIR/probe.log" \
+       --status-file "$INVOCATION_DIR/liveness.json" \
        --pid $LAUNCHER_PID --interval 30"
   sleep 3
   if tmux has-session -t watch 2>/dev/null; then
@@ -598,8 +669,26 @@ gate failed; the ladder's own JSON is at
 **Read the launcher's exit code from its own terminal record, not from the shell:**
 
 ```bash
-grep PROBE_EXIT_RECORD /workspace/persist/study2/probe.log
+grep PROBE_EXIT_RECORD "$INVOCATION_DIR/probe.log"
 ```
+
+**Read the `outcome=` field, not just `exit=`.** Both successes exit 0 — that is
+deliberate, because `probe_liveness.sh` derives `footer_state` from the integer alone and a
+non-zero "success" would be classified `failed`, which would make §10 refuse to collect the
+evidence of a run that worked. The outcome names which success it was:
+
+| `outcome=` | what exists | what §10 checks |
+|---|---|---|
+| `ladder_only_green` | the gate ran and passed; **no generations, by design** | ladder JSON, telemetry, `ladder_only_receipt.txt` — **do not look for BFCL files** |
+| `full_probe_complete` | gate plus both categories | everything, including both `generations.jsonl` |
+| `failed` | whatever the run reached | partial evidence; the exit code says where it stopped |
+
+**On `ladder_only_green` the pod is still running, deliberately.** Read the ladder evidence,
+then either start a **second invocation with a new `INVOCATION_ID`** and `SCOPE_FLAG=''`, or
+stop the pod. The launcher refuses the second invocation on its own if the remaining runway
+cannot fit it — nothing here runs a timer, and the provider auto-terminate you set in §1
+remains the only hard stop.
+
 
 That line is written by the launcher's `EXIT` trap and carries `pid=` and `exit=`. **Check
 the `pid=` matches `$LAUNCHER_PID`** — a log appended by two attempts would otherwise let
@@ -636,7 +725,7 @@ import collections, hashlib, json, pathlib, subprocess, sys
 
 ROOT = pathlib.Path("/workspace/persist/study2")
 REPO = pathlib.Path("/workspace/llama-tools")
-REV  = "08be5d3b0c1293ac229fe7b04e2931f14bd149d0"
+REV  = "61b6b19393a0c2cb2f73a44a91967cbe677d9d90"
 PINS = REPO / "eval/manifests/bfcl_v4_study2.json"
 RUNS = {"study2_probe_multiple": "multiple",
         "study2_probe_simple_python": "simple_python"}
@@ -893,13 +982,13 @@ if tmux has-session -t watch 2>/dev/null; then
   echo "       session is being held open by something else (tmux ls; tmux capture-pane"
   echo "       -pt watch). Do not proceed until it is gone."
 else
-  CURRENT_LAUNCHER_PID=$(cat /workspace/persist/study2/launcher.pid 2>/dev/null || true)
+  CURRENT_LAUNCHER_PID=$(cat "$INVOCATION_DIR/launcher.pid" 2>/dev/null || true)
   if [[ ! "$CURRENT_LAUNCHER_PID" =~ ^[0-9]+$ ]]; then
     echo "ABORT: launcher.pid is missing or non-numeric — no current run identity"
   elif [[ -n "${LAUNCHER_PID:-}" && "$LAUNCHER_PID" != "$CURRENT_LAUNCHER_PID" ]]; then
     echo "ABORT: shell launcher pid $LAUNCHER_PID != file pid $CURRENT_LAUNCHER_PID"
   elif python3 - "$CURRENT_LAUNCHER_PID" \
-           /workspace/persist/study2/liveness.json \
+           "$INVOCATION_DIR/liveness.json" \
            /workspace/persist/study2/deadline_derivation.txt <<'PY'
 import datetime, json, sys
 pid, path, deadline_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -955,7 +1044,7 @@ The shell variables set on success mechanically gate the next block; opening a n
 requires re-running this validation rather than carrying the token by memory.
 
 ```bash
-CURRENT_LAUNCHER_PID=$(cat /workspace/persist/study2/launcher.pid 2>/dev/null || true)
+CURRENT_LAUNCHER_PID=$(cat "$INVOCATION_DIR/launcher.pid" 2>/dev/null || true)
 if [[ "${MONITOR_TERMINAL_OK:-}" != 1 \
       || ! "${MONITOR_TERMINAL_PID:-}" =~ ^[0-9]+$ \
       || "$MONITOR_TERMINAL_PID" != "$CURRENT_LAUNCHER_PID" ]]; then
@@ -1029,7 +1118,8 @@ ladder JSON with its pre-run SMI capture and telemetry, and the §3 clone receip
 
 **Two files are deliberately absent, for the same reason.** `storage_mode.txt` and
 `probe_timing.txt` both appear in the 2026-08-08 artifacts, but **no script writes either at
-`08be5d3`** — the launcher only names `probe_timing.txt` in an exit listing. Requiring a file
+the Stage-2 path** — and as of `61b6b19` the launcher no longer names it in its exit
+listing either. Requiring a file
 nothing creates makes `ARTIFACTS COMPLETE` unreachable on a fresh pod, and satisfiable by a
 stale file on a reused volume. §6's `deadline_derivation.txt` replaces it and is written by
 this runbook, for this run.
