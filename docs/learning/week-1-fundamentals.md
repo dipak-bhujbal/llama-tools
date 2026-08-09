@@ -61,10 +61,11 @@ Do these in order. Estimated time: 2-3 hours total including account creation an
 - [ ] **HuggingFace account:** already exist as `centuriandip`. Log in.
 - [ ] **HuggingFace API token:** at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with "write" access. Put it in your shell **without ever typing the value into a command**:
   ```bash
-  read -rsp 'HF token: ' HF_TOKEN; echo
-  export HF_TOKEN
+  read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN
   ```
-  `read -rs` echoes nothing and takes no argument, so the token reaches neither your screen, your shell history, nor any process's argv. You'll use this token in code and via `hf auth login` (interactive — no `--token` flag).
+  `read -rs` echoes nothing and takes no argument, so the token reaches neither your screen, your shell history, nor any process's argv. `&&` rather than `;` so a failed read (Ctrl-D, closed stdin) does not export an empty value and let you carry on believing it worked.
+
+  `hf auth login` is the **alternative** to this, not a next step. It prompts for the token and caches it on disk, which survives new shells — but in `huggingface_hub` 1.24 it returns immediately when `HF_TOKEN` is already visible in the environment, so running it *after* the export does nothing and saves nothing. Pick one.
 
   > **Corrected 2026-08-08.** This step originally read `export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXX` and told you to add that line to `~/.zshrc`. Both are wrong and this journal is public: a literal assignment lands in `~/.zsh_history` in cleartext, and a token in a shell rc file is a long-lived secret at rest in a file that gets backed up, synced, and screen-shared. The original wording is preserved in git history rather than pretended away.
   >
@@ -111,7 +112,7 @@ First run downloads the model (~300 MB) into `~/.cache/huggingface/`. Subsequent
 **Common failures:**
 - **`AttributeError` on tokenizer.apply_chat_template:** transformers version mismatch — reinstall with `.venv/bin/pip install -U transformers`.
 - **Package import error:** you're not in the repo's virtualenv. Either activate it (`source .venv/bin/activate`) or invoke Python via `.venv/bin/python smoke.py`.
-- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env`, re-set it with `read -rsp 'HF token: ' HF_TOKEN; echo` then `export HF_TOKEN`, and re-run `hf auth login` (interactive, no `--token`).
+- **Any HuggingFace 401 error:** your `HF_TOKEN` isn't set — check `.env` and re-set it with `read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN`. (Or, in a shell where it is *not* already exported, `hf auth login` to prompt and cache it. Never `--token`.)
 
 ---
 

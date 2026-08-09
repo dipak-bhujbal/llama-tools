@@ -233,23 +233,65 @@ scan_footer() {
 # Error markers seen anywhere in the log, written to a sidecar rather than
 # embedded in JSON -- arbitrary log text through a hand-rolled JSON escaper is
 # a bug waiting to happen, and a truncated status file is worse than a verbose one.
+# A SCAN THAT DID NOT RUN IS NOT A SCAN THAT FOUND NOTHING.
+#
+# Every grep here used to carry `2>/dev/null`, and grep's three exit codes were
+# collapsed into two: 0 meant found, and *everything else* meant not-found. But
+# grep exits 1 for "no match" and >=2 for "I could not read that" — an I/O
+# error, a vanished file, a permissions change mid-run. Under the old code the
+# second case reported `error markers: 0` and `error_markers_seen: 0`, i.e. a
+# clean bill of health issued by a check that never completed. That is the exact
+# shape of the Xid-regex defect fixed in 8659fb0.
+#
+# It could not suppress the DIED HARD alert — that verdict comes from
+# process_alive and footer_state, not from here — so the blast radius is the
+# reporting surface. On a paid run the reporting surface is what a human reads
+# at 2am to decide whether to keep spending, which is not a small thing to lie
+# on. `marker_scan` now carries ok | unreadable | failed, and marker_count is
+# reported as null rather than 0 whenever the scan did not actually complete.
 scan_error_markers() {
   marker_count=0
   marker_names=""
-  [[ -r "${log_file}" ]] || return 0
-  local marker
+  marker_scan="ok"
+  marker_scan_detail=""
+
+  if [[ ! -r "${log_file}" ]]; then
+    marker_scan="unreadable"
+    marker_scan_detail="log file is absent or not readable: ${log_file}"
+    return 0
+  fi
+
+  local marker status err
   for marker in "${ERROR_MARKERS[@]}"; do
-    if grep -qF "${marker}" "${log_file}" 2>/dev/null; then
-      marker_count=$(( marker_count + 1 ))
-      marker_names="${marker_names:+${marker_names}, }${marker}"
-    fi
+    status=0
+    # stderr is CAPTURED, not discarded, so a real failure can be reported
+    # rather than mistaken for "no match".
+    err="$(grep -qF -e "${marker}" "${log_file}" 2>&1)" || status=$?
+    case "${status}" in
+      0)
+        marker_count=$(( marker_count + 1 ))
+        marker_names="${marker_names:+${marker_names}, }${marker}"
+        ;;
+      1)
+        : # genuinely absent from the log. Not an error, and must never become one.
+        ;;
+      *)
+        marker_scan="failed"
+        marker_scan_detail="grep exited ${status} scanning for '${marker}': ${err}"
+        return 0
+        ;;
+    esac
   done
+
   if [[ "${marker_count}" -gt 0 ]]; then
-    grep -nF -e "${ERROR_MARKERS[0]}" "${log_file}" 2>/dev/null | tail -n 40 \
-      > "${status_file}.errors.txt" || true
-    for marker in "${ERROR_MARKERS[@]:1}"; do
-      grep -nF -e "${marker}" "${log_file}" 2>/dev/null | tail -n 40 \
-        >> "${status_file}.errors.txt" || true
+    # Context extraction. `|| true` is retained ONLY here and only because a
+    # non-zero exit is expected: this re-greps markers already known present,
+    # so the pipeline's status reflects `tail`, not discovery. A failure to
+    # write context does not invalidate the counts above.
+    : > "${status_file}.errors.txt"
+    for marker in "${ERROR_MARKERS[@]}"; do
+      grep -nF -e "${marker}" "${log_file}" 2>>"${status_file}.errors.txt" \
+        | tail -n 40 >> "${status_file}.errors.txt" || true
     done
   fi
   return 0
@@ -298,7 +340,16 @@ write_status() {
       printf '  "tmux_alive": null,\n'
     fi
     printf '  "footer_state": "%s",\n' "${footer_state}"
-    printf '  "error_markers_seen": %s,\n' "${marker_count}"
+    # null, not 0, when the scan did not complete. A reader cannot distinguish
+    # "scanned, found nothing" from "never scanned" if both render as 0, and
+    # only one of those is reassuring.
+    if [[ "${marker_scan}" == "ok" ]]; then
+      printf '  "error_markers_seen": %s,\n' "${marker_count}"
+    else
+      printf '  "error_markers_seen": null,\n'
+    fi
+    printf '  "error_marker_scan": "%s",\n' "${marker_scan}"
+    printf '  "error_marker_scan_detail": "%s",\n' "${marker_scan_detail//\"/\'}"
     printf '  "error_marker_names": "%s",\n' "${marker_names}"
     printf '  "log_file": "%s",\n' "${log_file}"
     # Informational only. This field must never drive an alert: see the header.
@@ -327,7 +378,12 @@ check_once() {
       how="${how} (context: tmux session ${tmux_session} also present)"
     fi
     write_status "running" "" "false" "${how}"
-    echo "[liveness] RUNNING — ${how}; error markers: ${marker_count}"
+    if [[ "${marker_scan}" == "ok" ]]; then
+      echo "[liveness] RUNNING — ${how}; error markers: ${marker_count}"
+    else
+      echo "[liveness] RUNNING — ${how}; error-marker scan ${marker_scan^^}:" \
+           "${marker_scan_detail}" >&2
+    fi
     return "${EXIT_ALIVE}"
   fi
 
@@ -389,21 +445,22 @@ check_once() {
   esac
 }
 
+# check_once returns a VERDICT, not a success/failure status: EXIT_ALIVE and the
+# DIED_HARD codes are both non-zero and both expected. That is why this used to
+# open a `set +e` window. `|| rc=$?` captures the same value without one, so
+# `set -euo pipefail` holds for every line of this file rather than for most of
+# them -- the same conversion applied to bootstrap_pod.sh and launch_probe.sh.
 if [[ "${once}" -eq 1 ]]; then
-  set +e
-  check_once
-  rc=$?
-  set -e
+  rc=0
+  check_once || rc=$?
   exit "${rc}"
 fi
 
 echo "[liveness] watching ${watch_pid:+pid ${watch_pid}}${tmux_session:+ tmux ${tmux_session}} every ${interval}s"
 echo "[liveness] status file: ${status_file}"
 while true; do
-  set +e
-  check_once
-  rc=$?
-  set -e
+  rc=0
+  check_once || rc=$?
   if [[ "${rc}" -ne "${EXIT_ALIVE}" ]]; then
     exit "${rc}"
   fi

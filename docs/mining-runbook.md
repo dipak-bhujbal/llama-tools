@@ -96,8 +96,10 @@ small and `df` reports the whole cluster, so it gives **no warning as it fills**
 # token in a file on the mounted volume outlives the pod entirely. `export` is a
 # shell builtin and does not appear in `ps` — that exposure applies to external
 # commands taking the token as an argument, such as `hf auth login --token`.
-read -rsp 'HF read token: ' HF_TOKEN; echo
-export HF_TOKEN
+# `&&`, not `;`: on EOF (Ctrl-D) or a closed stdin `read` fails, and an
+# unconditional `export` would then publish an empty or stale value and let
+# the run proceed on it. Export only on a successful read.
+read -rsp 'HF read token: ' HF_TOKEN && echo && export HF_TOKEN
 
 export HF_HOME=/root/.cache/huggingface      # keep 16 GB of weights off the volume
 python3 -m venv --system-site-packages .venv # preserve the image's CUDA torch

@@ -49,19 +49,49 @@ EXEMPT_FILES = {
     "tests/test_no_secrets_on_command_lines.py",
 }
 
+# The previous patterns keyed on `--token $VAR` with the `$` immediately after
+# the separator, which zero of the realistic leak forms actually match:
+# `--token "$HF_TOKEN"` (quoted), `--token="${HF_TOKEN}"` (quoted + braced), and
+# `--token hf_abc123` (a literal, no variable at all) all slipped through. The
+# ban is now on the FLAG, regardless of quoting or value — there is no safe way
+# to pass a credential as an argument, so no value needs inspecting.
+CRED = r"(?:HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN|WANDB_API_KEY)"
+
 BANNED = (
-    # A credential-bearing variable expanded into argv.
-    re.compile(r"--token[= ]\$\{?[A-Z_]*TOKEN"),
-    re.compile(r"\b(?:wandb|hf|huggingface-cli)\s+login\s+\$\{?[A-Z_]+"),
-    # A literal assignment, which is what reaches shell history.
-    re.compile(r"\bexport\s+(?:HF_TOKEN|WANDB_API_KEY|HUGGING_FACE_HUB_TOKEN)\s*="),
+    # Any credential-passing flag on a login/auth/download command, whatever
+    # follows it. Matching the flag rather than its value is what makes quoting,
+    # braces and literals all fail closed.
+    re.compile(r"\b(?:hf|huggingface-cli|wandb)\b[^|;&]*?\s--token(?:[= ]|$)"),
+    # `wandb login <anything>` / `hf auth login <anything>`: an argument to a
+    # login verb is a credential by construction.
+    re.compile(r"\bwandb\s+login\s+\S"),
+    re.compile(r"\b(?:hf|huggingface-cli)\s+auth\s+login\s+(?!--force\b|--help\b|-h\b)\S"),
+    # A literal assignment in a shell command: `export FOO=...`, or a bare
+    # `FOO=... cmd` prefix. Both reach shell history. A bare `FOO=value` line on
+    # its own is handled separately — see _is_shell_region — because that is
+    # also what a .env file looks like, and a .env file is not a command line.
+    re.compile(rf"\bexport\s+{CRED}\s*="),
 )
+
+# A bare `CRED=value` line is only a defect in a shell context. In a plain fence
+# it is .env file content, which is the recommended place for a secret and does
+# not touch history, argv or the screen. Policed separately rather than lumped
+# in, so the distinction is a decision on the record instead of an accident.
+BARE_ASSIGNMENT = re.compile(rf"^\s*(?:export\s+)?{CRED}\s*=\s*\S")
+
+SHELL_FENCE_INFO = ("bash", "sh", "zsh", "shell", "console", "shell-session")
 
 # A line may quote the pattern if it is arguing against it.
 NEGATIVE_CUES = ("never", "not ", "n't", "originally", "would", "instead of",
                  "rather than", "do not", "avoid", "wrong")
 
-_FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
+# `^```` (column 0 only) matched ZERO fences in week-2-sft-fundamentals.md and
+# 1 of 4 in week-1-fundamentals.md, because every fence in those files is
+# indented inside a `- [ ]` list item. The test that scanned "every pasteable
+# command" was therefore scanning nothing at all in exactly the files whose
+# token blocks had just been rewritten. Leading whitespace is now allowed, and
+# the info string is captured so shell fences can be told from .env fences.
+_FENCE_RE = re.compile(r"^[ \t]*```([^\n]*)\n(.*?)^[ \t]*```", re.M | re.S)
 
 
 def searched_files() -> list[Path]:
@@ -97,29 +127,127 @@ def test_the_scan_actually_covers_the_files_that_carry_the_pattern() -> None:
         assert expected in names, expected
 
 
+def executable_regions(path: Path) -> list[tuple[str, str]]:
+    """(info_string, body) pairs of everything in `path` that is meant to be run."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".md":
+        return [(info.strip().lower(), body) for info, body in _FENCE_RE.findall(text)]
+    if path.suffix == ".sh":
+        return [("bash", text)]
+    return []
+
+
+def test_fence_matching_sees_the_indented_fences(subtests=None) -> None:
+    """Guard the guard, and specifically the way it was broken.
+
+    Every fence in the two learning journals is indented inside a `- [ ]` list
+    item. A column-0-anchored fence regex found none of them, so the credential
+    scan below was scanning zero bytes of the files it most needed to read.
+    """
+    for rel, minimum in (
+        ("docs/learning/week-2-sft-fundamentals.md", 3),
+        ("docs/learning/week-1-fundamentals.md", 3),
+    ):
+        regions = executable_regions(REPO_ROOT / rel)
+        assert len(regions) >= minimum, f"{rel}: only {len(regions)} fences matched"
+    # And at least one of them is a shell fence, or the shell-only rules below
+    # never fire.
+    infos = [i for i, _ in executable_regions(
+        REPO_ROOT / "docs/learning/week-2-sft-fundamentals.md")]
+    assert any(i in SHELL_FENCE_INFO for i in infos), infos
+
+
+def scan_for_violations(text_regions, rel: str) -> list[str]:
+    violations: list[str] = []
+    for info, body in text_regions:
+        for line in body.splitlines():
+            # Shell comments are commentary, not commands — this is where the
+            # runbooks' warnings about the pattern legitimately live.
+            if line.lstrip().startswith("#"):
+                continue
+            for hit in banned_hits(line):
+                violations.append(f"{rel}: {line.strip()!r} matched {hit}")
+            # A bare `HF_TOKEN=value` is a command only in a shell fence. In an
+            # info-less fence it is .env content, which is a file the reader is
+            # *supposed* to put the secret in.
+            if info in SHELL_FENCE_INFO and BARE_ASSIGNMENT.search(line):
+                violations.append(f"{rel}: {line.strip()!r} bare credential assignment")
+    return violations
+
+
 def test_no_pasteable_command_puts_a_credential_in_argv() -> None:
     """Markdown fences and shell scripts are meant to be executed verbatim."""
     violations: list[str] = []
     for path in searched_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
-        text = path.read_text(encoding="utf-8")
-
-        if path.suffix == ".md":
-            regions = _FENCE_RE.findall(text)
-        elif path.suffix == ".sh":
-            regions = [text]
-        else:
-            continue
-
-        for region in regions:
-            for line in region.splitlines():
-                # Shell comments inside a fence are commentary, not commands —
-                # this is where the runbooks' warnings about the pattern live.
-                if line.lstrip().startswith("#"):
-                    continue
-                for hit in banned_hits(line):
-                    violations.append(f"{rel}: {line.strip()!r} matched {hit}")
+        violations += scan_for_violations(executable_regions(path), rel)
     assert not violations, "credential in a pasteable command:\n" + "\n".join(violations)
+
+
+# --- Negative controls -------------------------------------------------------
+# Every one of these produced ZERO matches under the previous patterns. They are
+# committed as explicit cases rather than trusted to the regex reading well,
+# because "the regex looks right" is exactly what was believed before.
+LEAK_FORMS = [
+    'hf auth login --token $HF_TOKEN',
+    'hf auth login --token "$HF_TOKEN"',
+    'hf auth login --token="${HF_TOKEN}"',
+    'hf auth login --token hf_abcdef0123456789',
+    'huggingface-cli login --token "${HF_TOKEN}"',
+    'hf download some/repo --token $HF_TOKEN',
+    'wandb login $WANDB_API_KEY',
+    'wandb login 0123456789abcdef',
+    'export HF_TOKEN=hf_abcdef0123456789',
+    'export WANDB_API_KEY="secret"',
+]
+
+SAFE_FORMS = [
+    "read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN",
+    "export HF_TOKEN",
+    "hf auth login",
+    "hf auth login --force",
+    "wandb login",
+    "hf download some/repo --local-dir /tmp/x",
+    "python -c 'import os; os.environ[\"HF_TOKEN\"]'",
+]
+
+
+@pytest.mark.parametrize("line", LEAK_FORMS)
+def test_every_known_leak_form_is_caught(line: str) -> None:
+    caught = bool(banned_hits(line)) or bool(BARE_ASSIGNMENT.search(line))
+    assert caught, f"leak form not caught: {line!r}"
+
+
+@pytest.mark.parametrize("line", SAFE_FORMS)
+def test_no_safe_form_is_flagged(line: str) -> None:
+    """A rule that fires on the recommended pattern gets disabled by whoever
+    hits it next, which is worse than not having it."""
+    assert not banned_hits(line), f"false positive on the safe form: {line!r}"
+
+
+def test_a_leak_inside_an_indented_shell_fence_is_caught() -> None:
+    """The two failures compounded: the leak forms did not match, and the
+    fences they would have been found in were not being read either."""
+    doc = (
+        "- [ ] **Set up the pod:**\n"
+        "  ```bash\n"
+        "  pip install -e .\n"
+        '  hf auth login --token "$HF_TOKEN"\n'
+        "  ```\n"
+    )
+    regions = [(i.strip().lower(), b) for i, b in _FENCE_RE.findall(doc)]
+    assert regions, "indented fence still not matched"
+    assert scan_for_violations(regions, "synthetic.md")
+
+
+def test_dotenv_content_is_deliberately_not_flagged() -> None:
+    """A `.env` file is where a secret is *supposed* to go: it reaches neither
+    argv, nor shell history, nor the screen. Recorded as a decision so the
+    exemption is not mistaken for a gap in the rules."""
+    doc = "- [ ] **Save the key:**\n  ```\n  WANDB_API_KEY=<your-key>\n  ```\n"
+    regions = [(i.strip().lower(), b) for i, b in _FENCE_RE.findall(doc)]
+    assert regions
+    assert not scan_for_violations(regions, "synthetic.md")
 
 
 def test_any_prose_mention_of_the_pattern_argues_against_it() -> None:

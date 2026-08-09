@@ -1,4 +1,4 @@
-"""The fail-loud invariants for the two scripts that run on a billing pod.
+"""The fail-loud invariants for the three scripts that run on a billing pod.
 
 These are written as tests rather than left to review because the defect class
 they police is silent by construction. A suppressed stderr, a `set +e` window,
@@ -6,54 +6,45 @@ or a step whose artifact is never asserted all produce a run that *looks* like
 it worked: exit 0, a log full of green, and evidence that is missing or wrong
 only when someone tries to use it weeks later.
 
-Two concrete instances motivate each rule, so none of this is hypothetical:
+Two concrete instances motivate the rules, so none of this is hypothetical:
 
   * `git clone ... 2>/dev/null` in a helper step hid a clone failure, recorded
     in docs/postmortem-s0-probe-20260808.md.
   * The retained mining-pilot artifact directory has no `env_fingerprint.json`,
-    `pip_freeze.txt` or `gpu.txt`. Nothing errored at the time. The files just
-    were not there, and nothing asserted that they should be — which is why the
-    pilot's library versions cannot be compared against the failed probe's
-    today.
+    `pip_freeze.txt` or `gpu.txt`. Nothing errored at the time; the files simply
+    were not there and nothing asserted that they should be.
 
-Scope note: only `bootstrap_pod.sh` and `launch_probe.sh` are policed here,
-which is the scope the owner named. `probe_liveness.sh` is excluded
-deliberately, and the exclusion is stated in full rather than summarised,
-because a scope note that undercounts what it is excusing is itself the kind of
-reassuring-but-wrong artifact these tests exist to catch.
+    **Correction (this file previously said the pilot's libraries therefore
+    "cannot be compared against the failed probe's today" — that is false.)**
+    The versions were recorded in owner-pasted console output in the chat
+    archive, and the comparison has been made: transformers and peft match, GPU
+    class matches, and **torch does not — 2.8.0 on the pilot against 2.9.1 on
+    the probe.** Equality is disproven, not unmeasurable. What the missing
+    receipts actually cost is that the evidence lives in a chat log instead of
+    alongside the run, which is what the assertions below prevent recurring.
 
-It retains **8 suppressions on 7 lines**, in three groups that are NOT equally
-benign:
+`probe_liveness.sh` is policed here too, as of the owner's authorisation to
+clean it up. Two defects were fixed: the greps in `scan_error_markers` treated
+every non-zero exit as "no match", so a grep that *failed* reported a clean
+`error_markers_seen: 0`; and two `set +e` windows wrapped `check_once`.
 
-  * `kill -0` (140), `tmux has-session` (146), and the BSD/GNU `stat` probe
-    (266, two of them) — a non-zero exit IS the answer being asked for, and one
-    of the two `stat` forms always fails by design. Nothing is hidden.
-  * `tail -n 200 ... 2>/dev/null || true` (180) — guarded by `[[ -r ]]`. A
-    failure yields empty text, `footer_state` stays `absent`, and the monitor
-    fails CLOSED to its DIED HARD alert. Safe direction.
-  * The three `grep` calls in `scan_error_markers` (242, 248, 251) — **not
-    benign.** A grep that fails leaves `marker_count` at 0, which is then
-    reported as `"error markers: 0"` on the console and `error_markers_seen: 0`
-    in the status JSON. That is the same shape as the Xid-regex defect fixed in
-    8659fb0: a scan that did not run, reported as a clean result.
+Its remaining stderr suppressions are deliberate and are a different class:
+`kill -0`, `tmux has-session`, `command -v`, the `tail` guarded by `[[ -r ]]`,
+and the BSD/GNU `stat` probe, where a non-zero exit IS the answer being asked
+for and one of the two `stat` forms always fails by design. They are retained
+under the rule that a predicate may stay if its semantics are tested — so they
+are tested below, rather than merely asserted to be harmless.
 
-    Verified bound on the damage: `marker_count` is consumed only by
-    `write_status` and the RUNNING console line. The verdict itself comes from
-    `process_alive` plus `footer_state`, so a swallowed grep cannot turn an
-    alert into silence — it can only under-report context in the reassuring
-    direction.
-
-`probe_liveness.sh` also still opens two `set +e` windows around `check_once`
-(396, 406), the same pattern removed from the launcher here.
-
-None of that is fixed in this commit because the owner scoped the sweep to the
-bootstrap and the launcher. It is written down so the exclusion cannot be read
-as a claim that the third script is clean.
+No line numbers appear in this file. The previous version cited `set +e` at
+396/406 when the actual lines were 393/403 (396/406 were the restoring
+`set -e`), which is what citing positions instead of content gets you.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -61,7 +52,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = REPO_ROOT / "scripts" / "bootstrap_pod.sh"
 LAUNCHER = REPO_ROOT / "scripts" / "launch_probe.sh"
+LIVENESS = REPO_ROOT / "scripts" / "probe_liveness.sh"
 AUDITED = (BOOTSTRAP, LAUNCHER)
+STRICT_MODE_SCRIPTS = (BOOTSTRAP, LAUNCHER, LIVENESS)
 
 # Discarding stderr. `2>&1` is deliberately NOT matched: it *merges* stderr into
 # stdout, which is the opposite of suppression, and the bootstrap's own launch
@@ -98,7 +91,7 @@ def test_no_executable_line_discards_stderr(script: Path) -> None:
     assert not hits, f"{script.name}: stderr discarded at {hits}"
 
 
-@pytest.mark.parametrize("script", AUDITED, ids=lambda p: p.name)
+@pytest.mark.parametrize("script", STRICT_MODE_SCRIPTS, ids=lambda p: p.name)
 def test_strict_mode_is_set_and_never_turned_off(script: Path) -> None:
     """`set -euo pipefail` on line 1 is worth nothing if it is switched off
     around the risky call. Both scripts used to open a `set +e` window to
@@ -173,23 +166,85 @@ def test_bootstrap_asserts_every_environment_receipt_exists_and_is_non_empty() -
     assert '[[ -s "${path}" ]] || die' in source
 
 
-def test_launcher_asserts_its_entry_points_exist_in_the_reviewed_tree() -> None:
-    """Bash's own "No such file or directory" funnelled through run_checked and
-    came out labelled "acquire pinned BFCL fixtures failed" — which names the
-    wrong thing and sends the operator to debug the fetcher instead of the venv.
+def test_launcher_checks_its_entry_points_and_says_what_it_checked() -> None:
+    """Three modes, three honest messages.
+
+    The version this replaces ran a plain `-f` test against whatever the working
+    tree happened to be and then printed "all three entry points present at
+    ${commit}" — in a dry run, a claim about a commit it had never read. A
+    nonexistent SHA produced a confident OK.
     """
     source = LAUNCHER.read_text(encoding="utf-8")
     for entry in ("fetch_pinned_bfcl.py", "isolation_ladder.py", "bfcl_simple.py"):
-        assert f'assert_entrypoint "${{REPO_ROOT}}/eval/{entry}"' in source, entry
-    # A tree at the pinned SHA that is missing a file it should contain is a
-    # wrong-tree problem, not a wrong-invocation one, and the exit class has to
-    # say so — the codes exist precisely so the log names the kind of fault.
-    assert 'exit "${EXIT_GIT_UNCLEAN}"\n  fi\n}' in source
-    # Interpreter checked before the checkout, entry points after it: the
-    # venv is gitignored so the checkout cannot affect it, while the entry
-    # points are properties of the reviewed tree and must be asked about there.
-    assert source.index("no executable interpreter at") < source.index("step_git_checkout\n")
-    assert source.index("step_git_checkout\n") < source.index("assert_entrypoint \"${REPO_ROOT}")
+        assert f'assert_entrypoint "eval/{entry}"' in source, entry
+    # A commit that lacks a file is not a dirty tree; it gets its own class.
+    assert "readonly EXIT_LAUNCH_INCOMPATIBLE=70" in source
+    assert 'exit "${EXIT_LAUNCH_INCOMPATIBLE}"' in source
+    # The summary reports the mode rather than asserting the commit blindly.
+    assert 'echo "OK: all three entry points present in ${entrypoint_check_mode}."' in source
+
+
+def _dry_run(commit: str, tmp_path: Path):
+    now = int(time.time())
+    return subprocess.run(
+        ["bash", str(LAUNCHER), "--commit", commit,
+         "--deadline-epoch", str(now + 1800),
+         "--provider-deadline-epoch", str(now + 3600),
+         "--out-root", str(tmp_path / "out"), "--dry-run"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_dry_run_does_not_claim_a_sha_it_never_read(tmp_path: Path) -> None:
+    """codex's reproduction: `--commit 000…000 --dry-run` used to print
+    `OK: all three entry points present at 000…000`."""
+    result = _dry_run("0" * 40, tmp_path)
+    out = result.stdout + result.stderr
+    assert "NOT CHECKED" in out, out
+    assert "is not in this repository" in out, out
+    assert "entry points present at" not in out, out
+    assert result.returncode == 0, out   # a dry run on an absent SHA still prints its plan
+
+
+def test_dry_run_verifies_a_real_sha_against_the_commit_tree(tmp_path: Path) -> None:
+    head = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    result = _dry_run(head, tmp_path)
+    out = result.stdout + result.stderr
+    assert "read-only via git cat-file" in out, out
+    assert head in out, out
+
+
+def test_a_commit_missing_an_entry_point_is_launch_incompatible(tmp_path: Path) -> None:
+    """Uses a real ancestor that genuinely predates eval/isolation_ladder.py, so
+    the check is exercised against history rather than a mock — and git's own
+    message ("exists on disk, but not in <commit>") proves the commit tree was
+    read rather than the working directory."""
+    ancestor = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-list", "--max-count=1", "HEAD",
+         "--", "eval/bfcl_simple.py"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    # Walk back to a commit that has bfcl_simple.py but not isolation_ladder.py.
+    candidates = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "log", "--format=%H", "-n", "60"],
+        capture_output=True, text=True, check=True).stdout.split()
+    target = None
+    for sha in candidates:
+        has_ladder = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{sha}:eval/isolation_ladder.py"],
+            capture_output=True).returncode == 0
+        if not has_ladder:
+            target = sha
+            break
+    if target is None:
+        pytest.skip("no ancestor without eval/isolation_ladder.py in the last 60 commits")
+    assert ancestor  # sanity: history is readable
+
+    result = _dry_run(target, tmp_path)
+    out = result.stdout + result.stderr
+    assert result.returncode == 70, out
+    assert "Launcher/commit incompatibility" in out, out
+    assert "isolation_ladder.py" in out, out
 
 
 def test_bootstrap_has_no_unclassified_command_runner() -> None:
@@ -215,3 +270,128 @@ def test_bootstrap_die_does_not_append_its_exit_code_to_the_message() -> None:
     source = BOOTSTRAP.read_text(encoding="utf-8")
     assert 'echo "ERROR: $*" >&2' not in source
     assert 'echo "ERROR: ${message}" >&2' in source
+
+
+# ---------------------------------------------------------------------------
+# probe_liveness.sh — the retained predicates are tested, not assumed harmless,
+# which is the condition under which they were allowed to stay.
+# ---------------------------------------------------------------------------
+
+import json          # noqa: E402
+import os            # noqa: E402
+
+
+def _run_liveness(tmp_path: Path, log_text: str, pid: str, extra=()) -> tuple[int, dict, str]:
+    log = tmp_path / "probe.log"
+    log.write_text(log_text, encoding="utf-8")
+    status = tmp_path / "status.json"
+    proc = subprocess.run(
+        ["bash", str(LIVENESS), "--log", str(log), "--status-file", str(status),
+         "--pid", pid, "--once", *extra],
+        capture_output=True, text=True, timeout=30,
+    )
+    parsed = json.loads(status.read_text()) if status.exists() else {}
+    return proc.returncode, parsed, proc.stdout + proc.stderr
+
+
+def test_no_match_is_not_an_error(tmp_path: Path) -> None:
+    """grep exits 1 when a marker is simply absent. That is the healthy case and
+    the overwhelmingly common one; if the rewrite had turned it into a scan
+    failure the monitor would cry wolf on every clean run."""
+    _, status, _ = _run_liveness(tmp_path, "all fine here\nnothing wrong\n", "999999")
+    assert status["error_marker_scan"] == "ok"
+    assert status["error_markers_seen"] == 0
+
+
+def test_markers_present_are_counted(tmp_path: Path) -> None:
+    _, status, _ = _run_liveness(
+        tmp_path, "boom\nCUDA error: an illegal memory access was encountered\n", "999999"
+    )
+    assert status["error_marker_scan"] == "ok"
+    assert status["error_markers_seen"] >= 1
+    assert "CUDA error" in status["error_marker_names"]
+
+
+def test_an_unreadable_log_reports_null_not_zero(tmp_path: Path) -> None:
+    """The defect this replaces: a scan that could not run reported
+    `error_markers_seen: 0`, i.e. a clean bill of health from a check that never
+    completed — the same shape as the Xid-regex defect fixed in 8659fb0."""
+    log = tmp_path / "probe.log"
+    log.write_text("CUDA error: something\n", encoding="utf-8")
+    os.chmod(log, 0o000)
+    try:
+        if os.access(log, os.R_OK):        # root ignores the mode bits
+            pytest.skip("running as root; unreadable-file case is not reachable")
+        status_file = tmp_path / "status.json"
+        subprocess.run(
+            ["bash", str(LIVENESS), "--log", str(log), "--status-file", str(status_file),
+             "--pid", "999999", "--once"],
+            capture_output=True, text=True, timeout=30,
+        )
+        status = json.loads(status_file.read_text())
+        assert status["error_markers_seen"] is None, status
+        assert status["error_marker_scan"] == "unreadable", status
+        assert status["error_marker_scan_detail"], "must say why"
+    finally:
+        os.chmod(log, 0o644)
+
+
+def test_a_dead_pid_with_no_record_still_alerts(tmp_path: Path) -> None:
+    """The verdict must not have been disturbed by the marker-scan rework: it
+    comes from liveness plus the terminal record, never from marker counts."""
+    code, status, out = _run_liveness(tmp_path, "no footer here\n", "999999")
+    assert code == 72, out
+    assert status["alert"] is True
+    assert status["state"] == "died_hard"
+
+
+def test_a_live_pid_reports_running(tmp_path: Path) -> None:
+    code, status, out = _run_liveness(tmp_path, "working\n", str(os.getpid()))
+    assert code == 0, out
+    assert status["state"] == "running"
+    assert status["alert"] is False
+
+
+def test_a_sidecar_with_a_valid_digest_plus_garbage_is_rejected(tmp_path: Path) -> None:
+    """`tr … | cut -c1-64` made the exact-shape assertion structurally unable to
+    fail on the case it most needed to catch: `cut` threw away everything past
+    character 64, so the regex was validating cut's output rather than the file.
+    A receipt holding a real digest followed by a second digest, a filename, or
+    a stray paste was silently truncated to the valid prefix and accepted.
+    """
+    bundle = tmp_path / "b.bundle"
+    bundle.write_bytes(b"contents")
+    digest = subprocess.run(["shasum", "-a", "256", str(bundle)],
+                            capture_output=True, text=True, check=True).stdout.split()[0]
+
+    def run(sidecar_text: str):
+        side = tmp_path / "b.sha256"
+        side.write_text(sidecar_text, encoding="utf-8")
+        work = tmp_path / "work"
+        work.mkdir(exist_ok=True)
+        return subprocess.run(
+            ["bash", str(BOOTSTRAP), "--bundle", str(bundle),
+             "--bundle-sha256-file", str(side), "--commit", "0" * 40,
+             "--out-root", str(tmp_path / "out"),
+             "--auto-terminate-set", "2026-08-09T23:00:00Z@RATE"],
+            cwd=str(work), capture_output=True, text=True, timeout=60,
+            env={**os.environ, "RUNPOD_IMAGE_NAME": "test/image:1"},
+        )
+
+    # The exact digest and nothing else: accepted (the run goes on to fail later,
+    # at the commit, which is a different and correctly-classified failure).
+    ok = run(digest + "\n")
+    assert "must contain exactly one 64-char" not in (ok.stdout + ok.stderr)
+
+    for bad, label in [
+        (digest + "GARBAGE", "trailing garbage"),
+        (digest + digest, "two digests"),
+        (f"{digest}  b.bundle", "digest + filename (sha256sum output format)"),
+        (digest[:-1], "truncated"),
+        ("", "empty"),
+        (digest.upper(), "uppercase"),
+    ]:
+        result = run(bad)
+        out = result.stdout + result.stderr
+        assert result.returncode == 66, f"{label}: exit {result.returncode}\n{out}"
+        assert "must contain exactly one 64-char" in out, f"{label}:\n{out}"

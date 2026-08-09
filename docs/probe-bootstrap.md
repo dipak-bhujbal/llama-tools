@@ -124,8 +124,10 @@ export RUNPOD_IMAGE_NAME="<the exact template tag you launched>"
 # version of this note claimed it did. The `ps` exposure is real for external
 # commands that take the token as an argument, e.g. `hf auth login --token
 # $HF_TOKEN`, where the shell expands the value into the new process's argv.)
-read -rsp 'HF read token: ' HF_TOKEN; echo
-export HF_TOKEN
+# `&&`, not `;`: on EOF (Ctrl-D) or a closed stdin `read` fails, and an
+# unconditional `export` would then publish an empty or stale value and let
+# the run proceed on it. Export only on a successful read.
+read -rsp 'HF read token: ' HF_TOKEN && echo && export HF_TOKEN
 
 bash scripts/bootstrap_pod.sh \
   --bundle /workspace/llama-tools.bundle \

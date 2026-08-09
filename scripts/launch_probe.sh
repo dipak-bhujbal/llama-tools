@@ -58,6 +58,11 @@ readonly EXIT_ACQUIRE_FAILED=66 # fetch_pinned_bfcl.py (acquire) failed
 readonly EXIT_VERIFY_FAILED=67  # fetch_pinned_bfcl.py --verify-only failed
 readonly EXIT_GENERATION_FAILED=68 # bfcl_simple.py failed or hit the wall-clock timeout
 readonly EXIT_SMOKE_GATE_FAILED=69 # isolation ladder did not come back green
+# A commit that simply does not carry one of this launcher's entry points is not
+# an "unclean" tree — nothing is dirty and HEAD is exactly where it was asked to
+# be. It is a launcher/commit incompatibility, and it wants its own class so the
+# log does not send the operator looking for a checkout problem that isn't there.
+readonly EXIT_LAUNCH_INCOMPATIBLE=70
 
 # This script always operates on the repo it lives in, resolved from its own
 # path — not the caller's $PWD — so it behaves the same no matter where it
@@ -637,17 +642,60 @@ fi
 # REVIEWED tree carries these files — asserting against the pre-checkout tree
 # would answer a question nobody asked.
 #
-# Classified as EXIT_GIT_UNCLEAN, not EXIT_USAGE. Nothing about the operator's
-# invocation is wrong here — the tree standing at the pinned SHA is not the tree
-# that SHA describes, which is the same diagnosis and the same fix (rebuild the
-# checkout) as a wrong HEAD or a dirty worktree.
+# WHAT THIS CHECKS DEPENDS ON THE MODE, AND IT SAYS WHICH.
+#
+# A real run reaches here only after step_git_checkout has asserted HEAD equals
+# --commit and the tree is clean, so the working tree IS the commit's tree and a
+# plain `-f` test is a statement about the commit.
+#
+# A dry run performs no checkout. The previous version tested the same `-f` on
+# whatever the current working tree happened to be and then printed "all three
+# entry points present at ${commit}" — a claim about a commit it had not looked
+# at. `--commit 000…000 --dry-run` produced a confident OK for a SHA that does
+# not exist. So in dry-run the commit's tree is read directly and read-only via
+# `git cat-file`, and when the commit is not in this repo at all the output says
+# that instead of claiming anything.
+entrypoint_check_mode=""   # set by assert_entrypoint, reported in the summary
+
 assert_entrypoint() {
-  local path="$1" purpose="$2"
-  if [[ ! -f "${path}" ]]; then
-    echo "ERROR: ${purpose} entry point is missing: ${path}" >&2
-    echo "       The tree at ${commit} does not contain it. Refusing to start a" >&2
-    echo "       paid sequence that cannot complete." >&2
-    exit "${EXIT_GIT_UNCLEAN}"
+  local rel="$1" purpose="$2"
+
+  if [[ "${dry_run}" -eq 0 ]]; then
+    entrypoint_check_mode="the checked-out tree at ${commit}"
+    if [[ ! -f "${REPO_ROOT}/${rel}" ]]; then
+      echo "ERROR: ${purpose} entry point is missing: ${rel}" >&2
+      echo "       HEAD is ${commit} and the tree is clean, so this commit does" >&2
+      echo "       not carry a file this launcher requires. That is a launcher/" >&2
+      echo "       commit incompatibility, not a bad checkout: either the SHA" >&2
+      echo "       predates the file, or this launcher is newer than the tree." >&2
+      exit "${EXIT_LAUNCH_INCOMPATIBLE}"
+    fi
+    return 0
+  fi
+
+  # Dry run. Is the commit even present locally to be inspected?
+  #
+  # git's stderr is CAPTURED, never discarded: `2>&1` inside a command
+  # substitution folds it into a variable this function can print, which is the
+  # opposite of `2>/dev/null`. A missing object is an expected answer here and
+  # needs no diagnostic; anything else does, and would otherwise vanish.
+  local err="" status=0
+  err="$(git -C "${REPO_ROOT}" cat-file -e "${commit}^{commit}" 2>&1)" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    entrypoint_check_mode="NOT CHECKED — commit ${commit} is not in this repository"
+    return 0
+  fi
+
+  entrypoint_check_mode="commit ${commit}, read-only via git cat-file"
+  status=0
+  err="$(git -C "${REPO_ROOT}" cat-file -e "${commit}:${rel}" 2>&1)" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    echo "ERROR: ${purpose} entry point is missing from commit ${commit}: ${rel}" >&2
+    echo "       Read directly from the commit's tree, so this is not a working-" >&2
+    echo "       directory artefact. A real run would abort here having spent" >&2
+    echo "       nothing. Launcher/commit incompatibility." >&2
+    [[ -n "${err}" ]] && echo "       git said: ${err}" >&2
+    exit "${EXIT_LAUNCH_INCOMPATIBLE}"
   fi
 }
 
@@ -684,13 +732,22 @@ echo
 echo "Planned steps (in order):"
 step_git_checkout
 
-# Asserted in BOTH modes, deliberately. A dry run whose printed plan references
-# a script that does not exist in this tree is not a reviewable plan — it is a
-# plan that will fail on the pod, reviewed as though it would work.
-assert_entrypoint "${REPO_ROOT}/eval/fetch_pinned_bfcl.py" "fixture acquire/verify"
-assert_entrypoint "${REPO_ROOT}/eval/isolation_ladder.py" "§0 smoke gate"
-assert_entrypoint "${REPO_ROOT}/eval/bfcl_simple.py"      "paid generation"
-echo "OK: all three entry points present at ${commit}."
+# Checked in BOTH modes, deliberately. A dry run whose printed plan references a
+# script the commit does not carry is not a reviewable plan — it is a plan that
+# will fail on the pod, reviewed as though it would work.
+assert_entrypoint "eval/fetch_pinned_bfcl.py" "fixture acquire/verify"
+assert_entrypoint "eval/isolation_ladder.py"  "§0 smoke gate"
+assert_entrypoint "eval/bfcl_simple.py"       "paid generation"
+# The summary names what was actually inspected. It used to say "present at
+# ${commit}" unconditionally, which in a dry run was a claim about a commit that
+# had never been read — and was printed even for a SHA that does not exist.
+if [[ "${entrypoint_check_mode}" == NOT\ CHECKED* ]]; then
+  echo "WARNING: entry points ${entrypoint_check_mode}." >&2
+  echo "         The plan below is printed unverified against that SHA. A real" >&2
+  echo "         run cannot reach this state: it checks out the commit first." >&2
+else
+  echo "OK: all three entry points present in ${entrypoint_check_mode}."
+fi
 
 echo
 run_checked "acquire pinned BFCL fixtures" "${EXIT_ACQUIRE_FAILED}" "${acquire_cmd[@]}"

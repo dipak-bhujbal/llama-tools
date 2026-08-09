@@ -211,13 +211,20 @@ echo "STEP 3 — bundle transfer receipt"
 if [[ "${dry_run}" -eq 0 ]]; then
   [[ -f "${bundle}" ]]          || die "bundle not found: ${bundle}" "${EXIT_BUNDLE}"
   [[ -f "${bundle_sha_file}" ]] || die "sidecar not found: ${bundle_sha_file}" "${EXIT_BUNDLE}"
-  expected_sha="$(tr -d '[:space:]' < "${bundle_sha_file}" | cut -c1-64)"
-  # A truncated, empty or line-mangled sidecar previously reached the comparison
-  # as a short string and failed as a "hash mismatch" — a message that accuses
-  # the bundle when the defect is in the receipt. Check the shape first so the
-  # two are never confused.
+  # The WHOLE normalized receipt, not its first 64 characters.
+  #
+  # This previously read `tr -d '[:space:]' < ... | cut -c1-64`, which made the
+  # shape check that follows unable to fail on the case it most needed to catch:
+  # `cut` discarded everything after character 64, so a sidecar holding a valid
+  # digest followed by anything at all — a second digest, a filename, a stray
+  # paste — was silently truncated to the valid prefix and accepted. The check
+  # was reporting on `cut`'s output, not on the file, so it certified a receipt
+  # it had never actually looked at. A receipt that is not exactly one digest is
+  # a receipt whose provenance is unknown, and the bundle it vouches for cannot
+  # be trusted on billed time.
+  expected_sha="$(tr -d '[:space:]' < "${bundle_sha_file}")"
   [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]] \
-    || die "sidecar ${bundle_sha_file} does not contain a 64-char lowercase hex digest (read: '${expected_sha}')" \
+    || die "sidecar ${bundle_sha_file} must contain exactly one 64-char lowercase hex digest and nothing else (read ${#expected_sha} chars: '${expected_sha}')" \
            "${EXIT_BUNDLE}"
   # `command -v` writes its result to stdout and nothing to stderr, so the
   # discarded stream here never carried a diagnostic. Dropping the `2>&1` costs

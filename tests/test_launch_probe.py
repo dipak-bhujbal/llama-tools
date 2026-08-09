@@ -23,10 +23,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "launch_probe.sh"
 
-# A syntactically valid 40-char hex SHA. It does not need to exist as a real
-# commit for --dry-run: the script never calls `git checkout` for real in
-# dry-run mode, it only prints the command it would run.
-VALID_SHA = "1f0850103660ab46dc489a4c91280190b4da6620"
+# This used to be a hardcoded SHA, with a comment saying it "does not need to
+# exist as a real commit for --dry-run". That stopped being true when the
+# launcher started reading the commit's tree read-only instead of testing the
+# working directory — and the hardcoded value turned out to be a real ancestor
+# that predates `eval/isolation_ladder.py`, so every dry-run test began (rightly)
+# exiting 70 for launcher/commit incompatibility.
+#
+# HEAD is used instead: it is a commit that genuinely carries all three entry
+# points, so these tests now exercise the real verification path rather than
+# routing around it. The absent-commit and missing-entry-point paths are covered
+# in tests/test_shell_fail_loud.py.
+VALID_SHA = subprocess.run(
+    ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
 TEST_NOW = int(time.time())
 TEST_SCRIPT_DEADLINE = TEST_NOW + 1800
 TEST_PROVIDER_DEADLINE = TEST_NOW + 3600

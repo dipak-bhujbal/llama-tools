@@ -27,13 +27,16 @@ pip install -e ".[train]"
 # Secrets are typed at a prompt, never passed as arguments: the shell expands
 # `--token $HF_TOKEN` before exec, leaving the value in the process's argv where
 # any `ps` on the pod can read it for the life of the command.
-read -rsp 'HF token: ' HF_TOKEN; echo
-export HF_TOKEN
-hf auth login                # interactive; reads HF_TOKEN from the environment
+read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN
+read -rsp 'wandb key: ' WANDB_API_KEY && echo && export WANDB_API_KEY   # optional
 
-read -rsp 'wandb key: ' WANDB_API_KEY; echo   # optional
-export WANDB_API_KEY
-wandb login                  # optional; script falls back to plain logging
+# `hf auth login` is an ALTERNATIVE to the export above, not a follow-on. In
+# huggingface_hub 1.24 it calls interpreter_login(skip_if_logged_in=True),
+# which returns immediately when get_token() finds HF_TOKEN in the
+# environment — so run after an export it does nothing and persists nothing.
+# Use it INSTEAD, when you want the token cached on the pod between shells:
+#   hf auth login      # prompts for the token, then saves it
+# Either way the value is typed at a prompt and never becomes an argument.
 
 # the dataset is not in git — copy it up from local:
 # (from local machine)
@@ -153,9 +156,9 @@ Same 1x RTX A6000 48GB. Fresh-pod setup:
 ```bash
 cd /workspace && git clone https://github.com/dipak-bhujbal/llama-tools.git && cd llama-tools
 pip install -e ".[train]"
-read -rsp 'HF token: ' HF_TOKEN; echo   # typed, never echoed, never in argv
-export HF_TOKEN
-hf auth login                           # interactive; no --token flag
+read -rsp 'HF token: ' HF_TOKEN && echo && export HF_TOKEN   # typed, never echoed, never in argv
+# Or, instead of the line above, `hf auth login` to prompt and persist.
+# Not both: with HF_TOKEN already exported, `hf auth login` skips.
 
 # SFT adapter + v1 preference file from HF (no scp needed)
 hf download centuriandip/llama-3.1-8b-tools-sft --include "adapter/*" --local-dir /tmp/sft \
