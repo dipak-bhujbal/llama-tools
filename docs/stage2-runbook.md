@@ -277,9 +277,13 @@ below **fails closed** rather than parsing something it does not recognise.
 ```bash
 cd /workspace/llama-tools
 TERMINATE_UTC='<TERMINATE_UTC>'    # e.g. 2026-08-09T04:15:00Z
+RATE='<RATE>'                      # the $/hr the console showed, e.g. 0.79
+DDR=/workspace/persist/study2/deadline_derivation.txt
 
 unset PROVIDER_EPOCH DEADLINE_EPOCH
-if [[ ! "$TERMINATE_UTC" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+if [[ ! "$RATE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "ABORT: RATE must be the console's \$/hr as a bare number, e.g. 0.79 — got '$RATE'"
+elif [[ ! "$TERMINATE_UTC" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
   echo "ABORT: not RFC 3339 UTC — got '$TERMINATE_UTC', need YYYY-MM-DDTHH:MM:SSZ"
 elif ! PROVIDER_EPOCH=$(date -u -d "$TERMINATE_UTC" +%s 2>/dev/null); then
   unset PROVIDER_EPOCH
@@ -290,25 +294,66 @@ else
     unset PROVIDER_EPOCH
     echo "ABORT: round-trip mismatch — entered '$TERMINATE_UTC', parsed back '$ROUND_TRIP'"
   else
+    NOW_EPOCH=$(date -u +%s)
     DEADLINE_EPOCH=$(( PROVIDER_EPOCH - 180 ))
-    MINS_LEFT=$(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 ))
+    MINS_LEFT=$(( (DEADLINE_EPOCH - NOW_EPOCH) / 60 ))
     echo "round-trip OK: $ROUND_TRIP"
-    echo "provider=$PROVIDER_EPOCH launcher=$DEADLINE_EPOCH now=$(date -u +%s)"
+    echo "provider=$PROVIDER_EPOCH launcher=$DEADLINE_EPOCH now=$NOW_EPOCH"
     echo "minutes of work left: $MINS_LEFT"
     if [[ "$MINS_LEFT" -lt 45 ]]; then
       unset PROVIDER_EPOCH DEADLINE_EPOCH
       echo "ABORT: only $MINS_LEFT min of work left, need >= 45 — deadlines discarded"
     else
-      echo "DEADLINES OK"
+      NEW_DDR=$(printf '%s\n' \
+        "schema=deadline_derivation/v1" \
+        "provider_termination_utc=$TERMINATE_UTC" \
+        "provider_termination_epoch=$PROVIDER_EPOCH" \
+        "derivation_epoch=$NOW_EPOCH" \
+        "launcher_deadline_epoch=$DEADLINE_EPOCH" \
+        "shutdown_reserve_seconds=180" \
+        "launch_floor_seconds=2700" \
+        "launch_floor_basis=planning_40min_upper_plus_5min_buffer" \
+        "launch_floor_source=probe-20260808/study2/probe_timing.txt" \
+        "minutes_left_at_derivation=$MINS_LEFT" \
+        "rate_per_hour=$RATE" \
+        "rate_source=runpod_console_at_creation")
+      if [[ -e "$DDR" ]] && ! printf '%s\n' "$NEW_DDR" | diff -q - "$DDR" >/dev/null; then
+        unset PROVIDER_EPOCH DEADLINE_EPOCH
+        echo "ABORT: $DDR exists and differs from this derivation. This will not"
+        echo "       overwrite it. Read it; if it is genuinely superseded, keep it:"
+        echo "         mv $DDR $DDR.superseded.\$(date -u +%s)"
+        echo "       then re-run this block."
+      elif printf '%s\n' "$NEW_DDR" > "$DDR.tmp.$$" && mv -f "$DDR.tmp.$$" "$DDR"; then
+        echo "DEADLINES OK"
+      else
+        rm -f "$DDR.tmp.$$"
+        unset PROVIDER_EPOCH DEADLINE_EPOCH
+        echo "ABORT: could not write $DDR — refusing to launch without the receipt"
+      fi
     fi
   fi
 fi
 ```
 
+**This step also writes the deadline-derivation receipt**, `deadline_derivation.txt`, which
+§10 requires. It records the termination string and epoch, the derivation epoch, the launcher
+deadline, the 180 s reserve, the 2700 s floor **with its basis and source**, and the rate with
+where the rate came from. It is written atomically, and if a receipt from another run is
+already present **this refuses rather than overwrites** — the alternative is a run whose
+timing evidence silently belongs to a different pod.
+
+An earlier draft required `probe_timing.txt` here instead. Nothing at `08be5d3` writes that
+file — the launcher only *names* it in an exit listing — so on a fresh pod §10 could never
+complete, and on a reused volume a stale one would have been misattributed to this run.
+
+`RATE` is validated as a bare number before anything else, so an unsubstituted `<RATE>`
+placeholder aborts here rather than being written into the receipt as if it were a price.
+
 **Proceed only if you saw `round-trip OK` and `DEADLINES OK`, and no `ABORT` line.** Every
-failure path — bad shape, unparseable, round-trip mismatch, **and too little time left** —
-leaves `PROVIDER_EPOCH` and `DEADLINE_EPOCH` unset, and §7 mechanically refuses to launch
-without both. The guard is not the `ABORT` message; the guard is that the values a launch
+failure path — unfilled or non-numeric rate, bad shape, unparseable, round-trip mismatch, too
+little time left, **and a receipt that cannot be written** — leaves `PROVIDER_EPOCH` and
+`DEADLINE_EPOCH` unset, and §7
+mechanically refuses to launch without both. The guard is not the `ABORT` message; the guard is that the values a launch
 needs do not exist. The round-trip is what proves the epoch means the instant the console
 displayed: compare the printed `round-trip OK` value against the console by eye.
 
@@ -345,7 +390,8 @@ elif [[ "$DEADLINE_EPOCH" -le "$(date -u +%s)" ]]; then
   echo "ABORT: launcher deadline has already passed. Not launching."
 elif [[ $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) -lt 45 ]]; then
   echo "ABORT: only $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) min left at launch time,"
-  echo "       floor is 45 (probe_timing.txt launch_floor_seconds=2700). Not launching."
+  echo "       floor is 45 (launch_floor_seconds=2700). Deadlines discarded; not launching."
+  unset PROVIDER_EPOCH DEADLINE_EPOCH
 else
   # Only now, past every guard: clear any pid from an earlier attempt and launch.
   rm -f /workspace/persist/study2/launcher.pid
@@ -517,6 +563,7 @@ EXPECT_MODEL = {
 REPRO_DIR, REPRO_CAND, REPRO_WANT = "study2_probe_simple_python", "sft", 369
 
 fail = []
+rescored = {}   # dir -> {(id, candidate): overall_ok recomputed here}
 def check(cond, msg):
     if not cond:
         fail.append(msg)
@@ -525,6 +572,42 @@ if not PINS.exists():
     print(f"FAIL: pin manifest absent at {PINS}"); sys.exit(1)
 pins = json.loads(PINS.read_text())
 spec_by_cat = {f["category"]: f for f in pins["files"] if f["role"] == "questions"}
+key_by_cat  = {f["category"]: f for f in pins["files"] if f["role"] == "answer_key"}
+# The release-commit key differs at simple_python_363 and scores 368, not 369.
+# Naming it explicitly turns "wrong key" into a diagnosis instead of a mystery.
+release_key = {f["category"]: f for f in pins["files"]
+               if f["role"] == "answer_key_release_commit"}
+
+# The pinned parser and the pinned scorer, so the recount cannot drift from the
+# rule the run actually applied. bfcl_simple imports torch/transformers/peft;
+# on this pod that is free of risk by construction — the launcher just ran it.
+sys.path.insert(0, str(REPO / "eval"))
+try:
+    from bfcl_scoring import score
+    from bfcl_simple import extract_json
+except Exception as e:                                    # noqa: BLE001
+    print(f"FAIL: cannot import the pinned scorer/parser from {REPO/'eval'}: {e}")
+    sys.exit(1)
+
+
+def verify_pinned(spec, label, fail):
+    """Return (path, ids) after checking bytes and id digest against the pin."""
+    p = REPO / spec["local_path"]
+    if not p.exists():
+        fail.append(f"{label}: pinned file absent at {p}")
+        return None, None
+    raw = p.read_bytes()
+    got = hashlib.sha256(raw).hexdigest()
+    if got != spec["sha256"]:
+        fail.append(f"{label}: sha256 {got} != pinned {spec['sha256']}")
+    rows = [json.loads(l) for l in raw.decode().splitlines() if l.strip()]
+    ids = [str(r["id"]) for r in rows]
+    dig = hashlib.sha256(("\n".join(sorted(ids)) + "\n").encode()).hexdigest()
+    if dig != spec["sorted_id_sha256"]:
+        fail.append(f"{label}: sorted-id digest {dig} != pinned {spec['sorted_id_sha256']}")
+    if len(ids) != spec["row_count"]:
+        fail.append(f"{label}: {len(ids)} rows != pinned {spec['row_count']}")
+    return rows, ids
 
 for d, cat in RUNS.items():
     run, spec = ROOT / d, spec_by_cat[cat]
@@ -534,21 +617,15 @@ for d, cat in RUNS.items():
             p.name for p in (man_p, gen_p) if not p.exists()))
         continue
 
-    # --- expected IDs derived from the pinned questions, verified first ------
-    q = REPO / spec["local_path"]
-    if not q.exists():
-        fail.append(f"{cat}: pinned questions absent at {q}")
+    # --- expected IDs and the scoring key, both verified against the pins ----
+    _, ids = verify_pinned(spec, f"{cat}/questions", fail)
+    if ids is None:
         continue
-    raw = q.read_bytes()
-    q_sha = hashlib.sha256(raw).hexdigest()
-    check(q_sha == spec["sha256"],
-          f"{cat}: questions sha256 {q_sha} != pinned {spec['sha256']}")
-    ids = [str(json.loads(l)["id"]) for l in raw.decode().splitlines() if l.strip()]
-    id_dig = hashlib.sha256(("\n".join(sorted(ids)) + "\n").encode()).hexdigest()
-    check(id_dig == spec["sorted_id_sha256"],
-          f"{cat}: sorted-id digest {id_dig} != pinned {spec['sorted_id_sha256']}")
-    check(len(ids) == spec["row_count"],
-          f"{cat}: {len(ids)} question rows != pinned {spec['row_count']}")
+    kspec = key_by_cat[cat]
+    key_rows, _ = verify_pinned(kspec, f"{cat}/answer_key", fail)
+    if key_rows is None:
+        continue
+    gt_by_id = {str(r["id"]): r["ground_truth"][0] for r in key_rows}
     expected_pairs = {(i, c) for i in ids for c in CANDS}
 
     # --- provenance the manifest must agree with -----------------------------
@@ -559,8 +636,15 @@ for d, cat in RUNS.items():
           f"{d}: code_revision={m.get('code_revision')!r}, expected {REV}")
     for k, v in EXPECT_MODEL.items():
         check(m.get(k) == v, f"{d}: {k}={m.get(k)!r}, pinned {v!r}")
-    check(((m.get("inputs") or {}).get("questions") or {}).get("sha256") == spec["sha256"],
+    inputs = m.get("inputs") or {}
+    check((inputs.get("questions") or {}).get("sha256") == spec["sha256"],
           f"{d}: manifest questions sha256 != pinned {spec['sha256']}")
+    man_key_sha = (inputs.get("answer_key") or {}).get("sha256")
+    check(man_key_sha == kspec["sha256"],
+          f"{d}: manifest answer_key sha256 {man_key_sha} != canonical {kspec['sha256']}")
+    if cat in release_key and man_key_sha == release_key[cat]["sha256"]:
+        fail.append(f"{d}: scored against the RELEASE-COMMIT answer key, not the "
+                    f"canonical one — this is the 369-vs-368 key difference")
     check(m.get("expected_rows") == len(expected_pairs),
           f"{d}: expected_rows={m.get('expected_rows')}, pins imply {len(expected_pairs)}")
     check(m.get("rows_written") == m.get("expected_rows"),
@@ -580,21 +664,41 @@ for d, cat in RUNS.items():
     check(len(rows) == len(expected_pairs),
           f"{d}: {len(rows)} rows on disk, expected {len(expected_pairs)}")
 
-# --- reproduction gate, computed ---------------------------------------------
+    # --- re-score from the raw output with the pinned parser + canonical key --
+    # Not a re-read of `overall_ok`: the stored flag is whatever key and rule
+    # the run applied. This recomputes the verdict and then requires the two to
+    # agree, so a run scored against a different key fails here rather than
+    # being reported.
+    here, disagree = {}, []
+    for r in rows:
+        rid = str(r["id"])
+        gt = gt_by_id.get(rid)
+        if gt is None:
+            continue                      # already reported as an unexpected pair
+        _, _, ok, why = score(extract_json(r.get("output") or ""), gt)
+        here[(rid, r["model_name"])] = ok
+        if ok is not bool(r.get("overall_ok")):
+            disagree.append(f"{rid}/{r['model_name']} stored={r.get('overall_ok')!r} "
+                            f"recomputed={ok} ({why or 'ok'})")
+    rescored[d] = here
+    check(not disagree,
+          f"{d}: {len(disagree)} rows re-score differently against the canonical "
+          f"key — the stored verdicts were not produced by this rule/key, e.g. "
+          f"{disagree[:3]}")
+
+# --- reproduction gate, recomputed -------------------------------------------
 spec = spec_by_cat[RUNS[REPRO_DIR]]
-gen_p = ROOT / REPRO_DIR / "generations.jsonl"
-if not gen_p.exists():
-    fail.append(f"reproduction gate: {REPRO_DIR}/generations.jsonl missing")
+if REPRO_DIR not in rescored:
+    fail.append(f"reproduction gate: {REPRO_DIR} did not reach re-scoring")
 else:
-    sub = [json.loads(l) for l in gen_p.read_text().splitlines() if l.strip()]
-    sub = [r for r in sub if r["model_name"] == REPRO_CAND]
-    got = sum(1 for r in sub if r.get("overall_ok"))
-    print(f"reproduction: {REPRO_CAND} on {REPRO_DIR} scored {got}/{len(sub)} "
+    sub = [ok for (_, c), ok in rescored[REPRO_DIR].items() if c == REPRO_CAND]
+    got = sum(1 for ok in sub if ok)
+    print(f"reproduction: {REPRO_CAND} on {REPRO_DIR} re-scored {got}/{len(sub)} "
           f"(prereg §0.4 expects {REPRO_WANT}/{spec['row_count']})")
     check(len(sub) == spec["row_count"],
           f"reproduction gate: {len(sub)} {REPRO_CAND} rows, expected {spec['row_count']}")
     check(got == REPRO_WANT,
-          f"REPRODUCTION GATE FAILED: scored {got}, prereg §0.4 expects {REPRO_WANT}")
+          f"REPRODUCTION GATE FAILED: re-scored {got}, prereg §0.4 expects {REPRO_WANT}")
 
 if fail:
     print("\n".join("FAIL: " + f for f in fail))
@@ -620,14 +724,66 @@ duplicate can mask a missing pair while the count still looks right.
 **Provenance is asserted live, not inherited.** `code_revision`, the base model and revision,
 and the adapter repo/subfolder/revision must match what the launcher pins; the manifest's own
 `validation` block is treated as corroboration, since it records what a past process
-concluded, and disk is recounted here regardless. The reproduction figure is **computed from
-`overall_ok`**, with its denominator taken from the pin rather than hard-coded.
+concluded, and disk is recounted here regardless.
+
+**The score itself is recomputed, not read back.** Pinning the questions proves *which items*
+were asked; it says nothing about the key that decided *what counted as right*, and here that
+distinction has a name — the retained release-commit key differs at `simple_python_363` and
+scores **368, not 369**. So the canonical answer key is verified byte-for-byte and by sorted-id
+digest against the pin manifest, the run manifest's `inputs.answer_key.sha256` must equal that
+same canonical hash, scoring against the release-commit key is called out by name rather than
+just failing, and then every row is **re-parsed from its raw `output` with the pinned
+`extract_json` and re-scored with the pinned `score()`**. The stored `overall_ok` must agree
+with that recount row by row. The reproduction figure is the **recomputed** one, with its
+denominator taken from the pin rather than hard-coded — a run scored against the wrong key
+cannot reach `ACCEPTANCE PASS` by carrying its own verdicts.
 
 Then hash the required artifacts — **by explicit list, failing loudly on absence.** A glob
 with `2>/dev/null` cannot distinguish "hashed everything" from "matched nothing":
 
+**First, wait for the monitor to finish.** `liveness.json` is rewritten — atomically, via
+`mv` — when the monitor notices the terminal record. §10 can legitimately run the moment
+`PROBE_EXIT_RECORD` appears, while the monitor is still mid-sleep reporting `running`;
+hashing it then produces a manifest that is false seconds later, before the `scp`.
+
 ```bash
-cd /workspace/persist/study2 || { echo "ABORT: evidence root missing"; }
+for _ in $(seq 1 60); do
+  tmux has-session -t watch 2>/dev/null || break
+  sleep 5
+done
+if tmux has-session -t watch 2>/dev/null; then
+  echo "ABORT: the watch session is still alive after 5 min — do not hash a live"
+  echo "       liveness.json. The monitor exits on its first non-alive verdict, so"
+  echo "       either the launcher is still running (read probe.log and wait) or the"
+  echo "       session is being held open by something else (tmux ls; tmux capture-pane"
+  echo "       -pt watch). Do not proceed until it is gone."
+else
+  python3 - "${LAUNCHER_PID:-$(cat /workspace/persist/study2/launcher.pid 2>/dev/null)}" \
+           /workspace/persist/study2/liveness.json <<'PY'
+import json, sys
+pid, path = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print(f"ABORT: cannot read liveness.json: {e}"); sys.exit(1)
+ok = (d.get("state") == "exited" and d.get("exit_code") == 0
+      and str(d.get("watched_pid")) == str(pid))
+print("MONITOR TERMINAL OK" if ok else
+      f"ABORT: liveness not terminal-clean — state={d.get('state')!r} "
+      f"exit_code={d.get('exit_code')!r} watched_pid={d.get('watched_pid')!r} "
+      f"(want exited / 0 / {pid})")
+sys.exit(0 if ok else 1)
+PY
+fi
+```
+
+**`MONITOR TERMINAL OK` is required before hashing.** It also proves the terminal record
+belongs to *this* PID, so a `liveness.json` left by an earlier attempt cannot be accepted.
+
+```bash
+if ! cd /workspace/persist/study2; then
+  echo "ABORT: evidence root missing — not hashing whatever directory this shell is in"
+else
 REQUIRED=(
   study2_probe_multiple/generations.jsonl       study2_probe_multiple/run_manifest.json
   study2_probe_multiple/report.md
@@ -636,7 +792,7 @@ REQUIRED=(
   isolation_ladder/isolation_ladder.json        isolation_ladder/nvidia_smi_q_pre_run.txt
   pip_freeze.txt  gpu.txt  image_tag.txt  auto_terminate_attestation.txt
   reviewed_commit.txt  env_fingerprint.json  bundle_sha256.txt
-  probe_timing.txt  launcher.pid  liveness.json  probe.log
+  deadline_derivation.txt  launcher.pid  liveness.json  probe.log
   clone_source_url.txt  clone_detached_head.txt
 )
 BAD=(); TMP=$(mktemp ./artifact_sha256.XXXXXX) || BAD+=("could not create temp file")
@@ -647,9 +803,12 @@ for f in "${REQUIRED[@]}"; do
 done
 
 # Ladder telemetry is a variable file set: hash whatever is there, require >=1.
-TELE=$(find isolation_ladder/telemetry -type f | sort); find_st=$?
+# find's own status must be captured BEFORE sorting -- piping into sort would
+# report sort's status, so a partial traversal would look like a complete one.
+TELE_RAW=$(find isolation_ladder/telemetry -type f); find_st=$?
 [[ "$find_st" -eq 0 ]] || BAD+=("find on isolation_ladder/telemetry failed (exit $find_st)")
-N_TELE=$(printf '%s' "$TELE" | grep -c . )
+TELE=$(printf '%s\n' "$TELE_RAW" | sort)
+N_TELE=$(printf '%s' "$TELE_RAW" | grep -c . )
 [[ "$N_TELE" -ge 1 ]] || BAD+=("no files under isolation_ladder/telemetry/")
 while IFS= read -r t; do
   [[ -n "$t" ]] && { sha256sum "$t" >> "$TMP" || BAD+=("sha256sum failed: $t"); }
@@ -666,6 +825,7 @@ if [[ "${#BAD[@]}" -eq 0 ]]; then
 else
   rm -f "$TMP"; printf 'ABORT: %s\n' "${BAD[@]}"
 fi
+fi
 ```
 
 **Why this shape.** The previous version decided by grepping its own output for a marker
@@ -676,12 +836,21 @@ must equal the expected count exactly, and the manifest is written to a temp fil
 `mv`-ed into place only on full success — so a partial run leaves the previous manifest
 intact and is safe to re-run. `artifact_sha256.txt` is not in its own list.
 
+The `cd` is now genuinely enclosing — the whole block sits in its `else`. Previously it was
+`cd … || { echo ABORT; }`, which prints and then carries on, creating and hashing files in
+whatever directory the shell happened to be in.
+
 **The list is the evidence inventory, not a sample.** It carries both `report.md` files, all
-seven environment receipts the bootstrap asserts (including `reviewed_commit.txt`), the
-launcher's `probe_timing.txt` and `launcher.pid`, the monitor's `liveness.json`, the ladder
-JSON with its pre-run SMI capture and telemetry, and the §3 clone receipts.
-`storage_mode.txt` is deliberately **absent**: it exists in the 2026-08-08 artifacts but no
-script writes it at `08be5d3`, so requiring it would make `ARTIFACTS COMPLETE` unreachable.
+seven environment receipts the bootstrap asserts (including `reviewed_commit.txt`), §6's
+`deadline_derivation.txt`, the launcher's `launcher.pid`, the monitor's `liveness.json`, the
+ladder JSON with its pre-run SMI capture and telemetry, and the §3 clone receipts.
+
+**Two files are deliberately absent, for the same reason.** `storage_mode.txt` and
+`probe_timing.txt` both appear in the 2026-08-08 artifacts, but **no script writes either at
+`08be5d3`** — the launcher only names `probe_timing.txt` in an exit listing. Requiring a file
+nothing creates makes `ARTIFACTS COMPLETE` unreachable on a fresh pod, and satisfiable by a
+stale file on a reused volume. §6's `deadline_derivation.txt` replaces it and is written by
+this runbook, for this run.
 
 Pull everything down from your laptop:
 
@@ -715,28 +884,58 @@ inside it.
 3. Hash the folder once captured. The `cd` is fail-closed and the manifest excludes itself,
    so this is safe to re-run when the settled charge lands later:
 
+This one runs on **your laptop**, where the login shell is zsh, so it is piped to `bash`
+explicitly — an unmatched glob aborts a zsh command and zsh arrays are 1-indexed, and neither
+failure would look like a failure here. Edit `<DATE>` inside the heredoc before pasting:
+
 ```bash
+bash <<'SH'
+set -o pipefail
 DEST=~/Documents/llama-tools-artifacts/probe-<DATE>/cost_evidence
 if ! cd "$DEST"; then
   echo "ABORT: $DEST does not exist — create it and re-capture; do NOT hash whatever"
   echo "       directory this shell happens to be sitting in."
 else
-  TMP=$(mktemp ./cost_evidence_sha256.XXXXXX)
-  BAD=(); N=0
+  # 06 is deliberately absent from this list: the settled charge may not exist
+  # yet. Every other slot must be present -- one file each, whatever extension.
+  REQUIRED="01_rate_at_creation 02_image_selected 03_auto_terminate_set
+            04_termination_confirmed 05_billing_stopped 07_elapsed_derived"
+  BAD=(); N=0; SETTLED=no
+  TMP=$(mktemp ./cost_evidence_sha256.XXXXXX) || BAD+=("could not create temp file")
+  for want in $REQUIRED; do
+    found=no
+    for f in "$want"*; do [[ -f "$f" ]] && found=yes; done
+    [[ "$found" == yes ]] || BAD+=("required evidence missing: $want*")
+  done
   for f in *; do
     [[ -f "$f" ]] || continue
     case "$f" in cost_evidence_sha256.*) continue ;; esac   # never hash itself
+    case "$f" in 06_settled_charge*) SETTLED=yes ;; esac
     shasum -a 256 "$f" >> "$TMP" || BAD+=("shasum failed (exit $?): $f")
     N=$((N+1))
   done
-  [[ "$N" -ge 1 ]] || BAD+=("no evidence files present in $DEST")
+  if [[ "$SETTLED" == yes ]]; then STATE="settled charge PRESENT"
+  else STATE="settled charge PENDING — cost stays 'unsettled, not attributable'"; fi
   if [[ "${#BAD[@]}" -eq 0 ]]; then
-    mv -f "$TMP" cost_evidence_sha256.txt && cat cost_evidence_sha256.txt
+    mv -f "$TMP" cost_evidence_sha256.txt || BAD+=("could not write cost_evidence_sha256.txt")
+  fi
+  if [[ "${#BAD[@]}" -eq 0 ]]; then
+    cat cost_evidence_sha256.txt
+    echo "COST EVIDENCE COMPLETE ($N entries; $STATE)"
   else
     rm -f "$TMP"; printf 'ABORT: %s\n' "${BAD[@]}"
   fi
 fi
+SH
 ```
+
+**A count is not a checklist.** The previous version accepted any one file as evidence, so a
+folder holding only `07_elapsed_derived.txt` — the one row that is *not* provider proof —
+printed a clean manifest. Each of `01`–`05` and `07` must now be present by name before the
+token appears. `06_settled_charge` stays optional **only** while every cost statement remains
+explicitly unsettled, and the token says which of those two worlds you are in rather than
+leaving it to memory. Re-running after the charge lands re-hashes and flips `PENDING` to
+`PRESENT`.
 
 **Capture timing is not a detail.** `01_rate_at_creation.png` and `03_auto_terminate_set.png`
 belong to §1 **before Deploy** — after termination those views are gone, and a rate you can
@@ -768,7 +967,8 @@ word did not appear, treat it as failure even when nothing looked wrong:
 | §6 | `round-trip OK` **and** `DEADLINES OK` | no deadlines exist; §7 will refuse |
 | §7 | `LAUNCHED` | nothing started; nothing to monitor |
 | §8 | `MONITOR ACTIVE` | the run is unmonitored — fix or terminate, do not walk away |
-| §10 | `ACCEPTANCE PASS`, `acceptance exit: 0`, `ARTIFACTS COMPLETE (n entries)` | the numbers may not be reported (§0.5) |
+| §10 | `ACCEPTANCE PASS`, `acceptance exit: 0`, `MONITOR TERMINAL OK`, `ARTIFACTS COMPLETE (n entries)` | the numbers may not be reported (§0.5) |
+| §11 | `COST EVIDENCE COMPLETE (n entries; …)` | the evidence set is incomplete — the cost of this run is not documented |
 
 Plus:
 
