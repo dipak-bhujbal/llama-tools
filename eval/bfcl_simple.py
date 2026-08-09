@@ -59,6 +59,30 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # actually happened.
 SIBLING_FILENAMES = ("generations.jsonl", "report.md", "run_manifest.json")
 
+# How the `base` candidate is realized at generation time, recorded verbatim in
+# every run manifest.
+#
+# THE PREREGISTRATION DOES NOT SPECIFY THIS. §0.2 "What the probe measures"
+# names the candidates (`base`, `sft`), pins the base model and revision, and
+# pins the adapter and revision — but nowhere says whether `base` means a
+# separately loaded raw base model or the PEFT-wrapped model with its adapter
+# switched off. §0.1 and §0.3–§0.6 do not constrain it either. That silence is
+# the reason this constant exists: an unstated construction of the comparator
+# is not recoverable from `"candidates": ["base", "sft"]` after the fact, and a
+# reader a year from now cannot tell which of the two was measured.
+#
+# The two realizations are *intended* to be numerically equivalent — disabling
+# LoRA routes the forward pass through the base weights — but they are not the
+# same object graph: the adapter modules stay resident in VRAM and the forward
+# still traverses the PEFT wrapper. Rungs 3 and 4 of eval/isolation_ladder.py
+# exist to isolate exactly that difference, and the 2026-08-08 §0 crash
+# occurred at this realization. So the distinction is not academic, and which
+# one produced a given number belongs in that number's provenance.
+#
+# If this value ever changes, the manifests on either side of the change say so
+# without anyone having to remember.
+BASE_CANDIDATE_REALIZATION = "peft_model_with_adapter_disabled"
+
 
 def load_jsonl(path: Path):
     rows = []
@@ -133,6 +157,12 @@ def build_initial_manifest(args, candidates: list, category_paths, n_prompts: in
         "cli": " ".join(sys.argv),
         "category": args.category,
         "candidates": candidates,
+        # None, not the constant, when `base` was not evaluated: recording a
+        # base realization for a run that had no base candidate would put a
+        # claim in the provenance about something the run never did.
+        "base_candidate_realization": (
+            BASE_CANDIDATE_REALIZATION if "base" in candidates else None
+        ),
         "n_prompts": n_prompts,
         "expected_rows": n_prompts * len(candidates),
         "base_model": args.base_model,
@@ -567,6 +597,11 @@ def main() -> None:
 
         for cand in candidates:
             if cand == "base":
+                # The one place the base candidate is constructed. Its mechanism
+                # is named by BASE_CANDIDATE_REALIZATION above and recorded in
+                # the manifest; tests/test_base_candidate_realization.py pins the
+                # two together so the recorded provenance cannot drift from the
+                # code that produced it.
                 adapter_ctx = model.disable_adapter()
             else:
                 model.set_adapter(cand)
