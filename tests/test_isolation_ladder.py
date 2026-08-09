@@ -583,7 +583,7 @@ def test_the_configuration_boundary_is_rung_3(fail_at: int, within: bool) -> Non
 def test_all_pass_verdict_does_not_blame_work_the_failed_probe_never_reached() -> None:
     summary = il.summarise(Recorder().run())
     verdict = summary["verdict"]
-    assert "same first 609-token prompt" in verdict
+    assert "same first 610-token prompt" in verdict
     assert "before later prompts or categories" in verdict
     assert "prompt count (400 vs 1)" not in verdict
     assert "280-999" not in verdict
@@ -778,10 +778,43 @@ def test_dry_run_needs_no_gpu_and_exits_clean() -> None:
     assert il.main(["--dry-run"]) == il.EXIT_OK
 
 
-def test_the_609_token_invariant_cannot_be_overridden_from_the_command_line() -> None:
-    """`--expect-prompt-tokens` let a caller bless any prompt length while the
-    docs promised the gate refused anything but 609 — a gate with a documented
-    guarantee and a public override is not a gate."""
+def test_no_current_fact_text_still_claims_the_retired_609_gate() -> None:
+    """Regression for a defect that survived three review cycles of A1.
+
+    A1 replaced the 609 token-count gate with a hash-identity gate, but five
+    places kept asserting 609 as present-tense fact -- including inside
+    ALL_PASS_VERDICT, so a green run would have printed a false statement about
+    the crash it had just failed to reproduce. The explanatory comment that
+    recounts the history is exempt; it is *about* the old value.
+    """
+    for path in (
+        REPO_ROOT / "eval" / "isolation_ladder.py",
+        REPO_ROOT / "docs" / "probe-bootstrap.md",
+    ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "609" not in line:
+                continue
+            # The history comment in isolation_ladder.py explains why 609 was
+            # wrong; it must keep saying 609.
+            assert line.lstrip().startswith("#"), (
+                f"{path.name}:{lineno} states 609 as current fact: {line.strip()!r}"
+            )
+
+
+def test_all_pass_verdict_describes_the_prompt_the_gate_actually_pins() -> None:
+    """The verdict is an artifact a human reads to decide what a green run
+    means. It must describe the sequence the gate admitted -- 610 tokens with
+    the duplicated BOS -- not the off-path count that never reached the model."""
+    verdict = il.summarise(Recorder().run())["verdict"]
+    assert str(il.OBSERVED_PROMPT_TOKENS) in verdict
+    assert "609" not in verdict
+
+
+def test_the_prompt_gate_cannot_be_overridden_from_the_command_line() -> None:
+    """`--expect-prompt-tokens` let a caller bless any prompt while the docs
+    promised a gate — a gate with a documented guarantee and a public override
+    is not a gate. The gate is now identity (two hashes), not a count, but the
+    override must stay absent for the same reason."""
     parser = il.build_parser()
     flags = {action.option_strings[0] for action in parser._actions if action.option_strings}
     assert "--expect-prompt-tokens" not in flags

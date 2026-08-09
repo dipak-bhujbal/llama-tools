@@ -31,7 +31,7 @@ Three properties make the result interpretable rather than suggestive:
   the context is already poisoned and every later step would fail for a reason
   that has nothing to do with what it was meant to test.
 
-Cost: one 609-token prompt and 8 new tokens per step. Seconds of GPU time.
+Cost: one 610-token prompt and 8 new tokens per step. Seconds of GPU time.
 
 `torch`, `transformers` and `peft` are imported lazily inside the loaders so
 this module, its ordering, its verdict logic and its tests all run on a laptop
@@ -204,7 +204,7 @@ ALL_PASS_VERDICT = (
     "NOT REPRODUCED. All four configurations generated cleanly. The ladder "
     "excludes placement, the PEFT wrapper and adapter state as *sufficient* "
     "causes on this run. It does not identify a cause for the earlier failure: "
-    "that crash occurred on this same first 609-token prompt, before later "
+    "that crash occurred on this same first 610-token prompt, before later "
     "prompts or categories could contribute. Intermittent or nondeterministic "
     "software behavior and differences in node, card, driver, or environment "
     "remain open. Compare the recorded telemetry. A green ladder does NOT clear "
