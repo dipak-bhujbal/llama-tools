@@ -22,12 +22,38 @@ each one says where the value comes from. If a step's expected evidence does not
 | Planning basis | 1.1667 h × the live rate, plus any storage charge the console shows |
 | Rate ceiling | $4 ÷ 1.1667 ≈ **$3.43/hr** compute-only; storage reduces this |
 
-The wall-clock envelope behind those numbers: **16.8 min** bootstrap+download (measured
-from the 2026-08-08 pod), **~10 min** ladder, **~31 min** generation on the pessimistic
-6× assumption = 57.7 min, leaving ~9 min slack inside 67.
+### The wall-clock envelope, separated by what is actually known
+
+An earlier version of this table said "**16.8 min** bootstrap+download". That was wrong in
+its label and unsupported in its number: **bootstrap downloads no weights** — the first
+`from_pretrained` is inside the launcher — and no surviving artifact from the 2026-08-08 pod
+records bootstrap's duration, because bootstrap's own output was never captured to a file.
+Corrected, and marked by provenance:
+
+| Phase | Duration | Basis |
+|---|---|---|
+| Bootstrap — clone, venv, `pip install`, preflight | **not measured** | 2026-08-08 kept no bootstrap log. Dominated by the torch wheel install, so budget generously |
+| Weight fetch, first load | **17 s fetch + 10 s load** | **measured**, `probe-20260808/study2/probe.log` — a warm/fast link on that node; do not assume it generalises |
+| Isolation ladder, 4 rungs | **~10 min** | **assumption, upper bound.** Four model loads plus smoke generations; never measured end-to-end |
+| Generation, 1,200 gens | **5.2 min** (1×) → **30.9 min** (6×) | **measured** anchor 0.2573 s/gen (mining pilot, 205.841 s / 800 gens); the 3×/6× multipliers are assumptions |
+
+**Post-launch worst case ≈ 10 + 31 + 0.5 ≈ 41.5 min.** That is the number the launch floor
+has to clear, and it is why the floor is **45 minutes, not 40**: at 40 the pessimistic path
+does not fit at all.
+
+**The 45-minute floor is a receipt, not a fresh choice.**
+`probe-20260808/study2/probe_timing.txt` records `launch_floor_seconds=2700`, basis
+`planning_40min_upper_plus_5min_buffer`. The 40 in the previous draft silently regressed a
+recorded decision. **This runbook does not supersede it** — it restores it, and the
+arithmetic above independently agrees.
 
 **No dollar figure is encoded in any script.** The provider deadline is the only bound
 that survives this process being killed.
+
+**Known from the 2026-08-08 pod, for comparison, not for planning:** RTX 4090 at
+**$0.351/hr**, image `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404`, ephemeral pod disk.
+That was a different card class from the A6000/A100 above and a *different reviewed commit*
+(`2d8abdb`); it tells you the shape of a bill, not this run's rate.
 
 ---
 
@@ -51,6 +77,28 @@ that survives this process being killed.
 
 **Record before continuing:** `<RATE>` (e.g. `0.79`), `<IMAGE_TAG>`,
 `<TERMINATE_UTC>` (e.g. `2026-08-09T04:15:00Z`).
+
+### Capture the provider evidence **now, before you click Deploy**
+
+Creation-time views do not survive the pod. A screenshot taken after termination cannot show
+the rate you were quoted or the auto-terminate you set, so §11 cannot be where this is
+collected. On your laptop, first:
+
+```bash
+mkdir -p ~/Documents/llama-tools-artifacts/probe-<DATE>/cost_evidence
+```
+
+Then capture into it, from the console, **before deploying**:
+
+| File | What it must show |
+|---|---|
+| `01_rate_at_creation.png` | the selected card and its **$/hr as displayed**, on the creation screen |
+| `02_image_selected.png` | the exact image tag being deployed |
+| `03_auto_terminate_set.png` | the auto-terminate setting **and** the resulting termination time |
+
+These three are the only provider proof of what this run was priced at and bounded by. The
+in-pod `auto_terminate_attestation.txt` receipt is **operator-entered** — it records what you
+typed, and is not evidence of either. §11 collects the termination and settlement halves.
 
 ---
 
@@ -76,36 +124,78 @@ of the default branch is a moving target: `main` advancing between review and ru
 change the behaviour of the very script that enforces exact-SHA execution, while the runbook
 still claimed the reviewed commit ran.
 
+**Every command's exit status is captured, not just its output.** Checking values alone is
+how `SOURCE PINNED` could print after `git bundle create` had failed: a valid HEAD and an
+empty `git status` say nothing about whether the bundle was written.
+
 ```bash
 cd /workspace
 export RUNPOD_IMAGE_NAME='<IMAGE_TAG>'
 export HF_HOME=/root/.cache/huggingface
 mkdir -p "$HF_HOME" /workspace/persist/study2
 
-rm -rf /workspace/src        # so a re-paste after a typo cannot clone into a dirty tree
-git clone https://github.com/dipak-bhujbal/llama-tools.git src
-git -C src checkout --detach 08be5d3b0c1293ac229fe7b04e2931f14bd149d0
+REV=08be5d3b0c1293ac229fe7b04e2931f14bd149d0
+P=/workspace/persist/study2
+ERRS=()
+try(){ local l="$1"; shift; "$@"; local s=$?; [[ $s -eq 0 ]] || ERRS+=("$l exit $s"); return $s; }
+cap(){ local l="$1" v="$2"; shift 2; local o s; o=$("$@"); s=$?
+       [[ $s -eq 0 ]] || ERRS+=("$l exit $s"); printf -v "$v" '%s' "$o"; return $s; }
 
-HEAD_NOW=$(git -C src rev-parse HEAD 2>/dev/null)
-TREE_DIRT=$(git -C src status --porcelain 2>/dev/null)
-if [[ "$HEAD_NOW" != "08be5d3b0c1293ac229fe7b04e2931f14bd149d0" ]]; then
-  echo "ABORT: src HEAD is '$HEAD_NOW', expected 08be5d3b0c1293ac229fe7b04e2931f14bd149d0"
-elif [[ -n "$TREE_DIRT" ]]; then
-  echo "ABORT: src working tree is not clean:"; echo "$TREE_DIRT"
+if [[ -e /workspace/src ]]; then
+  echo "ABORT: /workspace/src already exists."
+  echo "       Inspect it and remove it yourself — this runbook does not delete"
+  echo "       a directory it did not create."
 else
-  git -C src bundle create /workspace/llama-tools.bundle --all
-  sha256sum /workspace/llama-tools.bundle | awk '{print $1}' > /workspace/llama-tools.bundle.sha256
-  git -C src remote get-url origin > /workspace/persist/study2/clone_source_url.txt
-  printf '%s\n' "$HEAD_NOW"        > /workspace/persist/study2/clone_detached_head.txt
-  echo "SOURCE PINNED at $HEAD_NOW, tree clean, bundle written"
+  try clone  git clone https://github.com/dipak-bhujbal/llama-tools.git src \
+    && try detach git -C src checkout --detach "$REV"
+
+  cap rev-parse HEAD_NOW git -C src rev-parse HEAD
+  [[ "$HEAD_NOW" == "$REV" ]] || ERRS+=("HEAD is '$HEAD_NOW', expected $REV")
+
+  cap status TREE_DIRT git -C src status --porcelain
+  [[ -z "$TREE_DIRT" ]] || ERRS+=("working tree not clean: $TREE_DIRT")
+
+  try bundle-create git -C src bundle create /workspace/llama-tools.bundle --all
+  try bundle-verify git -C src bundle verify /workspace/llama-tools.bundle
+  [[ -s /workspace/llama-tools.bundle ]] || ERRS+=("bundle is missing or empty")
+
+  cap bundle-sha BSHA bash -c \
+    'sha256sum /workspace/llama-tools.bundle | awk "{print \$1}"'
+  [[ "$BSHA" =~ ^[0-9a-f]{64}$ ]] || ERRS+=("bundle sha256 not a digest: '$BSHA'")
+  try write-sha bash -c 'printf "%s\n" "$1" > /workspace/llama-tools.bundle.sha256' _ "$BSHA"
+
+  cap remote-url ORIGIN_URL git -C src remote get-url origin
+  [[ -n "$ORIGIN_URL" ]] || ERRS+=("origin URL is empty")
+
+  try write-url  bash -c 'printf "%s\n" "$1" > "$2/clone_source_url.txt"'    _ "$ORIGIN_URL" "$P"
+  try write-head bash -c 'printf "%s\n" "$1" > "$2/clone_detached_head.txt"' _ "$HEAD_NOW"   "$P"
+  for f in "$P/clone_source_url.txt" "$P/clone_detached_head.txt" /workspace/llama-tools.bundle.sha256; do
+    [[ -s "$f" ]] || ERRS+=("receipt not written or empty: $f")
+  done
+
+  if [[ "${#ERRS[@]}" -eq 0 ]]; then
+    echo "SOURCE PINNED at $HEAD_NOW; tree clean; bundle verified; receipts written"
+    echo "  origin: $ORIGIN_URL"
+    echo "  bundle sha256: $BSHA"
+  else
+    printf 'ABORT: %s\n' "${ERRS[@]}"
+  fi
 fi
 ```
 
-**Proceed only on `SOURCE PINNED`.** The bundle is created *after* the detach, so nothing is
-packaged from an unpinned tree; `--all` still carries every ref, so the bundle remains a
-complete mirror. The recorded URL is `git remote get-url origin` — what the clone actually
-came from — not the string typed above, which would agree with itself even if the clone had
-come from somewhere else.
+**Proceed only on `SOURCE PINNED`.** It now prints only after **every** step returned zero
+*and* produced non-empty output — clone, detach, `rev-parse`, `status`, `bundle create`,
+`bundle verify`, the hash, the origin URL, and all three receipt writes. `git bundle verify`
+is included because a bundle can be written and still be unusable.
+
+The bundle is created *after* the detach, so nothing is packaged from an unpinned tree;
+`--all` still carries every ref, so it remains a complete mirror. The recorded URL is
+`git remote get-url origin` — what the clone actually came from — not the string typed above,
+which would agree with itself even if the clone had come from somewhere else.
+
+**On a pre-existing `/workspace/src`, this refuses rather than deletes.** An earlier draft ran
+an unconditional `rm -rf`, which on a reused or unexpected pod would destroy something the
+operator had not looked at. Deleting is your call, not the runbook's.
 
 **What the sidecar does and does not prove.** It detects mutation between bundle
 creation here and the bootstrap reading it a minute later. It is **not** transfer
@@ -135,19 +225,32 @@ separate pastes and the gap between them is exactly where a tree can change:
 
 ```bash
 cd /workspace
-if [[ "$(git -C /workspace/src rev-parse HEAD 2>/dev/null)" != "08be5d3b0c1293ac229fe7b04e2931f14bd149d0" ]]; then
-  echo "ABORT: /workspace/src is not at the reviewed SHA — redo §3, do not run bootstrap"
-elif [[ -n "$(git -C /workspace/src status --porcelain 2>/dev/null)" ]]; then
+REV=08be5d3b0c1293ac229fe7b04e2931f14bd149d0
+H=$(git -C /workspace/src rev-parse HEAD); h_st=$?
+D=$(git -C /workspace/src status --porcelain); d_st=$?
+
+if [[ "$h_st" -ne 0 ]]; then
+  echo "ABORT: git rev-parse failed (exit $h_st) — redo §3, do not run bootstrap"
+elif [[ "$d_st" -ne 0 ]]; then
+  echo "ABORT: git status failed (exit $d_st) — redo §3, do not run bootstrap"
+elif [[ "$H" != "$REV" ]]; then
+  echo "ABORT: /workspace/src is at '$H', not the reviewed SHA — redo §3"
+elif [[ -n "$D" ]]; then
   echo "ABORT: /workspace/src is dirty — redo §3, do not run bootstrap"
 else
   bash src/scripts/bootstrap_pod.sh \
     --bundle /workspace/llama-tools.bundle \
     --bundle-sha256-file /workspace/llama-tools.bundle.sha256 \
-    --commit 08be5d3b0c1293ac229fe7b04e2931f14bd149d0 \
+    --commit "$REV" \
     --out-root /workspace/persist/study2 \
     --auto-terminate-set '<TERMINATE_UTC>@<RATE>'
 fi
 ```
+
+The `2>/dev/null` that used to sit on `git status` here is gone, and both statuses are now
+tested. Suppressed stderr plus an empty result is indistinguishable from a clean tree: a
+`git status` exiting 128 produced no output, which the old `-n` test read as "nothing dirty"
+and fell straight through to bootstrap.
 
 **Expected evidence, in order:** `STEP 0` acknowledges the attestation · `STEP 3` prints
 `bundle sha256 verified` · `STEP 4` prints `HEAD asserted: 08be5d3…` · `STEP 6` prints the
@@ -192,9 +295,9 @@ else
     echo "round-trip OK: $ROUND_TRIP"
     echo "provider=$PROVIDER_EPOCH launcher=$DEADLINE_EPOCH now=$(date -u +%s)"
     echo "minutes of work left: $MINS_LEFT"
-    if [[ "$MINS_LEFT" -lt 40 ]]; then
+    if [[ "$MINS_LEFT" -lt 45 ]]; then
       unset PROVIDER_EPOCH DEADLINE_EPOCH
-      echo "ABORT: only $MINS_LEFT min of work left, need >= 40 — deadlines discarded"
+      echo "ABORT: only $MINS_LEFT min of work left, need >= 45 — deadlines discarded"
     else
       echo "DEADLINES OK"
     fi
@@ -209,10 +312,13 @@ without both. The guard is not the `ABORT` message; the guard is that the values
 needs do not exist. The round-trip is what proves the epoch means the instant the console
 displayed: compare the printed `round-trip OK` value against the console by eye.
 
-**Why the ≥ 40 minute gate:** the launcher already refuses to start if its deadline is not
+**Why the ≥ 45 minute floor:** the launcher already refuses to start if its deadline is not
 strictly earlier than the provider's, and refuses a deadline already past. Neither catches
 the expensive case — enough time to *start* but not to *finish*. Launching into a run that
-gets killed mid-generation is billed in full and yields nothing.
+gets killed mid-generation is billed in full and yields nothing. 45 comes from
+`probe-20260808/study2/probe_timing.txt` (`launch_floor_seconds=2700`) and matches §0's
+~41.5 min pessimistic post-launch path. **§7 re-checks it immediately before launching**,
+because §6 and §7 are separate pastes and the time between them is real.
 
 ---
 
@@ -237,6 +343,9 @@ elif [[ "$DEADLINE_EPOCH" -ge "$PROVIDER_EPOCH" ]]; then
   echo "ABORT: launcher deadline is not strictly earlier than the provider's. Not launching."
 elif [[ "$DEADLINE_EPOCH" -le "$(date -u +%s)" ]]; then
   echo "ABORT: launcher deadline has already passed. Not launching."
+elif [[ $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) -lt 45 ]]; then
+  echo "ABORT: only $(( (DEADLINE_EPOCH - $(date -u +%s)) / 60 )) min left at launch time,"
+  echo "       floor is 45 (probe_timing.txt launch_floor_seconds=2700). Not launching."
 else
   # Only now, past every guard: clear any pid from an earlier attempt and launch.
   rm -f /workspace/persist/study2/launcher.pid
@@ -366,7 +475,7 @@ did not exit in an orderly way — that is the monitor's `72`, not an exit code 
 
 | Fails at | Rung | Reading | Action |
 |---|---|---|---|
-| **1** | raw base, explicit `cuda:0`, no `device_map` | Excludes PEFT, placement and adapter state — none is present. Implicates **the card, the driver, the torch/CUDA build, or the base weights at this revision** | **Terminate. Retry once on a second node** — that discriminates host from the rest, it does not by itself convict the host. Reproduces on two nodes ⇒ not the card: pin a known-good Transformers/Torch pair for §0 only, at the **image boundary** (exact image tag + a bootstrap runtime-equality assertion), not via a torch overlay in `requirements-probe.txt`. The pinned base-weights revision stays an open cause until the retry rules the host out |
+| **1** | raw base, explicit `cuda:0`, no `device_map` | Excludes PEFT, placement and adapter state — none is present. Implicates **the card, the driver, the torch/CUDA build, or the base weights at this revision** | **Terminate. Retry once on a second node** — that discriminates one host, it does not by itself convict or exonerate anything else. Reproducing on two nodes rules out **that one physical card and host**; it does **not** rule out the card *model*, the driver, or the image, all of which the two pods share. Next: pin a known-good Transformers/Torch pair for §0 only, at the **image boundary** (exact image tag + a bootstrap runtime-equality assertion), not via a torch overlay in `requirements-probe.txt` — and a different card model is a separate experiment, not a conclusion. The pinned base-weights revision stays open throughout |
 | **2** | raw base, `device_map="auto"` | `device_map="auto"` placement | Load explicitly on a single device |
 | **3** | `PeftModel`, adapter **disabled** | The adapter-disabled base realization | Realize the base candidate as a **separately loaded raw base model**. **No prereg amendment is needed** — §0 does not specify the realization (confirmed independently by both agents), and `base_candidate_realization` is already written into every run manifest |
 | **4** | `PeftModel`, adapter **enabled** | Step 3 exonerates the wrapper; only the active LoRA weights differ. The mining pilot ran this same configuration successfully on 2026-08-07, so a failure is a **regression since that date — environment, card, or adapter revision** — not a standing defect in the code path | **Do not conclude "bad node."** Record which of the three it is by elimination: re-run on a different node *and* check the adapter revision actually loaded against the pilot's. A second node is the next diagnostic step, not the diagnosis |
@@ -388,49 +497,91 @@ computes the reproduction gate rather than asserting it in prose:
 
 ```bash
 python3 - <<'PY'
-import collections, json, pathlib, sys
+import collections, hashlib, json, pathlib, sys
 
 ROOT = pathlib.Path("/workspace/persist/study2")
-EXPECT = {"study2_probe_multiple": 400, "study2_probe_simple_python": 800}
-REPRO_DIR, REPRO_CAND, REPRO_WANT, REPRO_DENOM = "study2_probe_simple_python", "sft", 369, 400
+REPO = pathlib.Path("/workspace/llama-tools")
+REV  = "08be5d3b0c1293ac229fe7b04e2931f14bd149d0"
+PINS = REPO / "eval/manifests/bfcl_v4_study2.json"
+RUNS = {"study2_probe_multiple": "multiple",
+        "study2_probe_simple_python": "simple_python"}
+CANDS = {"base", "sft"}
+# What the launcher pins on the command line; asserted, not assumed.
+EXPECT_MODEL = {
+    "base_model": "meta-llama/Llama-3.1-8B-Instruct",
+    "base_revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+    "sft_adapter": "centuriandip/llama-3.1-8b-tools-sft",
+    "sft_adapter_subfolder": "adapter",
+    "sft_adapter_revision": "b6f4da479f8c6fc044ee8b802a92f47780f970c5",
+}
+REPRO_DIR, REPRO_CAND, REPRO_WANT = "study2_probe_simple_python", "sft", 369
 
 fail = []
 def check(cond, msg):
     if not cond:
         fail.append(msg)
 
-for d, expected_rows in EXPECT.items():
-    run = ROOT / d
+if not PINS.exists():
+    print(f"FAIL: pin manifest absent at {PINS}"); sys.exit(1)
+pins = json.loads(PINS.read_text())
+spec_by_cat = {f["category"]: f for f in pins["files"] if f["role"] == "questions"}
+
+for d, cat in RUNS.items():
+    run, spec = ROOT / d, spec_by_cat[cat]
     man_p, gen_p = run / "run_manifest.json", run / "generations.jsonl"
     if not man_p.exists() or not gen_p.exists():
         fail.append(f"{d}: MISSING " + ", ".join(
             p.name for p in (man_p, gen_p) if not p.exists()))
         continue
+
+    # --- expected IDs derived from the pinned questions, verified first ------
+    q = REPO / spec["local_path"]
+    if not q.exists():
+        fail.append(f"{cat}: pinned questions absent at {q}")
+        continue
+    raw = q.read_bytes()
+    q_sha = hashlib.sha256(raw).hexdigest()
+    check(q_sha == spec["sha256"],
+          f"{cat}: questions sha256 {q_sha} != pinned {spec['sha256']}")
+    ids = [str(json.loads(l)["id"]) for l in raw.decode().splitlines() if l.strip()]
+    id_dig = hashlib.sha256(("\n".join(sorted(ids)) + "\n").encode()).hexdigest()
+    check(id_dig == spec["sorted_id_sha256"],
+          f"{cat}: sorted-id digest {id_dig} != pinned {spec['sorted_id_sha256']}")
+    check(len(ids) == spec["row_count"],
+          f"{cat}: {len(ids)} question rows != pinned {spec['row_count']}")
+    expected_pairs = {(i, c) for i in ids for c in CANDS}
+
+    # --- provenance the manifest must agree with -----------------------------
     m = json.loads(man_p.read_text())
     check(m.get("status") == "complete",
           f"{d}: status={m.get('status')!r}, expected 'complete'")
-    check(m.get("expected_rows") == expected_rows,
-          f"{d}: manifest expected_rows={m.get('expected_rows')}, prereg says {expected_rows}")
+    check(m.get("code_revision") == REV,
+          f"{d}: code_revision={m.get('code_revision')!r}, expected {REV}")
+    for k, v in EXPECT_MODEL.items():
+        check(m.get(k) == v, f"{d}: {k}={m.get(k)!r}, pinned {v!r}")
+    check(((m.get("inputs") or {}).get("questions") or {}).get("sha256") == spec["sha256"],
+          f"{d}: manifest questions sha256 != pinned {spec['sha256']}")
+    check(m.get("expected_rows") == len(expected_pairs),
+          f"{d}: expected_rows={m.get('expected_rows')}, pins imply {len(expected_pairs)}")
     check(m.get("rows_written") == m.get("expected_rows"),
           f"{d}: rows_written={m.get('rows_written')} != expected_rows={m.get('expected_rows')}")
-    v = m.get("validation") or {}
-    check(v.get("ok") is True, f"{d}: validation.ok={v.get('ok')!r}")
-    check(v.get("unparseable_lines") == 0,
-          f"{d}: validation.unparseable_lines={v.get('unparseable_lines')!r}")
-    for k in ("duplicate_pairs", "missing_pairs", "extra_pairs"):
-        check(not v.get(k), f"{d}: validation.{k} non-empty: {v.get(k)!r}")
 
+    # --- coverage recounted from disk; the manifest is corroboration only ----
     rows = [json.loads(l) for l in gen_p.read_text().splitlines() if l.strip()]
-    check(len(rows) == expected_rows,
-          f"{d}: {len(rows)} rows on disk, expected {expected_rows}")
-    pairs = collections.Counter((r["id"], r["model_name"]) for r in rows)
+    pairs = collections.Counter((str(r["id"]), r["model_name"]) for r in rows)
     dupes = [p for p, c in pairs.items() if c > 1]
     check(not dupes, f"{d}: {len(dupes)} duplicated (id,candidate) pairs, e.g. {dupes[:3]}")
-    check(len(pairs) == expected_rows,
-          f"{d}: {len(pairs)} unique (id,candidate) pairs, expected {expected_rows}")
-    cands = sorted({r["model_name"] for r in rows})
-    check(cands == ["base", "sft"], f"{d}: candidates {cands}, expected ['base', 'sft']")
+    missing = expected_pairs - set(pairs)
+    extra   = set(pairs) - expected_pairs
+    check(not missing,
+          f"{d}: {len(missing)} EXPECTED pairs absent, e.g. {sorted(missing)[:3]}")
+    check(not extra,
+          f"{d}: {len(extra)} UNEXPECTED pairs present, e.g. {sorted(extra)[:3]}")
+    check(len(rows) == len(expected_pairs),
+          f"{d}: {len(rows)} rows on disk, expected {len(expected_pairs)}")
 
+# --- reproduction gate, computed ---------------------------------------------
+spec = spec_by_cat[RUNS[REPRO_DIR]]
 gen_p = ROOT / REPRO_DIR / "generations.jsonl"
 if not gen_p.exists():
     fail.append(f"reproduction gate: {REPRO_DIR}/generations.jsonl missing")
@@ -439,9 +590,9 @@ else:
     sub = [r for r in sub if r["model_name"] == REPRO_CAND]
     got = sum(1 for r in sub if r.get("overall_ok"))
     print(f"reproduction: {REPRO_CAND} on {REPRO_DIR} scored {got}/{len(sub)} "
-          f"(prereg §0.4 expects {REPRO_WANT}/{REPRO_DENOM})")
-    check(len(sub) == REPRO_DENOM,
-          f"reproduction gate: {len(sub)} {REPRO_CAND} rows, expected {REPRO_DENOM}")
+          f"(prereg §0.4 expects {REPRO_WANT}/{spec['row_count']})")
+    check(len(sub) == spec["row_count"],
+          f"reproduction gate: {len(sub)} {REPRO_CAND} rows, expected {spec['row_count']}")
     check(got == REPRO_WANT,
           f"REPRODUCTION GATE FAILED: scored {got}, prereg §0.4 expects {REPRO_WANT}")
 
@@ -449,41 +600,88 @@ if fail:
     print("\n".join("FAIL: " + f for f in fail))
     print(f"\n{len(fail)} FAILURE(S) — these numbers may not be reported (§0.5).")
     sys.exit(1)
-print("ACCEPTANCE PASS: both runs complete, counts and coverage exact, reproduction gate met.")
+print("ACCEPTANCE PASS: both runs complete, IDs match the pinned set exactly, "
+      "provenance pinned, reproduction gate met.")
 PY
 echo "acceptance exit: $?"
 ```
 
 **`acceptance exit: 0` and `ACCEPTANCE PASS` are the only results that let these numbers be
-reported.** A run that does not write exactly `n_prompts × n_candidates` rows is
-**incomplete** under §0.5; unique-pair coverage is checked separately from the row count
-because a duplicate can mask a missing pair while the total still looks right. The
-reproduction figure is **computed from `overall_ok` and compared**, not asserted — any value
-other than 369/400 is stop-and-report, not something to reconcile afterwards.
+reported.**
+
+**It checks identity, not just cardinality.** An earlier version compared counts — rows,
+unique pairs, candidate names — which 200 *entirely wrong* IDs would satisfy perfectly. The
+expected ID set is now derived from the pinned questions file, after that file's own
+`sha256` and `sorted_id_sha256` are verified against `eval/manifests/bfcl_v4_study2.json`,
+and the run must cover **exactly** that set × `{base, sft}` — missing and unexpected pairs
+are reported separately. Duplicates are still checked apart from the total, because a
+duplicate can mask a missing pair while the count still looks right.
+
+**Provenance is asserted live, not inherited.** `code_revision`, the base model and revision,
+and the adapter repo/subfolder/revision must match what the launcher pins; the manifest's own
+`validation` block is treated as corroboration, since it records what a past process
+concluded, and disk is recounted here regardless. The reproduction figure is **computed from
+`overall_ok`**, with its denominator taken from the pin rather than hard-coded.
 
 Then hash the required artifacts — **by explicit list, failing loudly on absence.** A glob
 with `2>/dev/null` cannot distinguish "hashed everything" from "matched nothing":
 
 ```bash
-cd /workspace/persist/study2
-{ for f in study2_probe_multiple/generations.jsonl      study2_probe_multiple/run_manifest.json \
-           study2_probe_simple_python/generations.jsonl study2_probe_simple_python/run_manifest.json \
-           isolation_ladder/isolation_ladder.json       probe.log \
-           clone_source_url.txt                         clone_detached_head.txt; do
-    if [[ -s "$f" ]]; then sha256sum "$f"; else echo "MISSING OR EMPTY: $f"; fi
-  done
-} > artifact_sha256.txt
-cat artifact_sha256.txt
-if grep -q 'MISSING OR EMPTY' artifact_sha256.txt; then
-  echo "ABORT: required artifacts missing — listed above"
+cd /workspace/persist/study2 || { echo "ABORT: evidence root missing"; }
+REQUIRED=(
+  study2_probe_multiple/generations.jsonl       study2_probe_multiple/run_manifest.json
+  study2_probe_multiple/report.md
+  study2_probe_simple_python/generations.jsonl  study2_probe_simple_python/run_manifest.json
+  study2_probe_simple_python/report.md
+  isolation_ladder/isolation_ladder.json        isolation_ladder/nvidia_smi_q_pre_run.txt
+  pip_freeze.txt  gpu.txt  image_tag.txt  auto_terminate_attestation.txt
+  reviewed_commit.txt  env_fingerprint.json  bundle_sha256.txt
+  probe_timing.txt  launcher.pid  liveness.json  probe.log
+  clone_source_url.txt  clone_detached_head.txt
+)
+BAD=(); TMP=$(mktemp ./artifact_sha256.XXXXXX) || BAD+=("could not create temp file")
+
+for f in "${REQUIRED[@]}"; do
+  if [[ ! -s "$f" ]]; then BAD+=("missing or empty: $f"); continue; fi
+  sha256sum "$f" >> "$TMP" || BAD+=("sha256sum failed (exit $?): $f")
+done
+
+# Ladder telemetry is a variable file set: hash whatever is there, require >=1.
+TELE=$(find isolation_ladder/telemetry -type f | sort); find_st=$?
+[[ "$find_st" -eq 0 ]] || BAD+=("find on isolation_ladder/telemetry failed (exit $find_st)")
+N_TELE=$(printf '%s' "$TELE" | grep -c . )
+[[ "$N_TELE" -ge 1 ]] || BAD+=("no files under isolation_ladder/telemetry/")
+while IFS= read -r t; do
+  [[ -n "$t" ]] && { sha256sum "$t" >> "$TMP" || BAD+=("sha256sum failed: $t"); }
+done <<< "$TELE"
+
+WANT=$(( ${#REQUIRED[@]} + N_TELE ))
+GOT=$(grep -c . "$TMP")
+[[ "$GOT" -eq "$WANT" ]] || BAD+=("hashed $GOT entries, expected $WANT")
+
+if [[ "${#BAD[@]}" -eq 0 ]]; then
+  mv -f "$TMP" artifact_sha256.txt \
+    && echo "ARTIFACTS COMPLETE ($GOT entries)" \
+    || echo "ABORT: could not install artifact_sha256.txt"
 else
-  echo "ARTIFACTS COMPLETE"
+  rm -f "$TMP"; printf 'ABORT: %s\n' "${BAD[@]}"
 fi
 ```
 
-The verdict is read back out of the file rather than carried in a shell variable: the loop
-would otherwise run in a pipeline subshell, and a flag set there never reaches the shell that
-tests it — the same class of silent-pass bug as finding 1.
+**Why this shape.** The previous version decided by grepping its own output for a marker
+string, so a `sha256sum` that *failed* wrote nothing, matched no marker, and printed
+`ARTIFACTS COMPLETE`; a failed read of the file had the same shape, because `grep`'s exit 2
+also lands in the success branch. Now every hash command's status is checked, the entry count
+must equal the expected count exactly, and the manifest is written to a temp file and
+`mv`-ed into place only on full success — so a partial run leaves the previous manifest
+intact and is safe to re-run. `artifact_sha256.txt` is not in its own list.
+
+**The list is the evidence inventory, not a sample.** It carries both `report.md` files, all
+seven environment receipts the bootstrap asserts (including `reviewed_commit.txt`), the
+launcher's `probe_timing.txt` and `launcher.pid`, the monitor's `liveness.json`, the ladder
+JSON with its pre-run SMI capture and telemetry, and the §3 clone receipts.
+`storage_mode.txt` is deliberately **absent**: it exists in the 2026-08-08 artifacts but no
+script writes it at `08be5d3`, so requiring it would make `ARTIFACTS COMPLETE` unreachable.
 
 Pull everything down from your laptop:
 
@@ -503,27 +701,51 @@ inside it.
 1. **Terminate the pod in the console. Confirm billing has stopped** — a killed process
    cannot stop its own meter, and the 2026-08-08 pod stayed allocated ~34 minutes after its
    run died.
-2. Capture these into `probe-<DATE>/cost_evidence/`, as **provider artifacts, not typed
-   notes** — a screenshot or CSV/JSON export from the RunPod UI in each case:
+2. Capture these into the **same** `probe-<DATE>/cost_evidence/` you created in §1, as
+   **provider artifacts** — a screenshot or CSV/JSON export from the RunPod UI in each case.
+   §1 already holds `01`–`03`; these are the closing half:
 
-   | File | What it must show |
-   |---|---|
-   | `rate_at_creation.png` | the pod's card and **$/hr as the console displayed it** |
-   | `termination_confirmed.png` | pod state terminated/stopped, **with a visible timestamp** |
-   | `billing_stopped.png` | the billing or usage view showing the meter has stopped |
-   | `settled_charge.png` / `.csv` | the **settled** line item for this pod, once it appears |
-   | `elapsed.txt` | pod create → terminate wall-clock, and the launcher's `elapsed=` from `PROBE_EXIT_RECORD` |
+   | File | What it must show | Kind |
+   |---|---|---|
+   | `04_termination_confirmed.png` | pod state terminated/stopped, **with a visible timestamp** | provider |
+   | `05_billing_stopped.png` | the billing or usage view showing the meter has stopped | provider |
+   | `06_settled_charge.png` / `.csv` | the **settled** line item for this pod, once it appears | provider |
+   | `07_elapsed_derived.txt` | pod create → terminate wall-clock, and the launcher's `elapsed=` from `PROBE_EXIT_RECORD` | **derived — not provider proof** |
 
-3. Hash the folder once captured, so the evidence is fixed at collection time:
+3. Hash the folder once captured. The `cd` is fail-closed and the manifest excludes itself,
+   so this is safe to re-run when the settled charge lands later:
 
 ```bash
-cd ~/Documents/llama-tools-artifacts/probe-<DATE>/cost_evidence
-shasum -a 256 * > cost_evidence_sha256.txt && cat cost_evidence_sha256.txt
+DEST=~/Documents/llama-tools-artifacts/probe-<DATE>/cost_evidence
+if ! cd "$DEST"; then
+  echo "ABORT: $DEST does not exist — create it and re-capture; do NOT hash whatever"
+  echo "       directory this shell happens to be sitting in."
+else
+  TMP=$(mktemp ./cost_evidence_sha256.XXXXXX)
+  BAD=(); N=0
+  for f in *; do
+    [[ -f "$f" ]] || continue
+    case "$f" in cost_evidence_sha256.*) continue ;; esac   # never hash itself
+    shasum -a 256 "$f" >> "$TMP" || BAD+=("shasum failed (exit $?): $f")
+    N=$((N+1))
+  done
+  [[ "$N" -ge 1 ]] || BAD+=("no evidence files present in $DEST")
+  if [[ "${#BAD[@]}" -eq 0 ]]; then
+    mv -f "$TMP" cost_evidence_sha256.txt && cat cost_evidence_sha256.txt
+  else
+    rm -f "$TMP"; printf 'ABORT: %s\n' "${BAD[@]}"
+  fi
+fi
 ```
+
+**Capture timing is not a detail.** `01_rate_at_creation.png` and `03_auto_terminate_set.png`
+belong to §1 **before Deploy** — after termination those views are gone, and a rate you can
+no longer display is a rate you cannot evidence.
 
 **The in-pod `--auto-terminate-set` attestation is operator-entered, not provider proof.** It
 records what the operator said they set; it is not evidence of what was charged, and it does
-not substitute for any row in that table.
+not substitute for any row in that table. `07_elapsed_derived.txt` is likewise computed by
+us, and is labelled so it can never be cited as a provider artifact.
 
 **Until `settled_charge` exists, every cost statement about this run stays explicitly
 unmeasured** — write "unsettled, not attributable" rather than a number. The 08-08 attempt
@@ -540,19 +762,21 @@ word did not appear, treat it as failure even when nothing looked wrong:
 
 | Step | Must print | Absent ⇒ |
 |---|---|---|
+| §1 | `01`–`03` captured **before Deploy** | the rate and auto-terminate can never be evidenced again |
 | §3 | `SOURCE PINNED` | do not run bootstrap — the source is not pinned to the reviewed SHA |
 | §5 | `BOOTSTRAP COMPLETE` | stop, post the output, terminate |
 | §6 | `round-trip OK` **and** `DEADLINES OK` | no deadlines exist; §7 will refuse |
 | §7 | `LAUNCHED` | nothing started; nothing to monitor |
 | §8 | `MONITOR ACTIVE` | the run is unmonitored — fix or terminate, do not walk away |
-| §10 | `ACCEPTANCE PASS`, `acceptance exit: 0`, `ARTIFACTS COMPLETE` | the numbers may not be reported (§0.5) |
+| §10 | `ACCEPTANCE PASS`, `acceptance exit: 0`, `ARTIFACTS COMPLETE (n entries)` | the numbers may not be reported (§0.5) |
 
 Plus:
 
 - Bootstrap exits non-zero (any code).
 - Any `ABORT:` line anywhere. Each one is enclosing — the side effect it guards does not run.
 - The §6 round-tripped timestamp does not match the console by eye.
-- Fewer than 40 minutes of work remain at §6 (the deadlines are discarded automatically).
+- Fewer than **45** minutes of work remain at §6 or at §7 (the deadlines are discarded
+  automatically, and §7 re-checks the floor immediately before launching).
 - Launcher exits **69** (gate failed) → take the §9 branch.
 - Monitor reports **72** (died hard) → stop the pod, confirm billing stopped.
 - Reproduction check returns anything other than **369/400**.
