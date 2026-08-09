@@ -469,13 +469,13 @@ gen_multiple_cmd=(
   "${PYTHON}" "${REPO_ROOT}/eval/bfcl_simple.py"
   --category multiple
   "${gen_common_args[@]}"
-  --out-dir "${out_root}/study2_probe_multiple"
+  --out-dir "${invocation_dir}/study2_probe_multiple"
 )
 gen_simple_python_cmd=(
   "${PYTHON}" "${REPO_ROOT}/eval/bfcl_simple.py"
   --category simple_python
   "${gen_common_args[@]}"
-  --out-dir "${out_root}/study2_probe_simple_python"
+  --out-dir "${invocation_dir}/study2_probe_simple_python"
 )
 
 # run_generation wraps a paid command in `timeout`, bounded by whatever is left
@@ -590,7 +590,7 @@ on_exit() {
   echo "hourly rate, the actual charge, and billing-stopped confirmation."
   echo
   echo "Persist these before terminating (partial files count as evidence):"
-  for d in "${out_root}/study2_probe_multiple" "${out_root}/study2_probe_simple_python"; do
+  for d in "${invocation_dir}/study2_probe_multiple" "${invocation_dir}/study2_probe_simple_python"; do
     for f in generations.jsonl report.md run_manifest.json; do
       if [[ "${dry_run}" -eq 1 ]]; then
         echo "  ${d}/${f}"
@@ -601,21 +601,31 @@ on_exit() {
       fi
     done
   done
-  echo "  plus: ${out_root}/pip_freeze.txt ${out_root}/gpu.txt ${out_root}/image_tag.txt"
-  echo "  plus: ${out_root}/env_fingerprint.json ${out_root}/bundle_sha256.txt"
-  echo "  plus: ${out_root}/auto_terminate_attestation.txt ${out_root}/probe_timing.txt"
-  echo "  plus: ${out_root}/launcher.pid (the exact pid this run published)"
+  # Pod-wide environment receipts. Written once by bootstrap, shared by every
+  # invocation on this pod, and deliberately NOT per-invocation: they describe
+  # the machine, not the run.
+  echo "  pod-wide (bootstrap): ${out_root}/pip_freeze.txt ${out_root}/gpu.txt"
+  echo "  pod-wide (bootstrap): ${out_root}/image_tag.txt ${out_root}/env_fingerprint.json"
+  echo "  pod-wide (bootstrap): ${out_root}/bundle_sha256.txt ${out_root}/auto_terminate_attestation.txt"
+  # This invocation's own evidence. A second invocation on the same pod writes
+  # its own directory; neither overwrites the other.
+  echo "  invocation ${invocation_id}: ${launcher_pid_file} (the exact pid this run published)"
   # The gate's evidence is listed even when the gate is what failed — especially
   # then. A run aborted at the ladder has no generations to persist, and its
   # entire value is in these files.
   if [[ "${dry_run}" -eq 1 ]]; then
-    echo "  plus: ${out_root}/isolation_ladder/isolation_ladder.json"
-    echo "  plus: ${out_root}/isolation_ladder/telemetry/ ${out_root}/isolation_ladder/nvidia_smi_q_pre_run.txt"
-  elif [[ -s "${out_root}/isolation_ladder/isolation_ladder.json" ]]; then
-    echo "  [present] ${out_root}/isolation_ladder/isolation_ladder.json"
-    echo "  [present] ${out_root}/isolation_ladder/telemetry/"
+    echo "  invocation ${invocation_id}: ${invocation_dir}/isolation_ladder/isolation_ladder.json"
+    echo "  invocation ${invocation_id}: ${invocation_dir}/isolation_ladder/telemetry/"
+    echo "  invocation ${invocation_id}: ${invocation_dir}/isolation_ladder/nvidia_smi_q_pre_run.txt"
+  elif [[ -s "${invocation_dir}/isolation_ladder/isolation_ladder.json" ]]; then
+    echo "  [present] ${invocation_dir}/isolation_ladder/isolation_ladder.json"
+    echo "  [present] ${invocation_dir}/isolation_ladder/telemetry/"
   else
-    echo "  [MISSING] ${out_root}/isolation_ladder/isolation_ladder.json"
+    echo "  [MISSING] ${invocation_dir}/isolation_ladder/isolation_ladder.json"
+  fi
+  if [[ "${probe_outcome}" == "${OUTCOME_LADDER_ONLY}" ]]; then
+    echo "  invocation ${invocation_id}: ${invocation_dir}/ladder_only_receipt.txt"
+    echo "  (ladder-only scope: no generations exist for this invocation, by design)"
   fi
   echo "  plus: this tmux session's stdout/stderr log"
   echo "====================================================================="
@@ -780,7 +790,7 @@ assert_entrypoint() {
 # update a file after being SIGKILLed, which is exactly how the 2026-08-08 probe
 # came to have a PID file pointing at nothing. The file is the *source of the
 # number*; probe_liveness.sh still decides liveness with `kill -0` on it.
-launcher_pid_file="${out_root}/launcher.pid"
+launcher_pid_file="${invocation_dir}/launcher.pid"
 if [[ "${dry_run}" -eq 1 ]]; then
   echo "DRY RUN: would write this launcher's PID to ${launcher_pid_file}"
 else

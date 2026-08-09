@@ -431,8 +431,21 @@ def test_output_includes_stop_the_pod_reminder_and_artifact_paths() -> None:
     assert "STOP THE POD" in output
     assert "study2_probe_multiple/generations.jsonl" in output
     assert "study2_probe_simple_python/generations.jsonl" in output
-    assert "probe_timing.txt" in output
     assert "/tmp/launch_probe_test_out_root/pip_freeze.txt" in output
+
+
+def test_the_inventory_does_not_advertise_a_file_nothing_writes() -> None:
+    """probe_timing.txt was listed as evidence for months and has no writer
+    anywhere in the repo -- the same defect that made the runbook require it on
+    a fresh pod where it could never exist. An inventory that names a
+    never-created file teaches a reader to ignore MISSING lines."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "probe_timing" not in source
+    written_by_repo = subprocess.run(
+        ["grep", "-rl", "probe_timing", "scripts", "eval", "mining", "train"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+    assert not written_by_repo, f"probe_timing has a writer again: {written_by_repo}"
 
 
 def test_preflight_warns_in_dry_run_when_timeout_binary_is_absent(tmp_path) -> None:
