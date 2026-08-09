@@ -473,13 +473,33 @@ if [[ "${dry_run}" -eq 0 ]]; then
       echo "ERROR: cannot create ${invocation_dir}: ${mkdir_err}" >&2
       exit "${EXIT_EVIDENCE_FAILED}"
     fi
-    echo "ERROR: invocation directory already exists: ${invocation_dir}" >&2
+    # HANDOFF CONTRACT with the runbook's §7. The caller must create the
+    # directory before exec, because it redirects this process's stdout/stderr
+    # into it and a shell redirect cannot wait for the child to mkdir. So a
+    # directory holding ONLY the live log is the expected state, not a reuse.
+    #
+    # Anything else present means a previous invocation already wrote evidence
+    # here, and reusing it would overwrite that -- which is the whole thing the
+    # per-invocation layout exists to prevent. Enumerated explicitly rather than
+    # "if empty", so a half-finished earlier run cannot slip through.
+    shopt -s nullglob dotglob
+    existing=( "${invocation_dir}"/* )
+    shopt -u nullglob dotglob
+    only_log=1
+    for entry in "${existing[@]}"; do
+      [[ "$(basename "${entry}")" == "probe.log" ]] || only_log=0
+    done
+    if [[ "${#existing[@]}" -le 1 && "${only_log}" -eq 1 ]]; then
+      : # freshly created by the caller for the log redirect -- proceed
+    else
+    echo "ERROR: invocation directory already holds evidence: ${invocation_dir}" >&2
     echo "       Refusing to reuse it. A second invocation on this pod must" >&2
     echo "       have its own id, or the first invocation's ladder summary," >&2
     echo "       pid and generations would be overwritten -- which is exactly" >&2
     echo "       the before/after comparison the pause exists to enable." >&2
     echo "       Pass a distinct --invocation-id." >&2
     exit "${EXIT_EVIDENCE_FAILED}"
+    fi
   fi
 fi
 
@@ -610,11 +630,21 @@ on_exit() {
     # telemetry with the pod still allocated, then either launches a second
     # invocation or stops. Printing STOP THE POD NOW here would tell them to
     # destroy the node whose green ladder is the evidence they came for.
-    echo "THE POD IS STILL RUNNING AND STILL BILLING — deliberately."
+    if [[ "${dry_run}" -eq 1 ]]; then
+      echo "PLANNED (dry run — no pod exists): on a real green ladder-only run,"
+      echo "the pod would still be running and still billing, deliberately."
+    else
+      echo "THE POD IS STILL RUNNING AND STILL BILLING — deliberately."
+    fi
     echo "Read the ladder evidence above, then choose:"
     echo "  continue  -> a SECOND invocation with a NEW --invocation-id, same"
-    echo "               commit; it reruns the gate and refuses on its own if"
-    echo "               the remaining runway cannot fit a full run."
+    echo "               commit; it reruns the gate."
+    echo "               NOTE: this script refuses a stage only when the shared"
+    echo "               deadline has already PASSED. It does NOT check whether"
+    echo "               the remaining time can fit a full run, and will start a"
+    echo "               billed stage that timeout later kills mid-run. Judging"
+    echo "               sufficiency against the runway above is YOUR call, or"
+    echo "               the floor you set in the runbook."
     echo "  stop      -> stop the pod in the console, then CONFIRM BILLING STOPPED."
     echo "This script does not stop the pod and does not run a timer. The"
     echo "provider auto-termination you set at creation is the only hard stop."

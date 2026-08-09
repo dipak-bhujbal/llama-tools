@@ -624,11 +624,15 @@ def test_a_reused_invocation_id_refuses_rather_than_sharing_a_directory(tmp_path
     before/after comparison the review pause exists to enable.
     """
     out_root = tmp_path / "out"
-    (out_root / "invocations" / "dup").mkdir(parents=True)
+    inv = out_root / "invocations" / "dup"
+    inv.mkdir(parents=True)
+    # A prior invocation's evidence -- NOT merely an empty directory, which is
+    # the legitimate §7 pre-exec state.
+    (inv / "launcher.pid").write_text("4242\n")
     result = run_script(full_args(overrides={"--out-root": str(out_root)},
                                   extra=["--invocation-id", "dup", "--stop-after-ladder"]))
     assert result.returncode == 71, combined_output(result)
-    assert "already exists" in combined_output(result)
+    assert "already holds evidence" in combined_output(result)
     assert "distinct --invocation-id" in combined_output(result)
 
 
@@ -649,7 +653,8 @@ def test_a_ladder_only_scope_does_not_order_the_pod_stopped() -> None:
     ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
     full = combined_output(run_script(full_args(extra=["--dry-run"])))
     assert "STOP THE POD NOW" not in ladder
-    assert "STILL RUNNING AND STILL BILLING" in ladder
+    assert "no pod exists" in ladder  # dry run must not assert live state
+    assert "still billing, deliberately" in ladder
     assert "STOP THE POD NOW" in full, "a full run must still order the stop"
 
 
@@ -659,3 +664,52 @@ def test_dry_run_does_not_require_gnu_date() -> None:
     aborted on macOS with EXIT_EVIDENCE_FAILED."""
     result = run_script(full_args(extra=["--stop-after-ladder", "--dry-run"]))
     assert result.returncode == 0, combined_output(result)
+
+
+def test_the_runbook_handoff_contract_actually_launches(tmp_path) -> None:
+    """Executable proof of the §7 contract, not a source-string assertion.
+
+    §7 must create the invocation directory before exec, because it redirects
+    the launcher's stdout into it and a shell redirect cannot wait for the child
+    to mkdir. The first version of the reuse guard refused exactly that, so the
+    runbook could not launch the script it pins -- exit 71 before any work. A
+    source-string test could not see it; only running the sequence could.
+    """
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "01-ladder"
+    inv.mkdir(parents=True)
+    (inv / "probe.log").touch()          # exactly what §7 does before exec
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "01-ladder",
+                                         "--stop-after-ladder"]))
+    assert result.returncode != 71, (
+        "the §7 precreated-log handoff must not be refused as reuse:\n"
+        + combined_output(result))
+
+
+def test_a_directory_holding_real_evidence_is_still_refused(tmp_path) -> None:
+    """The contract must not become a hole: only the live log may pre-exist."""
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "01-ladder"
+    (inv / "isolation_ladder").mkdir(parents=True)
+    (inv / "probe.log").touch()
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "01-ladder",
+                                         "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
+    assert "already holds evidence" in combined_output(result)
+
+
+def test_the_launcher_does_not_claim_a_runway_check_it_lacks() -> None:
+    """It refuses a stage only when the deadline has already passed. Claiming it
+    refuses when the runway cannot fit a full run was false, and was used as an
+    argument that no other guard was needed."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "remaining runway cannot fit a full run" not in source
+    assert "deadline has already PASSED" in source
+
+
+def test_dry_run_does_not_assert_live_pod_state() -> None:
+    ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
+    assert "THE POD IS STILL RUNNING AND STILL BILLING — deliberately." not in ladder
+    assert "PLANNED (dry run — no pod exists)" in ladder
