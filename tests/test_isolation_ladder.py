@@ -11,6 +11,8 @@ whole suite runs on a laptop with no torch, no CUDA, and no spend.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -581,7 +583,7 @@ def test_the_configuration_boundary_is_rung_3(fail_at: int, within: bool) -> Non
 def test_all_pass_verdict_does_not_blame_work_the_failed_probe_never_reached() -> None:
     summary = il.summarise(Recorder().run())
     verdict = summary["verdict"]
-    assert "same first 609-token prompt" in verdict
+    assert "same first 610-token prompt" in verdict
     assert "before later prompts or categories" in verdict
     assert "prompt count (400 vs 1)" not in verdict
     assert "280-999" not in verdict
@@ -597,7 +599,12 @@ def test_the_old_conflated_field_is_gone() -> None:
 
 def test_summary_records_the_pinned_run_parameters() -> None:
     summary = il.summarise(Recorder().run())
-    assert summary["expected_prompt_tokens"] == 609
+    assert summary["expected_prompt_id"] == il.EXPECTED_PROMPT_ID
+    assert summary["expected_prompt_sha256"] == il.EXPECTED_PROMPT_SHA256
+    assert summary["expected_prompt_ids_sha256"] == il.EXPECTED_PROMPT_IDS_SHA256
+    # The serialization travels with the digest; a bare hash is unverifiable.
+    assert summary["prompt_ids_serialization"] == "utf-8 json, separators=(',',':')"
+    assert summary["observed_prompt_tokens"] == il.OBSERVED_PROMPT_TOKENS
     assert summary["max_new_tokens"] == 8
     assert summary["category"] == "multiple"
     assert summary["base_model"]["revision"] == il.BASE_MODEL_REVISION
@@ -644,36 +651,170 @@ def test_reexec_sets_both_the_variable_and_the_sentinel() -> None:
     assert captured["argv"][1:] == ["ladder.py", "--out", "x.json"]
 
 
-# --- prompt assertion -------------------------------------------------------
+# --- prompt identity --------------------------------------------------------
 class _FakeTokenizer:
-    def __init__(self, n: int):
-        self.n = n
+    """Returns a fixed id sequence, so a test can pin what the digest sees."""
+
+    def __init__(self, ids):
+        self.ids = list(ids)
 
     def __call__(self, text):
-        return {"input_ids": list(range(self.n))}
+        return {"input_ids": list(self.ids)}
 
 
-def test_prompt_token_count_must_match_exactly() -> None:
-    assert il.assert_prompt_token_count(_FakeTokenizer(609), "prompt") == 609
+def test_ids_digest_pins_its_serialization() -> None:
+    """The encoding is part of the invariant: the same ids under json.dumps
+    defaults produce a different digest, which is exactly the ambiguity that
+    made 'hash the input ids' an underspecified instruction."""
+    ids = [1, 2, 3]
+    compact = il.prompt_ids_digest(ids)
+    spaced = hashlib.sha256(json.dumps(ids).encode("utf-8")).hexdigest()
+    assert compact != spaced
+    assert compact == hashlib.sha256(b"[1,2,3]").hexdigest()
 
 
-def test_wrong_token_count_refuses_to_run_and_names_both_numbers() -> None:
+def test_wrong_prompt_refuses_and_names_what_moved() -> None:
     """A pass on a different prompt is not evidence about the crash, so this is
-    a refusal rather than a warning."""
+    a refusal rather than a warning — and it must say whether the prompt string
+    or its tokenization changed, since a count could not distinguish them."""
     with pytest.raises(ValueError) as excinfo:
-        il.assert_prompt_token_count(_FakeTokenizer(512), "prompt")
+        il.assert_prompt_identity(_FakeTokenizer([1, 2, 3]), "not the crash prompt")
     message = str(excinfo.value)
-    assert "512" in message and "609" in message
+    assert "prompt sha256" in message
+    assert "input-ids sha256" in message
+    assert il.EXPECTED_PROMPT_SHA256 in message
+
+
+def test_refusal_reports_token_count_as_informational_not_as_the_gate() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        il.assert_prompt_identity(_FakeTokenizer([1, 2, 3]), "wrong")
+    message = str(excinfo.value)
+    assert "3 tokens" in message
+    assert str(il.OBSERVED_PROMPT_TOKENS) in message
+    assert "informational" in message
+
+
+def test_mismatched_prompt_id_is_caught() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        il.assert_prompt_identity(_FakeTokenizer([1, 2, 3]), "wrong", prompt_id="multiple_7")
+    assert "prompt id" in str(excinfo.value)
+
+
+def test_serialization_label_cannot_drift_from_the_separators() -> None:
+    """The label is written into every artifact; if it were typed out by hand it
+    could disagree with the encoding actually used, which is the same class of
+    defect as an unnamed hash."""
+    assert il.PROMPT_IDS_SERIALIZATION == "utf-8 json, separators=(',',':')"
+    assert il.PROMPT_IDS_JSON_SEPARATORS == (",", ":")
+
+
+def test_observed_identity_records_without_judging() -> None:
+    """The refusal path needs the same structure as the success path, so this
+    must return values for a prompt that will be rejected rather than raise."""
+    observed = il.observed_prompt_identity(_FakeTokenizer([1, 2, 3]), "wrong", "multiple_7")
+    assert observed["prompt_id"] == "multiple_7"
+    assert observed["tokens"] == 3
+    assert observed["ids_serialization"] == il.PROMPT_IDS_SERIALIZATION
+    assert observed["prompt_sha256"] != il.EXPECTED_PROMPT_SHA256
+    assert observed["prompt_ids_sha256"] == il.prompt_ids_digest([1, 2, 3])
+
+
+def test_refusal_writes_a_self_contained_artifact_and_runs_no_rung(tmp_path, monkeypatch) -> None:
+    """The critical path a manual check cannot protect.
+
+    On 2026-08-09 the ladder refused and wrote nothing, so what the run saw
+    survived only in stdout. This asserts the whole contract: exit 69, a durable
+    v4 artifact carrying BOTH the pins and the observation, the provenance that
+    makes an id hash meaningful (tokenizer and adapter revisions), and — the
+    point of a smoke gate — that no rung executed.
+    """
+    monkeypatch.setenv(il._REEXEC_SENTINEL, "1")  # the ladder re-execs itself otherwise
+    monkeypatch.setattr(il, "_load_tokenizer", lambda: _FakeTokenizer([7, 8, 9]))
+    monkeypatch.setattr(
+        il, "load_first_production_prompt", lambda tok, **kw: ("multiple_0", "not the crash prompt")
+    )
+
+    def _explode(*a, **k):  # pragma: no cover - fails the test if ever reached
+        raise AssertionError("run_ladder must not execute after an identity refusal")
+
+    monkeypatch.setattr(il, "run_ladder", _explode)
+
+    rc = il.main(["--out-dir", str(tmp_path)])
+    assert rc == il.EXIT_PROMPT_MISMATCH == 69
+
+    written = json.loads((tmp_path / "isolation_ladder.json").read_text())
+    assert written["schema"] == "isolation_ladder/v4"
+    assert written["outcome"] == "refused_prompt_identity"
+    assert written["complete"] is False
+
+    # The pins, so the artifact says what was required...
+    assert written["expected_prompt_sha256"] == il.EXPECTED_PROMPT_SHA256
+    assert written["expected_prompt_ids_sha256"] == il.EXPECTED_PROMPT_IDS_SHA256
+    # ...the observation, so it says what was actually seen...
+    observed = written["observed_prompt_identity"]
+    assert observed["verified"] is False
+    assert observed["tokens"] == 3
+    assert observed["prompt_sha256"] != il.EXPECTED_PROMPT_SHA256
+    assert observed["ids_serialization"] == il.PROMPT_IDS_SERIALIZATION
+    assert "prompt sha256" in observed["mismatch"]
+    assert observed["mismatches"]
+    # ...and the provenance, without which an id hash is not evidence.
+    assert written["base_model"]["revision"] == il.BASE_MODEL_REVISION
+    assert written["adapter"]["revision"] == il.SFT_ADAPTER_REVISION
+    assert written["max_new_tokens"] == il.MAX_NEW_TOKENS
+    assert "cuda_launch_blocking" in written
+    assert all(s["status"] != "passed" for s in written["steps"])
+
+
+def test_summary_schema_bumped_for_the_breaking_field_change() -> None:
+    """v3 carried `expected_prompt_tokens`; v4 replaces it with identity fields.
+    A reader keying on the old field must see a new schema, not a silent hole."""
+    summary = il.summarise(Recorder().run())
+    assert summary["schema"] == "isolation_ladder/v4"
+    assert "expected_prompt_tokens" not in summary
 
 
 def test_dry_run_needs_no_gpu_and_exits_clean() -> None:
     assert il.main(["--dry-run"]) == il.EXIT_OK
 
 
-def test_the_609_token_invariant_cannot_be_overridden_from_the_command_line() -> None:
-    """`--expect-prompt-tokens` let a caller bless any prompt length while the
-    docs promised the gate refused anything but 609 — a gate with a documented
-    guarantee and a public override is not a gate."""
+def test_no_current_fact_text_still_claims_the_retired_609_gate() -> None:
+    """Regression for a defect that survived three review cycles of A1.
+
+    A1 replaced the 609 token-count gate with a hash-identity gate, but five
+    places kept asserting 609 as present-tense fact -- including inside
+    ALL_PASS_VERDICT, so a green run would have printed a false statement about
+    the crash it had just failed to reproduce. The explanatory comment that
+    recounts the history is exempt; it is *about* the old value.
+    """
+    for path in (
+        REPO_ROOT / "eval" / "isolation_ladder.py",
+        REPO_ROOT / "docs" / "probe-bootstrap.md",
+    ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "609" not in line:
+                continue
+            # The history comment in isolation_ladder.py explains why 609 was
+            # wrong; it must keep saying 609.
+            assert line.lstrip().startswith("#"), (
+                f"{path.name}:{lineno} states 609 as current fact: {line.strip()!r}"
+            )
+
+
+def test_all_pass_verdict_describes_the_prompt_the_gate_actually_pins() -> None:
+    """The verdict is an artifact a human reads to decide what a green run
+    means. It must describe the sequence the gate admitted -- 610 tokens with
+    the duplicated BOS -- not the off-path count that never reached the model."""
+    verdict = il.summarise(Recorder().run())["verdict"]
+    assert str(il.OBSERVED_PROMPT_TOKENS) in verdict
+    assert "609" not in verdict
+
+
+def test_the_prompt_gate_cannot_be_overridden_from_the_command_line() -> None:
+    """`--expect-prompt-tokens` let a caller bless any prompt while the docs
+    promised a gate — a gate with a documented guarantee and a public override
+    is not a gate. The gate is now identity (two hashes), not a count, but the
+    override must stay absent for the same reason."""
     parser = il.build_parser()
     flags = {action.option_strings[0] for action in parser._actions if action.option_strings}
     assert "--expect-prompt-tokens" not in flags

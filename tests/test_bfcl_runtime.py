@@ -33,14 +33,31 @@ from bfcl_category_config import CategoryPaths
 
 
 class FakeTokenizer:
-    """Records nothing; just enough surface for build_prompt() and the
-    pad_token fallback in main() to run without a real tokenizer."""
+    """Just enough surface for build_prompt(), the pad_token fallback, and the
+    BOS observation in main() to run without a real tokenizer.
+
+    Being CALLABLE is not optional padding: production tokenizes the first
+    built prompt before loading a model, so a fake that only renders would make
+    these tests pass against a code path real runs never take. It mimics the
+    pinned tokenizer's behaviour — the rendered string carries a BOS and
+    tokenizing it adds another — so the recorded observation is meaningful
+    rather than a constant.
+    """
 
     pad_token: str | None = None
     eos_token = "<eos>"
+    bos_token = "<bos>"
+    bos_token_id = 1
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
-        return "PROMPT::" + json.dumps(messages)
+        return "<bos>PROMPT::" + json.dumps(messages)
+
+    def __call__(self, text, add_special_tokens=True, **kwargs):
+        ids = [self.bos_token_id] if text.startswith(self.bos_token) else []
+        ids += [100 + (i % 50) for i in range(len(text) % 17 + 3)]
+        if add_special_tokens:
+            ids = [self.bos_token_id] + ids
+        return {"input_ids": ids}
 
 
 class FakeModel:

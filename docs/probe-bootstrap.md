@@ -194,7 +194,7 @@ wall-clock deadline as the full model-execution commands.
 | 4 | `PeftModel`, adapter **enabled** | 3 vs 4 → **adapter state** |
 
 Rung 3 is what the probe's `base` candidate ran; rung 4 is what the mining pilot ran
-successfully on 2026-08-07. One 609-token prompt, 8 new tokens per rung. It aborts at the
+successfully on 2026-08-07. One 610-token prompt, 8 new tokens per rung. It aborts at the
 first failure and prints the verdict for that branch.
 
 **`launch_probe.sh` runs the ladder itself**, as step 4, after fixture verification and
@@ -223,7 +223,9 @@ no-op that looks like it worked, and without it a CUDA fault surfaces at some la
 synchronisation point and gets attributed to the wrong rung — which is exactly why the
 postmortem could not name a cause.
 
-It refuses to run if the first prompt is not 609 tokens. That is intended: a pass on some
+It refuses to run unless the first prompt matches the pinned crash prompt by identity --
+the SHA-256 of the rendered string and of its input ids, not a token count. That is
+intended: a pass on some
 other prompt is not evidence about the crash.
 
 Evidence lands under `<out-root>/isolation_ladder/`:
@@ -265,7 +267,7 @@ isolation evidence without being mislabelled as an exact reproduction. A rung-3 
 illegal access is likewise a different failure despite sharing the error string.
 
 A green ladder means only **not reproduced on this run**. The original failure happened on
-this same first 609-token prompt, before later prompts or the second category ran, so a green
+this same first 610-token prompt, before later prompts or the second category ran, so a green
 result does not point at prompt count, the later length range, or the second category. It
 leaves intermittent or nondeterministic behavior and node/card/driver/environment differences
 open; compare the telemetry rather than treating the original card or node as cleared.

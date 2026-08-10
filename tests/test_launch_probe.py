@@ -1,9 +1,9 @@
 """Tests for scripts/launch_probe.sh.
 
-These tests only ever invoke the script with --dry-run, so they never touch
-git state, the network, or spawn a real generation run — the script's
---dry-run contract (print every command it would run, execute nothing) is
-exactly what makes it possible to test a launch procedure without a pod.
+Most tests invoke the script with --dry-run, so they never touch git state, the
+network, or spawn a real generation run. Reuse-guard tests that need the real
+directory contract either stop at that guard or run a copied script from an
+isolated fake repository whose missing interpreter forces exit before checkout.
 
 Every test shells out via `bash scripts/launch_probe.sh ...` and asserts on
 exit code / stdout+stderr text, mirroring how a reviewer would actually
@@ -431,8 +431,33 @@ def test_output_includes_stop_the_pod_reminder_and_artifact_paths() -> None:
     assert "STOP THE POD" in output
     assert "study2_probe_multiple/generations.jsonl" in output
     assert "study2_probe_simple_python/generations.jsonl" in output
-    assert "probe_timing.txt" in output
     assert "/tmp/launch_probe_test_out_root/pip_freeze.txt" in output
+
+
+def test_this_launchers_inventory_does_not_advertise_probe_timing() -> None:
+    """Scoped claim, deliberately.
+
+    probe_timing.txt DOES have a writer -- an operator-pasted block in
+    docs/probe-bootstrap.md, which tests/test_probe_docs.py requires. What it
+    does not have is a writer in the Stage-2 execution path this launcher
+    drives: the Stage-2 runbook replaced it with deadline_derivation.txt. So
+    this launcher listing it as its own evidence named a file that its own run
+    never creates, and an inventory that names a never-created file teaches its
+    reader to ignore MISSING lines.
+
+    The assertion is therefore about THIS script only. It is not a claim that
+    the file is obsolete everywhere, and the historical references in
+    docs/postmortem-s0-probe-20260808.md are records, not defects.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "probe_timing" not in source
+    executable_writers = subprocess.run(
+        ["grep", "-rl", "probe_timing", "scripts", "eval"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+    assert not executable_writers, (
+        "probe_timing reappeared in executable source: " + executable_writers
+    )
 
 
 def test_preflight_warns_in_dry_run_when_timeout_binary_is_absent(tmp_path) -> None:
@@ -507,3 +532,211 @@ def test_exit_inventory_lists_the_ladder_evidence() -> None:
     output = combined_output(run_script(full_args(extra=["--dry-run"])))
     assert "isolation_ladder/isolation_ladder.json" in output
     assert "isolation_ladder/telemetry/" in output
+
+
+# --- ladder-only scope (C scope A) ------------------------------------------
+def test_stop_after_ladder_is_a_scope_selector_not_a_gate_bypass() -> None:
+    """The gate still runs. --stop-after-ladder chooses how far the run goes
+    AFTER a green gate; it can never skip it. The existing
+    test_there_is_no_flag_to_skip_the_gate covers the inverse."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    gate = source.index('"${EXIT_SMOKE_GATE_FAILED}" "${ladder_cmd[@]}"')
+    # the stop BRANCH (column 0), not the dry-run banner check inside on_exit
+    stop = source.index('\nif [[ "${stop_after_ladder}" -eq 1 ]]; then\n')
+    assert gate < stop, "the stop branch must come after the gate has run"
+
+
+def test_ladder_only_success_exits_zero_with_a_named_outcome() -> None:
+    """Non-zero would be classified `failed` by probe_liveness.sh, which derives
+    footer_state from the integer alone, and the runbook would then refuse to
+    collect the evidence of a successful run. The outcome string carries the
+    distinction instead."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'readonly OUTCOME_LADDER_ONLY="ladder_only_green"' in source
+    assert 'readonly OUTCOME_FULL="full_probe_complete"' in source
+    assert 'probe_outcome="${OUTCOME_LADDER_ONLY}"' in source
+    assert "outcome=${probe_outcome}" in source
+    stop_branch = source[source.index('LADDER-ONLY COMPLETE'):]
+    assert 'exit "${EXIT_OK}"' in stop_branch[: stop_branch.index("\nfi\n")]
+
+
+def test_evidence_is_scoped_per_invocation_so_a_second_run_cannot_overwrite() -> None:
+    """Two green ladders bracketing the paid work are only a before/after check
+    if both survive. A shared path would destroy the comparison."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'invocation_dir="${out_root}/invocations/${invocation_id}"' in source
+    assert '--out-dir "${invocation_dir}/isolation_ladder"' in source
+    assert "invocation=${invocation_id:-unset}" in source
+
+
+def test_a_ladder_only_run_records_its_own_receipt_not_a_bfcl_manifest() -> None:
+    """A ladder-only invocation produces no BFCL run manifest, so its
+    provenance cannot hang off one."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "ladder_only_receipt.txt" in source
+    assert "schema=ladder_only_receipt/v1" in source
+    for field in ("ladder_green_epoch=", "provider_deadline_epoch=",
+                  "script_remaining_seconds=", "commit="):
+        assert field in source, field
+
+
+def test_an_unwritable_receipt_refuses_rather_than_reporting_success() -> None:
+    """stdout does not survive the pod: a success whose only record is the
+    terminal is not a record."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "readonly EXIT_EVIDENCE_FAILED=71" in source
+    assert 'exit "${EXIT_EVIDENCE_FAILED}"' in source
+
+
+def test_the_runway_print_asserts_nothing_and_stops_nothing() -> None:
+    """Information, not a timer. A second terminating mechanism is the family
+    that failed on 2026-08-08; the provider deadline stays the only hard stop."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    stop_branch = source[source.index("LADDER-ONLY COMPLETE"):]
+    stop_branch = stop_branch[: stop_branch.index("\nfi\n")]
+    # Strip echoed prose first: the branch is allowed to *describe* the shutdown
+    # reserve, it is not allowed to *invoke* anything that terminates. Testing
+    # the executable lines is the point; matching the noun would only police
+    # vocabulary.
+    executable = "\n".join(
+        line for line in stop_branch.splitlines()
+        if not line.lstrip().startswith(("echo", "printf", "#"))
+    )
+    for forbidden in ("runpodctl", "shutdown", "poweroff", "kill ", "sleep ",
+                      "review_deadline", "trap "):
+        assert forbidden not in executable, forbidden
+
+
+def test_no_duration_is_hardcoded_in_the_stop_branch() -> None:
+    """The operator monitors durations; the script must not bake in 10/15/900."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    stop_branch = source[source.index("LADDER-ONLY COMPLETE"):]
+    stop_branch = stop_branch[: stop_branch.index("\nfi\n")]
+    for magic in ("900", "600", "15 min", "10 min"):
+        assert magic not in stop_branch, magic
+
+
+def test_a_reused_invocation_id_refuses_rather_than_sharing_a_directory(tmp_path) -> None:
+    """"The second cannot destroy the first" has to be enforced, not asserted.
+
+    mkdir -p would have accepted a reused id and let the second invocation
+    overwrite the first's ladder summary, pid and generations -- destroying the
+    before/after comparison the review pause exists to enable.
+    """
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "dup"
+    inv.mkdir(parents=True)
+    # A prior invocation's evidence -- NOT merely an empty directory, which is
+    # the legitimate §7 pre-exec state.
+    (inv / "launcher.pid").write_text("4242\n")
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "dup", "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
+    assert "already holds evidence" in combined_output(result)
+    assert "distinct --invocation-id" in combined_output(result)
+
+
+def test_a_ladder_only_scope_lists_no_generation_files_as_missing() -> None:
+    """Six MISSING lines on a successful run is a false alarm, and a reader who
+    learns to ignore MISSING will ignore the one that matters."""
+    result = run_script(full_args(extra=["--stop-after-ladder", "--dry-run"]))
+    output = combined_output(result)
+    assert "generations.jsonl" not in output
+    assert "no generation outputs exist for this" in output
+    assert "outcome=ladder_only_green" in output
+
+
+def test_a_ladder_only_scope_does_not_order_the_pod_stopped() -> None:
+    """The pause is the point of this scope: the operator reads the telemetry
+    with the pod alive. Printing STOP THE POD NOW would tell them to destroy
+    the node whose green ladder is the evidence they came for."""
+    ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
+    full = combined_output(run_script(full_args(extra=["--dry-run"])))
+    assert "STOP THE POD NOW" not in ladder
+    assert "no pod exists" in ladder  # dry run must not assert live state
+    assert "still billing, deliberately" in ladder
+    assert "STOP THE POD NOW" in full, "a full run must still order the stop"
+
+
+def test_dry_run_does_not_require_gnu_date() -> None:
+    """A plan that can only be printed on the pod cannot be reviewed before the
+    pod exists. The first draft formatted deadlines before the dry-run exit and
+    aborted on macOS with EXIT_EVIDENCE_FAILED."""
+    result = run_script(full_args(extra=["--stop-after-ladder", "--dry-run"]))
+    assert result.returncode == 0, combined_output(result)
+
+
+def test_the_caller_must_not_precreate_the_invocation_leaf(tmp_path) -> None:
+    """The handoff contract, executable.
+
+    An earlier version let the caller precreate the leaf so it could redirect a
+    log into it. That reopened the reuse hole: `mkdir -p` plus a truncating
+    redirect made a second run look identical to a first. The caller now keeps
+    its log OUTSIDE the leaf, and this script owns the leaf atomically.
+    """
+    # Run a copied launcher from a fake repository. Once the fresh-directory
+    # guard succeeds it must stop at the missing-interpreter preflight, before
+    # any checkout, network access, fixture fetch, ladder, or generation. Using
+    # the real repository here was only accidentally safe on macOS because GNU
+    # timeout is absent; on Linux it could have continued into the real run.
+    fake_root = tmp_path / "fake_repo"
+    fake_scripts = fake_root / "scripts"
+    fake_scripts.mkdir(parents=True)
+    fake_script = fake_scripts / "launch_probe.sh"
+    shutil.copy2(SCRIPT, fake_script)
+
+    out_root = tmp_path / "out"
+    (out_root / "logs").mkdir(parents=True)      # where the caller's log goes
+    result = subprocess.run(
+        ["bash", str(fake_script), *full_args(overrides={"--out-root": str(out_root)},
+                                               extra=["--invocation-id", "01-ladder",
+                                                      "--stop-after-ladder"])],
+        cwd=str(fake_root), capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 64, combined_output(result)
+    output = combined_output(result)
+    assert "no executable interpreter" in output or "neither 'timeout'" in output
+    assert (out_root / "invocations" / "01-ladder").is_dir()
+    assert not (out_root / "invocations" / "01-ladder" / "launcher.pid").exists()
+
+
+def test_a_precreated_leaf_is_refused_even_when_it_holds_only_a_log(tmp_path) -> None:
+    """The specific hole that was reopened and is now closed."""
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "01-ladder"
+    inv.mkdir(parents=True)
+    (inv / "probe.log").touch()
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "01-ladder",
+                                         "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
+
+
+def test_a_directory_holding_real_evidence_is_still_refused(tmp_path) -> None:
+    """The contract must not become a hole: no invocation leaf may pre-exist."""
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "01-ladder"
+    (inv / "isolation_ladder").mkdir(parents=True)
+    (inv / "probe.log").touch()
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "01-ladder",
+                                         "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
+    assert "already holds evidence" in combined_output(result)
+
+
+def test_the_launcher_does_not_claim_a_runway_check_it_lacks() -> None:
+    """It refuses a stage only when the deadline has already passed. Claiming it
+    refuses when the runway cannot fit a full run was false, and was used as an
+    argument that no other guard was needed."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "remaining runway cannot fit a full run" not in source
+    assert "It refuses on its own if that does not fit" not in source
+    assert "deadline has already PASSED" in source
+    assert "does NOT decide whether the remaining" in source
+
+
+def test_dry_run_does_not_assert_live_pod_state() -> None:
+    ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
+    assert "THE POD IS STILL RUNNING AND STILL BILLING — deliberately." not in ladder
+    assert "PLANNED (dry run — no pod exists)" in ladder

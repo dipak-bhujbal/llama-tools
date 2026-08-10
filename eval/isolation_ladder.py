@@ -31,7 +31,7 @@ Three properties make the result interpretable rather than suggestive:
   the context is already poisoned and every later step would fail for a reason
   that has nothing to do with what it was meant to test.
 
-Cost: one 609-token prompt and 8 new tokens per step. Seconds of GPU time.
+Cost: one 610-token prompt and 8 new tokens per step. Seconds of GPU time.
 
 `torch`, `transformers` and `peft` are imported lazily inside the loaders so
 this module, its ordering, its verdict logic and its tests all run on a laptop
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 import sys
@@ -76,12 +77,53 @@ SFT_ADAPTER_REPO = "centuriandip/llama-3.1-8b-tools-sft"
 SFT_ADAPTER_SUBFOLDER = "adapter/"
 SFT_ADAPTER_REVISION = "b6f4da479f8c6fc044ee8b802a92f47780f970c5"
 
-# The probe's first paid generation was category=multiple, and codex measured its
-# first prompt at 609 tokens on the pinned tokenizer. The ladder asserts this
-# rather than logging it: if the prompt is not that prompt, the ladder is not
-# exercising the thing that crashed, and a green result would be worthless.
+# The probe's first paid generation was category=multiple. The ladder pins the
+# IDENTITY of that first prompt, not its length.
+#
+# An earlier version asserted `EXPECTED_PROMPT_TOKENS = 609` and refused on
+# 2026-08-09 because the production path renders 610. `build_prompt` returns a
+# rendered STRING that already contains <|begin_of_text|>, and
+# `tokenizer(prompt)` then adds a second BOS under the default
+# add_special_tokens=True. Counting that same string with
+# add_special_tokens=False reproduces 609 exactly -- a path production never
+# takes. That is a sufficient explanation of the discrepancy, NOT a
+# reconstruction of history: no surviving artifact identifies the command that
+# originally produced 609, and the ladder is newer than the crash it
+# reproduces, so the assertion had never been exercised before that run.
+#
+# 610 is therefore not a regression to be corrected. The 2026-08-08 crash
+# occurred on commit 2d8abdb, whose bfcl_simple.py renders and re-tokenizes
+# exactly as HEAD does (verified: git diff 2d8abdb 08be5d3 -- eval/bfcl_simple.py
+# touches neither call). The input that crashed WAS the 610-token double-BOS
+# sequence. A ladder that fed a single-BOS prompt would no longer be reproducing
+# the fault it exists to reproduce.
+#
+# Whether *evaluation* should keep double BOS is a separate, open governance
+# question and is deliberately NOT decided here. This constant answers only
+# "is this the prompt that crashed?".
+#
+# Length is a weak proxy for that question -- brittle against tokenizer
+# revisions and BOS handling, and insufficient, since a different 610-token
+# prompt would satisfy it. So the gate is a pair of hashes and the count is
+# recorded for humans rather than enforced.
+#
+# Re-derive with tests/test_prompt_identity.py; never transcribe these by hand.
 PROBE_CATEGORY = "multiple"
-EXPECTED_PROMPT_TOKENS = 609
+EXPECTED_PROMPT_ID = "multiple_0"
+EXPECTED_PROMPT_SHA256 = "0a41807964ed0660ddcb66f2b867b06f1be391f4d44e0db65561b76d4f020c96"
+# The byte serialization IS part of the invariant: the same ids hash to
+# 63cb7366... under json.dumps defaults (", " separators) and to the value below
+# under compact separators. Naming the encoding is what makes the pin meaningful.
+EXPECTED_PROMPT_IDS_SHA256 = "b4953a1567790d4e33fc745ab8ae41d98afe88b6dea861f51ff7853ec0029ab4"
+PROMPT_IDS_JSON_SEPARATORS = (",", ":")
+# Built from the separators above rather than typed out, so the human-readable
+# label in every artifact cannot drift away from the encoding actually used.
+PROMPT_IDS_SERIALIZATION = (
+    f"utf-8 json, separators=({PROMPT_IDS_JSON_SEPARATORS[0]!r},"
+    f"{PROMPT_IDS_JSON_SEPARATORS[1]!r})"
+)
+# Recorded, not enforced. See above.
+OBSERVED_PROMPT_TOKENS = 610
 MAX_NEW_TOKENS = 8
 
 _REEXEC_SENTINEL = "_LADDER_LAUNCH_BLOCKING_REEXEC"
@@ -162,7 +204,7 @@ ALL_PASS_VERDICT = (
     "NOT REPRODUCED. All four configurations generated cleanly. The ladder "
     "excludes placement, the PEFT wrapper and adapter state as *sufficient* "
     "causes on this run. It does not identify a cause for the earlier failure: "
-    "that crash occurred on this same first 609-token prompt, before later "
+    "that crash occurred on this same first 610-token prompt, before later "
     "prompts or categories could contribute. Intermittent or nondeterministic "
     "software behavior and differences in node, card, driver, or environment "
     "remain open. Compare the recorded telemetry. A green ladder does NOT clear "
@@ -240,15 +282,90 @@ def load_first_production_prompt(tokenizer, repo_root: Path = REPO_ROOT, categor
     return first["id"], build_prompt(tokenizer, first["question"], first["function"])
 
 
-def assert_prompt_token_count(tokenizer, prompt: str, expected: int = EXPECTED_PROMPT_TOKENS) -> int:
-    actual = len(tokenizer(prompt)["input_ids"])
-    if actual != expected:
-        raise ValueError(
-            f"prompt is {actual} tokens, expected {expected}. The ladder refuses "
-            f"to run: a different prompt is not the prompt that crashed, and a "
-            f"pass on it would not be evidence about the §0 failure."
+def prompt_ids_digest(ids) -> str:
+    """SHA-256 of the input ids under the one serialization this repo pins.
+
+    Spelled out as a function so the encoding cannot drift between the pin, the
+    gate and the test. `json.dumps` defaults would produce a different digest
+    for identical ids.
+    """
+    return hashlib.sha256(
+        json.dumps(list(ids), separators=PROMPT_IDS_JSON_SEPARATORS).encode("utf-8")
+    ).hexdigest()
+
+
+def observed_prompt_identity(tokenizer, prompt: str, prompt_id: str | None = None) -> dict:
+    """What this run actually built — computed without judging it.
+
+    Split from the assertion so the refusal path can record the same structure
+    it would have recorded on success. A refusal that writes nothing leaves the
+    observed values recoverable only from stdout.
+    """
+    ids = list(tokenizer(prompt)["input_ids"])
+    return {
+        "prompt_id": prompt_id,
+        "tokens": len(ids),
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "prompt_ids_sha256": prompt_ids_digest(ids),
+        "ids_serialization": PROMPT_IDS_SERIALIZATION,
+    }
+
+
+class PromptIdentityMismatch(ValueError):
+    """Carries the exact observation that failed, so the artifact records the
+    structure that caused the refusal rather than a later recomputation."""
+
+    def __init__(self, message: str, observed: dict, mismatches: list[str]):
+        super().__init__(message)
+        self.observed = observed
+        self.mismatches = mismatches
+
+
+def verify_prompt_identity(actual: dict) -> dict:
+    """Judge an already-observed identity. Pure: it never tokenizes.
+
+    Separated from observation so the caller tokenizes exactly once. Observing
+    twice would mean the recorded artifact is a recomputation, not necessarily
+    the sequence that triggered the refusal.
+
+    Both hashes are checked. The string hash catches a changed prompt; the id
+    hash catches a same-string-different-tokenization change, which is exactly
+    the failure mode that a token count missed. Mismatches are reported
+    together, because seeing only the first one hides whether the prompt or the
+    tokenizer moved.
+    """
+    prompt_id = actual.get("prompt_id")
+    mismatches = []
+    if prompt_id is not None and prompt_id != EXPECTED_PROMPT_ID:
+        mismatches.append(f"prompt id {prompt_id!r} != pinned {EXPECTED_PROMPT_ID!r}")
+    if actual["prompt_sha256"] != EXPECTED_PROMPT_SHA256:
+        mismatches.append(
+            f"prompt sha256 {actual['prompt_sha256']} != pinned {EXPECTED_PROMPT_SHA256}"
+        )
+    if actual["prompt_ids_sha256"] != EXPECTED_PROMPT_IDS_SHA256:
+        mismatches.append(
+            f"input-ids sha256 {actual['prompt_ids_sha256']} != pinned "
+            f"{EXPECTED_PROMPT_IDS_SHA256} (utf-8 json, separators=(',',':'))"
+        )
+
+    if mismatches:
+        raise PromptIdentityMismatch(
+            "prompt identity does not match the 2026-08-08 crash input: "
+            + "; ".join(mismatches)
+            + f". Observed {actual['tokens']} tokens (pinned run saw "
+            f"{OBSERVED_PROMPT_TOKENS}). The ladder refuses to run: a different "
+            "prompt is not the prompt that crashed, and a pass on it would not "
+            "be evidence about the §0 failure. Token count is informational — "
+            "the hashes are the gate.",
+            observed=actual,
+            mismatches=mismatches,
         )
     return actual
+
+
+def assert_prompt_identity(tokenizer, prompt: str, prompt_id: str | None = None) -> dict:
+    """Observe once, then judge. Convenience wrapper over the two halves."""
+    return verify_prompt_identity(observed_prompt_identity(tokenizer, prompt, prompt_id))
 
 
 # ---------------------------------------------------------------------------
@@ -562,10 +679,19 @@ def summarise(results: list[StepResult]) -> dict:
         reproduction = "no"
 
     return {
-        "schema": "isolation_ladder/v3",
+        # v4: expected_prompt_tokens (a count gate) was replaced by the
+        # expected_prompt_* identity fields and an observed_prompt_identity
+        # block. A reader keying on v3's field would silently find nothing.
+        "schema": "isolation_ladder/v4",
         "outcome": outcome,
         "category": PROBE_CATEGORY,
-        "expected_prompt_tokens": EXPECTED_PROMPT_TOKENS,
+        "expected_prompt_id": EXPECTED_PROMPT_ID,
+        "expected_prompt_sha256": EXPECTED_PROMPT_SHA256,
+        "expected_prompt_ids_sha256": EXPECTED_PROMPT_IDS_SHA256,
+        "prompt_ids_serialization": PROMPT_IDS_SERIALIZATION,
+        # Recorded so a reader can see what the pinned run measured. The gate is
+        # the pair of hashes above; this number is not enforced.
+        "observed_prompt_tokens": OBSERVED_PROMPT_TOKENS,
         "max_new_tokens": MAX_NEW_TOKENS,
         "cuda_launch_blocking": os.environ.get("CUDA_LAUNCH_BLOCKING"),
         "base_model": {"repo": BASE_MODEL_REPO, "revision": BASE_MODEL_REVISION},
@@ -655,7 +781,12 @@ def print_plan(emit: Callable[[str], None] = print) -> None:
         emit(f"  Step {step.index}: {step.name}")
     emit("")
     emit("  1 vs 2 isolates placement | 2 vs 3 isolates the PEFT wrapper | 3 vs 4 isolates adapter state")
-    emit(f"  prompt: first item of category={PROBE_CATEGORY}, asserted at {EXPECTED_PROMPT_TOKENS} tokens")
+    emit(
+        f"  prompt: first item of category={PROBE_CATEGORY}; the run WILL ASSERT "
+        f"its identity (sha256 of the string and of the input ids) after loading "
+        f"the tokenizer and before loading any model weights. Token count is "
+        f"recorded, not gated (pinned run saw {OBSERVED_PROMPT_TOKENS})."
+    )
     emit(f"  generation: {MAX_NEW_TOKENS} new tokens, greedy, per step")
     emit("  CUDA_LAUNCH_BLOCKING=1, torch.cuda.synchronize() after load and after generate")
     emit(f"  base: {BASE_MODEL_REPO}@{BASE_MODEL_REVISION}")
@@ -704,12 +835,41 @@ def main(argv: list[str] | None = None) -> int:
     print("\nLoading tokenizer and building the first production prompt...")
     tokenizer = _load_tokenizer()
     prompt_id, prompt = load_first_production_prompt(tokenizer)
+    # Tokenize exactly ONCE. The structure judged below is the same object that
+    # gets persisted, so the artifact records the observation that caused the
+    # verdict rather than a recomputation of it.
+    observed_identity = observed_prompt_identity(tokenizer, prompt, prompt_id)
     try:
-        token_count = assert_prompt_token_count(tokenizer, prompt)
-    except ValueError as exc:
+        verify_prompt_identity(observed_identity)
+        observed_identity["verified"] = True
+    except PromptIdentityMismatch as exc:
+        # The 2026-08-09 refusal wrote no ladder artifact at all, so the only
+        # record of what that run saw was stdout. Build the refusal from the
+        # ordinary v4 summary shape rather than hand-rolling a minimal one: an
+        # observed id hash is not self-contained evidence without the tokenizer
+        # and adapter revisions that produced it, and success, incomplete and
+        # refusal artifacts should be readable by the same parser.
+        exc.observed["verified"] = False
+        exc.observed["mismatch"] = str(exc)
+        exc.observed["mismatches"] = exc.mismatches
+        refusal = summarise([StepResult(step=s) for s in LADDER])
+        refusal["outcome"] = "refused_prompt_identity"
+        refusal["complete"] = False
+        refusal["prompt_id"] = prompt_id
+        refusal["prompt_tokens"] = exc.observed["tokens"]
+        refusal["observed_prompt_identity"] = exc.observed
+        refusal["raw_nvidia_smi_q"] = smi_status
+        gpu_telemetry.write_json_atomic(summary_path, refusal)
         print(f"\nREFUSING TO RUN: {exc}", file=sys.stderr)
+        print(f"  refusal recorded at {summary_path}", file=sys.stderr)
         return EXIT_PROMPT_MISMATCH
-    print(f"  prompt id={prompt_id}, {token_count} tokens (asserted)")
+    token_count = observed_identity["tokens"]
+    prompt_identity = observed_identity
+    print(
+        f"  prompt id={prompt_id}, {token_count} tokens (recorded), "
+        f"identity asserted: sha256={prompt_identity['prompt_sha256'][:12]}… "
+        f"ids={prompt_identity['prompt_ids_sha256'][:12]}…"
+    )
 
     def persist_snapshot(step: LadderStep, phase: str, model: Any) -> dict:
         bundle = gpu_telemetry.collect_all(model, phase=phase)
@@ -722,6 +882,10 @@ def main(argv: list[str] | None = None) -> int:
         partial = summarise(results)
         partial["prompt_id"] = prompt_id
         partial["prompt_tokens"] = token_count
+        # What this run actually observed, beside what it expected. Recording
+        # only the pins would make the artifact a copy of the source constants
+        # and prove nothing about the run that wrote it.
+        partial["observed_prompt_identity"] = observed_identity
         # Derived from `outcome`, never recomputed independently — two
         # completeness notions that can disagree is how the false all-pass got
         # written in the first place.
@@ -747,6 +911,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarise(results)
     summary["prompt_id"] = prompt_id
     summary["prompt_tokens"] = token_count
+    summary["observed_prompt_identity"] = observed_identity
     summary["complete"] = summary["outcome"] != "incomplete"
     summary["raw_nvidia_smi_q"] = smi_status
     gpu_telemetry.write_json_atomic(summary_path, summary)

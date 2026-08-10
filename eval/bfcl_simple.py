@@ -83,6 +83,70 @@ SIBLING_FILENAMES = ("generations.jsonl", "report.md", "run_manifest.json")
 # without anyone having to remember.
 BASE_CANDIDATE_REALIZATION = "peft_model_with_adapter_disabled"
 
+# How the prompt reaches the model, recorded verbatim in every run manifest for
+# the same reason as BASE_CANDIDATE_REALIZATION: the preregistration does not
+# specify a tokenization path, and which construction produced a number belongs
+# in that number's provenance.
+#
+# `build_prompt` renders with tokenize=False, so the returned STRING already
+# contains <|begin_of_text|>. `generate` then calls tokenizer(prompt)
+# without add_special_tokens, which resolves to True on the pinned tokenizer and
+# prepends a SECOND BOS. Every BFCL generation in this repo has done that since
+# eval/bfcl_simple.py's first commit (00e43d3, 2026-07-20), verified through the
+# 2026-08-08 crash commit 2d8abdb to HEAD.
+#
+# Kept, not corrected, by owner decision (#general, A2 option 1): study 1's
+# figures were produced under this construction, and switching mid-study would
+# place the two studies in different regimes with no measurement connecting
+# them. The known asymmetry -- study-2 arms are trained by TRL, which sets
+# add_special_tokens=False to avoid exactly this -- is disclosed in ADR-009,
+# not silently resolved here.
+#
+# Every value below is an EXPECTATION recorded before the tokenizer runs.
+# The matching observation is written at generation time; see
+# observed_bos_handling(). Labelling an expectation "observed" is the mistake
+# that cost a pod on 2026-08-09.
+BOS_HANDLING = {
+    "applies_to": "eval generation path: eval/bfcl_simple.py build_prompt -> generate",
+    "render_tokenize": False,
+    "render_add_generation_prompt": True,
+    "retokenize_add_special_tokens_argument": "omitted",
+    "expected_resolved_add_special_tokens": True,
+    "expected_leading_bos_count": 2,
+    "choice_basis": "continuity with the Study-1 code path; see ADR-009",
+}
+
+
+class BosHandlingMismatch(RuntimeError):
+    """Raised before model loading when the run's actual BOS construction is
+    not the one recorded and approved. A named type so the refusal is legible
+    in the manifest's failure_reason rather than arriving as a bare
+    RuntimeError."""
+
+
+def observed_bos_handling(tokenizer, prompt: str) -> dict:
+    """What the tokenizer actually did, recorded only after it has run.
+
+    Separate from BOS_HANDLING so the manifest never carries a measurement it
+    has not taken. Returns the leading-BOS count actually produced, alongside
+    the default this tokenizer resolved `add_special_tokens` to.
+    """
+    ids = list(tokenizer(prompt)["input_ids"])
+    bos = getattr(tokenizer, "bos_token_id", None)
+    leading = 0
+    if bos is not None:
+        for tid in ids:
+            if tid != bos:
+                break
+            leading += 1
+    without = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
+    return {
+        "observed_leading_bos_count": leading,
+        "observed_tokens": len(ids),
+        "observed_tokens_without_special": without,
+        "resolved_add_special_tokens": len(ids) != without,
+    }
+
 
 def load_jsonl(path: Path):
     rows = []
@@ -163,6 +227,8 @@ def build_initial_manifest(args, candidates: list, category_paths, n_prompts: in
         "base_candidate_realization": (
             BASE_CANDIDATE_REALIZATION if "base" in candidates else None
         ),
+        # Expectations only. The observation is added at generation time.
+        "bos_handling": dict(BOS_HANDLING),
         "n_prompts": n_prompts,
         "expected_rows": n_prompts * len(candidates),
         "base_model": args.base_model,
@@ -550,6 +616,58 @@ def main() -> None:
                     "prompt": build_prompt(tokenizer, ex["question"], ex["function"]),
                 }
             )
+
+        # The tokenizer has run and a real production prompt exists, so the
+        # expectation in BOS_HANDLING can now be checked against what actually
+        # happened. Done BEFORE model loading and persisted immediately: a run
+        # that dies during load or generation still leaves the observation,
+        # which is the whole reason the 2026-08-09 refusal was reconstructable
+        # only from stdout.
+        if built_prompts:
+            observation = observed_bos_handling(tokenizer, built_prompts[0]["prompt"])
+            # Name what was measured. An unscoped count invites a reader to
+            # assume every prompt was checked.
+            observation["measured_on"] = {
+                "scope": "first built prompt of this run",
+                "prompt_id": built_prompts[0]["id"],
+                "category": args.category,
+            }
+            # Both approved expectations are checked, per field. The count alone
+            # would miss a tokenizer that resolved add_special_tokens
+            # differently while coincidentally landing on the same number.
+            observation["matches_expected_leading_bos_count"] = (
+                observation["observed_leading_bos_count"]
+                == BOS_HANDLING["expected_leading_bos_count"]
+            )
+            observation["matches_expected_resolved_add_special_tokens"] = (
+                observation["resolved_add_special_tokens"]
+                == BOS_HANDLING["expected_resolved_add_special_tokens"]
+            )
+            observation["matches_approved_construction"] = (
+                observation["matches_expected_leading_bos_count"]
+                and observation["matches_expected_resolved_add_special_tokens"]
+            )
+            manifest["bos_handling_observed"] = observation
+            write_run_manifest(args.out_dir, manifest)
+
+            # Fail CLOSED, before any model is loaded. A mismatch means the
+            # construction the owner approved (A2 option 1) is not the one this
+            # run would measure, so continuing would spend on figures produced
+            # under an unapproved regime -- after a free preflight had already
+            # proved the run invalid. Warning and continuing is the
+            # guard-that-does-not-guard shape this repo keeps removing.
+            if not observation["matches_approved_construction"]:
+                raise BosHandlingMismatch(
+                    "observed BOS construction does not match the approved one: "
+                    f"leading BOS {observation['observed_leading_bos_count']} vs "
+                    f"expected {BOS_HANDLING['expected_leading_bos_count']}; "
+                    f"resolved add_special_tokens "
+                    f"{observation['resolved_add_special_tokens']} vs expected "
+                    f"{BOS_HANDLING['expected_resolved_add_special_tokens']}. "
+                    "Refusing before model load: figures produced under a "
+                    "different construction are not the ones A2 option 1 "
+                    "approved, and the manifest would misdescribe them."
+                )
 
         print(f"Loading base model: {args.base_model} revision={args.base_revision}")
         base = AutoModelForCausalLM.from_pretrained(
