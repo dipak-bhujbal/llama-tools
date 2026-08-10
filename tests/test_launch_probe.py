@@ -666,25 +666,34 @@ def test_dry_run_does_not_require_gnu_date() -> None:
     assert result.returncode == 0, combined_output(result)
 
 
-def test_the_runbook_handoff_contract_actually_launches(tmp_path) -> None:
-    """Executable proof of the §7 contract, not a source-string assertion.
+def test_the_caller_must_not_precreate_the_invocation_leaf(tmp_path) -> None:
+    """The handoff contract, executable.
 
-    §7 must create the invocation directory before exec, because it redirects
-    the launcher's stdout into it and a shell redirect cannot wait for the child
-    to mkdir. The first version of the reuse guard refused exactly that, so the
-    runbook could not launch the script it pins -- exit 71 before any work. A
-    source-string test could not see it; only running the sequence could.
+    An earlier version let the caller precreate the leaf so it could redirect a
+    log into it. That reopened the reuse hole: `mkdir -p` plus a truncating
+    redirect made a second run look identical to a first. The caller now keeps
+    its log OUTSIDE the leaf, and this script owns the leaf atomically.
     """
     out_root = tmp_path / "out"
-    inv = out_root / "invocations" / "01-ladder"
-    inv.mkdir(parents=True)
-    (inv / "probe.log").touch()          # exactly what §7 does before exec
+    (out_root / "logs").mkdir(parents=True)      # where the caller's log goes
     result = run_script(full_args(overrides={"--out-root": str(out_root)},
                                   extra=["--invocation-id", "01-ladder",
                                          "--stop-after-ladder"]))
     assert result.returncode != 71, (
-        "the §7 precreated-log handoff must not be refused as reuse:\n"
+        "a fresh id with no precreated leaf must not be refused:\n"
         + combined_output(result))
+
+
+def test_a_precreated_leaf_is_refused_even_when_it_holds_only_a_log(tmp_path) -> None:
+    """The specific hole that was reopened and is now closed."""
+    out_root = tmp_path / "out"
+    inv = out_root / "invocations" / "01-ladder"
+    inv.mkdir(parents=True)
+    (inv / "probe.log").touch()
+    result = run_script(full_args(overrides={"--out-root": str(out_root)},
+                                  extra=["--invocation-id", "01-ladder",
+                                         "--stop-after-ladder"]))
+    assert result.returncode == 71, combined_output(result)
 
 
 def test_a_directory_holding_real_evidence_is_still_refused(tmp_path) -> None:

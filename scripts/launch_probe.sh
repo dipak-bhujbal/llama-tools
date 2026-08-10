@@ -122,8 +122,11 @@ Optional:
 
   --invocation-id <str>   Label for this invocation's evidence directory under
                           <out-root>/invocations/. Defaults to a UTC timestamp.
-                          Pass the same value the caller used for its log
-                          redirect so one directory holds the whole invocation.
+                          The caller must NOT create it: this script creates it
+                          atomically and refuses a reused id. Redirect the
+                          caller's log OUTSIDE the leaf, e.g.
+                          <out-root>/logs/<id>.probe.log, so the leaf stays
+                          exclusively this script's to create.
 
   --dry-run               Print every command that would run, in order, and
                           exit 0 without touching git, the network, or
@@ -473,25 +476,12 @@ if [[ "${dry_run}" -eq 0 ]]; then
       echo "ERROR: cannot create ${invocation_dir}: ${mkdir_err}" >&2
       exit "${EXIT_EVIDENCE_FAILED}"
     fi
-    # HANDOFF CONTRACT with the runbook's §7. The caller must create the
-    # directory before exec, because it redirects this process's stdout/stderr
-    # into it and a shell redirect cannot wait for the child to mkdir. So a
-    # directory holding ONLY the live log is the expected state, not a reuse.
-    #
-    # Anything else present means a previous invocation already wrote evidence
-    # here, and reusing it would overwrite that -- which is the whole thing the
-    # per-invocation layout exists to prevent. Enumerated explicitly rather than
-    # "if empty", so a half-finished earlier run cannot slip through.
-    shopt -s nullglob dotglob
-    existing=( "${invocation_dir}"/* )
-    shopt -u nullglob dotglob
-    only_log=1
-    for entry in "${existing[@]}"; do
-      [[ "$(basename "${entry}")" == "probe.log" ]] || only_log=0
-    done
-    if [[ "${#existing[@]}" -le 1 && "${only_log}" -eq 1 ]]; then
-      : # freshly created by the caller for the log redirect -- proceed
-    else
+    # The caller must NOT precreate this directory. Its log lives outside the
+    # leaf (see --invocation-id in usage), so the launcher can create the leaf
+    # atomically and a reused id is refused rather than silently shared. An
+    # earlier version allowed a precreated directory holding only the log; that
+    # reopened the reuse hole, because `mkdir -p` plus a truncating redirect in
+    # the caller made a second run look identical to a first.
     echo "ERROR: invocation directory already holds evidence: ${invocation_dir}" >&2
     echo "       Refusing to reuse it. A second invocation on this pod must" >&2
     echo "       have its own id, or the first invocation's ladder summary," >&2
@@ -499,7 +489,6 @@ if [[ "${dry_run}" -eq 0 ]]; then
     echo "       the before/after comparison the pause exists to enable." >&2
     echo "       Pass a distinct --invocation-id." >&2
     exit "${EXIT_EVIDENCE_FAILED}"
-    fi
   fi
 fi
 
