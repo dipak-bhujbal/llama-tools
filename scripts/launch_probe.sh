@@ -458,6 +458,7 @@ if ! [[ "${invocation_id}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit "${EXIT_USAGE}"
 fi
 invocation_dir="${out_root}/invocations/${invocation_id}"
+launcher_pid_file="${invocation_dir}/launcher.pid"
 if [[ "${dry_run}" -eq 0 ]]; then
   # `mkdir` without -p on the leaf is the guard: it fails if the directory
   # already exists, so a reused --invocation-id refuses instead of quietly
@@ -855,7 +856,6 @@ assert_entrypoint() {
 # update a file after being SIGKILLed, which is exactly how the 2026-08-08 probe
 # came to have a PID file pointing at nothing. The file is the *source of the
 # number*; probe_liveness.sh still decides liveness with `kill -0` on it.
-launcher_pid_file="${invocation_dir}/launcher.pid"
 if [[ "${dry_run}" -eq 1 ]]; then
   echo "DRY RUN: would write this launcher's PID to ${launcher_pid_file}"
 else
@@ -996,8 +996,10 @@ if [[ "${stop_after_ladder}" -eq 1 ]]; then
   echo
   echo "  A full second invocation needs, from its own start: the ladder again"
   echo "  (mandatory, never skipped), then both generation commands, then the"
-  echo "  shutdown reserve. It refuses on its own if that does not fit -- this"
-  echo "  script does not decide for you and does not stop the pod."
+  echo "  shutdown reserve. This script does NOT decide whether the remaining"
+  echo "  runway can fit that work; it refuses only after its deadline passes."
+  echo "  Compare the runway against the separately approved floor before"
+  echo "  starting another invocation. This script does not stop the pod."
   echo
   echo "  No duration is hardcoded here. Compare the runway above against your"
   echo "  own measured ladder time from this invocation."

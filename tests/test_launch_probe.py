@@ -1,9 +1,9 @@
 """Tests for scripts/launch_probe.sh.
 
-These tests only ever invoke the script with --dry-run, so they never touch
-git state, the network, or spawn a real generation run — the script's
---dry-run contract (print every command it would run, execute nothing) is
-exactly what makes it possible to test a launch procedure without a pod.
+Most tests invoke the script with --dry-run, so they never touch git state, the
+network, or spawn a real generation run. Reuse-guard tests that need the real
+directory contract either stop at that guard or run a copied script from an
+isolated fake repository whose missing interpreter forces exit before checkout.
 
 Every test shells out via `bash scripts/launch_probe.sh ...` and asserts on
 exit code / stdout+stderr text, mirroring how a reviewer would actually
@@ -674,14 +674,30 @@ def test_the_caller_must_not_precreate_the_invocation_leaf(tmp_path) -> None:
     redirect made a second run look identical to a first. The caller now keeps
     its log OUTSIDE the leaf, and this script owns the leaf atomically.
     """
+    # Run a copied launcher from a fake repository. Once the fresh-directory
+    # guard succeeds it must stop at the missing-interpreter preflight, before
+    # any checkout, network access, fixture fetch, ladder, or generation. Using
+    # the real repository here was only accidentally safe on macOS because GNU
+    # timeout is absent; on Linux it could have continued into the real run.
+    fake_root = tmp_path / "fake_repo"
+    fake_scripts = fake_root / "scripts"
+    fake_scripts.mkdir(parents=True)
+    fake_script = fake_scripts / "launch_probe.sh"
+    shutil.copy2(SCRIPT, fake_script)
+
     out_root = tmp_path / "out"
     (out_root / "logs").mkdir(parents=True)      # where the caller's log goes
-    result = run_script(full_args(overrides={"--out-root": str(out_root)},
-                                  extra=["--invocation-id", "01-ladder",
-                                         "--stop-after-ladder"]))
-    assert result.returncode != 71, (
-        "a fresh id with no precreated leaf must not be refused:\n"
-        + combined_output(result))
+    result = subprocess.run(
+        ["bash", str(fake_script), *full_args(overrides={"--out-root": str(out_root)},
+                                               extra=["--invocation-id", "01-ladder",
+                                                      "--stop-after-ladder"])],
+        cwd=str(fake_root), capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 64, combined_output(result)
+    output = combined_output(result)
+    assert "no executable interpreter" in output or "neither 'timeout'" in output
+    assert (out_root / "invocations" / "01-ladder").is_dir()
+    assert not (out_root / "invocations" / "01-ladder" / "launcher.pid").exists()
 
 
 def test_a_precreated_leaf_is_refused_even_when_it_holds_only_a_log(tmp_path) -> None:
@@ -697,7 +713,7 @@ def test_a_precreated_leaf_is_refused_even_when_it_holds_only_a_log(tmp_path) ->
 
 
 def test_a_directory_holding_real_evidence_is_still_refused(tmp_path) -> None:
-    """The contract must not become a hole: only the live log may pre-exist."""
+    """The contract must not become a hole: no invocation leaf may pre-exist."""
     out_root = tmp_path / "out"
     inv = out_root / "invocations" / "01-ladder"
     (inv / "isolation_ladder").mkdir(parents=True)
@@ -715,7 +731,9 @@ def test_the_launcher_does_not_claim_a_runway_check_it_lacks() -> None:
     argument that no other guard was needed."""
     source = SCRIPT.read_text(encoding="utf-8")
     assert "remaining runway cannot fit a full run" not in source
+    assert "It refuses on its own if that does not fit" not in source
     assert "deadline has already PASSED" in source
+    assert "does NOT decide whether the remaining" in source
 
 
 def test_dry_run_does_not_assert_live_pod_state() -> None:
