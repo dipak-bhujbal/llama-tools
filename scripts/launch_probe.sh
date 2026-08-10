@@ -596,6 +596,25 @@ on_exit() {
   local status=$?
   local elapsed=$(( $(date -u +%s) - started_epoch ))
 
+  # Which termination mode bootstrap recorded. The receipt FILENAME is the
+  # claim: auto_terminate_attestation.txt asserts a provider deadline already
+  # existed, manual_termination_plan.txt asserts none did. This footer is the
+  # last thing an operator reads before deciding whether to walk away from a
+  # billing pod, so it must not assert a hard stop that was never set. Read the
+  # receipt rather than assume; bootstrap refuses to write both.
+  local termination_mode="unknown"
+  local termination_receipt=""
+  if [[ -s "${out_root}/manual_termination_plan.txt" \
+        && -s "${out_root}/auto_terminate_attestation.txt" ]]; then
+    termination_mode="ambiguous"
+  elif [[ -s "${out_root}/manual_termination_plan.txt" ]]; then
+    termination_mode="manual"
+    termination_receipt="${out_root}/manual_termination_plan.txt"
+  elif [[ -s "${out_root}/auto_terminate_attestation.txt" ]]; then
+    termination_mode="provider-auto"
+    termination_receipt="${out_root}/auto_terminate_attestation.txt"
+  fi
+
   echo
   echo "====================================================================="
   if [[ "${dry_run}" -eq 1 ]]; then
@@ -636,12 +655,38 @@ on_exit() {
     echo "               sufficiency against the runway above is YOUR call, or"
     echo "               the floor you set in the runbook."
     echo "  stop      -> stop the pod in the console, then CONFIRM BILLING STOPPED."
-    echo "This script does not stop the pod and does not run a timer. The"
-    echo "provider auto-termination you set at creation is the only hard stop."
+    echo "This script does not stop the pod and does not run a timer."
+    case "${termination_mode}" in
+      provider-auto)
+        echo "The provider auto-termination you set at creation is the only hard stop."
+        ;;
+      manual)
+        echo "NO PROVIDER HARD STOP EXISTS for this pod. The deadline recorded in"
+        echo "manual_termination_plan.txt is kept by a human and/or an external"
+        echo "watchdog, and BOTH fail if that machine or that attention does."
+        echo "Nothing will stop this pod except someone stopping it."
+        ;;
+      *)
+        echo "TERMINATION MODE UNKNOWN — no readable receipt in ${out_root}."
+        echo "Do not assume a hard stop exists. Verify in the console."
+        ;;
+    esac
   else
     echo "STOP THE POD NOW, then CONFIRM IN THE CONSOLE THAT BILLING STOPPED."
-    echo "A process that has been killed cannot"
-    echo "stop its own billing — only the provider-side control can."
+    echo "A process that has been killed cannot stop its own billing."
+    case "${termination_mode}" in
+      provider-auto)
+        echo "Only the provider-side control can."
+        ;;
+      manual)
+        echo "NO provider-side control was set for this pod, so stopping it is a"
+        echo "MANUAL action that nothing else will perform for you."
+        ;;
+      *)
+        echo "TERMINATION MODE UNKNOWN — no readable receipt in ${out_root}."
+        echo "Do not assume a hard stop exists. Verify in the console."
+        ;;
+    esac
   fi
   echo
   echo "Record into the run evidence: actual elapsed ${elapsed}s, the actual"
@@ -672,7 +717,18 @@ on_exit() {
   # the machine, not the run.
   echo "  pod-wide (bootstrap): ${out_root}/pip_freeze.txt ${out_root}/gpu.txt"
   echo "  pod-wide (bootstrap): ${out_root}/image_tag.txt ${out_root}/env_fingerprint.json"
-  echo "  pod-wide (bootstrap): ${out_root}/bundle_sha256.txt ${out_root}/auto_terminate_attestation.txt"
+  echo "  pod-wide (bootstrap): ${out_root}/bundle_sha256.txt"
+  # Name the receipt this run actually has. Naming the auto one after a manual
+  # run told the operator to preserve a file that was never written, which reads
+  # as missing evidence for something that was never claimed.
+  if [[ -n "${termination_receipt}" ]]; then
+    echo "  pod-wide (bootstrap): ${termination_receipt}"
+  elif [[ "${dry_run}" -eq 1 ]]; then
+    echo "  pod-wide (bootstrap): ${out_root}/<auto_terminate_attestation.txt"
+    echo "                        or manual_termination_plan.txt, per bootstrap mode>"
+  else
+    echo "  pod-wide (bootstrap): [MISSING] no termination receipt in ${out_root}"
+  fi
   # This invocation's own evidence. A second invocation on the same pod writes
   # its own directory; neither overwrites the other.
   echo "  invocation ${invocation_id}: ${launcher_pid_file} (the exact pid this run published)"

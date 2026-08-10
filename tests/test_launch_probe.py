@@ -740,3 +740,84 @@ def test_dry_run_does_not_assert_live_pod_state() -> None:
     ladder = combined_output(run_script(full_args(extra=["--stop-after-ladder", "--dry-run"])))
     assert "THE POD IS STILL RUNNING AND STILL BILLING — deliberately." not in ladder
     assert "PLANNED (dry run — no pod exists)" in ladder
+
+
+# ---------------------------------------------------------------------------
+# Termination-mode awareness of the exit footer.
+#
+# The footer is the last thing an operator reads before deciding whether it is
+# safe to walk away from a billing pod. On 2026-08-10 a manual-mode run printed
+# "the provider auto-termination you set at creation is the only hard stop" —
+# no such control exists for RunPod Pods, none had been set, and the same run
+# told the operator to preserve auto_terminate_attestation.txt, which bootstrap
+# never wrote in that mode. Execution was unaffected; the instructions were false.
+# ---------------------------------------------------------------------------
+
+AUTO_RECEIPT = "auto_terminate_attestation.txt"
+MANUAL_RECEIPT = "manual_termination_plan.txt"
+
+
+def _run_with_receipt(tmp_path, receipt: str | None, extra: list[str]) -> str:
+    """Run the launcher against an out-root seeded with a given bootstrap receipt."""
+    out_root = tmp_path / "study2"
+    out_root.mkdir(parents=True, exist_ok=True)
+    if receipt is not None:
+        (out_root / receipt).write_text("2026-08-10T18:20:07Z@1.60\n", encoding="utf-8")
+    return combined_output(
+        run_script(full_args(overrides={"--out-root": str(out_root)}, extra=extra))
+    )
+
+
+PROVIDER_CLAIM = "provider auto-termination you set at creation is the only hard stop"
+
+
+def test_provider_auto_footer_is_unchanged(tmp_path) -> None:
+    """The pre-existing provider path must not be reworded by mode awareness."""
+    text = _run_with_receipt(tmp_path, AUTO_RECEIPT, ["--stop-after-ladder", "--dry-run"])
+    assert PROVIDER_CLAIM in text
+    assert AUTO_RECEIPT in text
+    assert MANUAL_RECEIPT not in text
+
+
+def test_manual_footer_never_claims_a_provider_hard_stop(tmp_path) -> None:
+    text = _run_with_receipt(tmp_path, MANUAL_RECEIPT, ["--stop-after-ladder", "--dry-run"])
+    assert PROVIDER_CLAIM not in text
+    assert "NO PROVIDER HARD STOP EXISTS" in text
+    assert "Nothing will stop this pod except someone stopping it." in text
+
+
+def test_manual_footer_names_only_the_receipt_that_exists(tmp_path) -> None:
+    """Naming the auto receipt after a manual run reads as missing evidence for
+    a claim that was never made."""
+    text = _run_with_receipt(tmp_path, MANUAL_RECEIPT, ["--stop-after-ladder", "--dry-run"])
+    assert MANUAL_RECEIPT in text
+    assert AUTO_RECEIPT not in text
+
+
+def test_manual_non_ladder_footer_says_stopping_is_manual(tmp_path) -> None:
+    """The non-ladder branch carried the same false 'only the provider-side
+    control can' sentence."""
+    text = _run_with_receipt(tmp_path, MANUAL_RECEIPT, ["--dry-run"])
+    assert "only the provider-side control can" not in text
+    assert "MANUAL action that nothing else will perform for you" in text
+
+
+def test_missing_receipt_refuses_to_imply_a_hard_stop(tmp_path) -> None:
+    """Absence of a receipt must not silently inherit the provider wording."""
+    text = _run_with_receipt(tmp_path, None, ["--stop-after-ladder", "--dry-run"])
+    assert PROVIDER_CLAIM not in text
+    assert "TERMINATION MODE UNKNOWN" in text
+
+
+def test_both_receipts_present_is_reported_as_ambiguous(tmp_path) -> None:
+    """Two receipts make contradictory claims about the same pod."""
+    out_root = tmp_path / "study2"
+    out_root.mkdir(parents=True, exist_ok=True)
+    for receipt in (AUTO_RECEIPT, MANUAL_RECEIPT):
+        (out_root / receipt).write_text("2026-08-10T18:20:07Z@1.60\n", encoding="utf-8")
+    text = combined_output(
+        run_script(full_args(overrides={"--out-root": str(out_root)},
+                             extra=["--stop-after-ladder", "--dry-run"]))
+    )
+    assert PROVIDER_CLAIM not in text
+    assert "TERMINATION MODE UNKNOWN" in text
