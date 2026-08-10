@@ -12,9 +12,20 @@
 # guide got this wrong: pod billing starts when the pod starts. Cloning,
 # creating the venv, installing packages and downloading weights are all
 # BILLED time and all draw on the same run lifecycle budget as generation.
-# There is no free "until launch" phase. That is why --auto-terminate-set must
-# be acknowledged before this script does anything else: the provider-side
-# deadline has to already exist by the time the pod is running.
+# There is no free "until launch" phase. That is why a termination plan must be
+# acknowledged before this script does anything else.
+#
+# EXACTLY ONE termination mode is required, and they are mutually exclusive
+# because a run cannot be both provider-bounded and not:
+#
+#   --auto-terminate-set      a provider-side deadline ALREADY EXISTS for this
+#                             pod. Recorded as auto_terminate_attestation.txt.
+#   --manual-termination-set  NO provider hard stop exists. The deadline is kept
+#                             by a human and/or an external watchdog, both of
+#                             which can fail. Recorded as
+#                             manual_termination_plan.txt — deliberately a
+#                             different file, because it attests something
+#                             weaker and a later reader must not confuse them.
 #
 # Usage:
 #   scripts/bootstrap_pod.sh \
@@ -22,7 +33,7 @@
 #     --bundle-sha256-file /workspace/llama-tools.bundle.sha256 \
 #     --commit <FULL_40_CHAR_SHA> \
 #     --out-root /workspace/persist/study2 \
-#     --auto-terminate-set "<ISO8601-deadline-Z>@<rate-from-console>" \
+#     ( --auto-terminate-set | --manual-termination-set ) "<ISO8601-Z>@<rate>" \
 #     [--dry-run]
 #
 set -euo pipefail
@@ -39,6 +50,7 @@ bundle_sha_file=""
 commit=""
 out_root=""
 auto_terminate_set=""
+manual_termination_set=""
 dry_run=0
 
 # die takes (message, exit_code). The previous form was `echo "ERROR: $*"`, which
@@ -59,7 +71,7 @@ require_value() {
 }
 
 usage() {
-  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,37p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -69,6 +81,8 @@ while [[ $# -gt 0 ]]; do
     --commit)              require_value "$1" "${2:-}"; commit="$2"; shift 2 ;;
     --out-root)            require_value "$1" "${2:-}"; out_root="$2"; shift 2 ;;
     --auto-terminate-set)  require_value "$1" "${2:-}"; auto_terminate_set="$2"; shift 2 ;;
+    --manual-termination-set)
+                           require_value "$1" "${2:-}"; manual_termination_set="$2"; shift 2 ;;
     --dry-run)             dry_run=1; shift ;;
     -h|--help)             usage; exit "${EXIT_OK}" ;;
     *)                     die "unknown argument: $1" ;;
@@ -76,12 +90,36 @@ while [[ $# -gt 0 ]]; do
 done
 
 missing=()
-[[ -n "${bundle}" ]]             || missing+=("--bundle")
-[[ -n "${bundle_sha_file}" ]]    || missing+=("--bundle-sha256-file")
-[[ -n "${commit}" ]]             || missing+=("--commit")
-[[ -n "${out_root}" ]]           || missing+=("--out-root")
-[[ -n "${auto_terminate_set}" ]] || missing+=("--auto-terminate-set")
+[[ -n "${bundle}" ]]          || missing+=("--bundle")
+[[ -n "${bundle_sha_file}" ]] || missing+=("--bundle-sha256-file")
+[[ -n "${commit}" ]]          || missing+=("--commit")
+[[ -n "${out_root}" ]]        || missing+=("--out-root")
 [[ ${#missing[@]} -eq 0 ]] || die "missing required flags: ${missing[*]}"
+
+# Exactly one termination mode. Neither is not a default — a run with no stated
+# stop is the case this script exists to refuse. Both is worse than neither: it
+# would leave two receipts making contradictory claims about the same pod, and a
+# later reader would have no way to tell which one described reality.
+termination_mode=""
+if [[ -n "${auto_terminate_set}" && -n "${manual_termination_set}" ]]; then
+  die "--auto-terminate-set and --manual-termination-set are mutually exclusive; a run is either provider-bounded or it is not" \
+      "${EXIT_PROVIDER_CAP}"
+elif [[ -n "${auto_terminate_set}" ]]; then
+  termination_mode="provider-auto"
+elif [[ -n "${manual_termination_set}" ]]; then
+  termination_mode="manual"
+else
+  die "exactly one of --auto-terminate-set or --manual-termination-set is required" \
+      "${EXIT_PROVIDER_CAP}"
+fi
+
+if [[ "${termination_mode}" == "provider-auto" ]]; then
+  termination_receipt="auto_terminate_attestation.txt"
+  termination_label="auto-terminate attestation"
+else
+  termination_receipt="manual_termination_plan.txt"
+  termination_label="manual-termination plan"
+fi
 
 [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] \
   || die "--commit must be a full 40-char lowercase hex SHA, got: '${commit}'"
@@ -150,17 +188,38 @@ assert_file() {
 # That is deliberately a human attestation, not a simulated check.
 # ---------------------------------------------------------------------------
 echo "====================================================================="
-echo "STEP 0 — provider auto-termination"
-if [[ ! "${auto_terminate_set}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z@.+ ]]; then
-  echo "ERROR: --auto-terminate-set must look like" >&2
-  echo "       <ISO8601-deadline-Z>@<rate>, with both taken from the console for" >&2
-  echo "       THIS pod; a remembered rate is not evidence about this run." >&2
-  echo "       Set the RunPod auto-terminate deadline FIRST, then record it here." >&2
-  echo "       Billing is already running; there is no unbilled setup phase." >&2
-  exit "${EXIT_PROVIDER_CAP}"
+if [[ "${termination_mode}" == "provider-auto" ]]; then
+  echo "STEP 0 — provider auto-termination"
+  if [[ ! "${auto_terminate_set}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z@.+ ]]; then
+    echo "ERROR: --auto-terminate-set must look like" >&2
+    echo "       <ISO8601-deadline-Z>@<rate>, with both taken from the console for" >&2
+    echo "       THIS pod; a remembered rate is not evidence about this run." >&2
+    echo "       Set the RunPod auto-terminate deadline FIRST, then record it here." >&2
+    echo "       Billing is already running; there is no unbilled setup phase." >&2
+    exit "${EXIT_PROVIDER_CAP}"
+  fi
+  echo "  acknowledged: ${auto_terminate_set}"
+  echo "  (attestation by the operator; not verifiable from inside the pod)"
+else
+  # Manual mode attests something strictly weaker, so it says so in the words an
+  # operator reads on a billing pod. The same shape is required: a deadline with
+  # no time in it is not a deadline, and a rate is what makes the elapsed
+  # reading convertible into money afterwards.
+  echo "STEP 0 — MANUAL termination — NO PROVIDER HARD STOP EXISTS"
+  if [[ ! "${manual_termination_set}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z@.+ ]]; then
+    echo "ERROR: --manual-termination-set must look like" >&2
+    echo "       <ISO8601-deadline-Z>@<rate>, the deadline you are committing to" >&2
+    echo "       keep by hand and the rate shown by the console for THIS pod." >&2
+    echo "       Billing is already running; there is no unbilled setup phase." >&2
+    exit "${EXIT_PROVIDER_CAP}"
+  fi
+  echo "  planned manual deadline: ${manual_termination_set}"
+  echo "  THIS POD WILL NOT STOP ITSELF. Nothing in this script, the launcher,"
+  echo "  or the provider will terminate it. A human timer and any external"
+  echo "  watchdog are the only stops, and both fail if the operator's machine"
+  echo "  or attention does. Billing continues until someone terminates it."
+  echo "  (operator plan, not an enforced bound; not verifiable from inside the pod)"
 fi
-echo "  acknowledged: ${auto_terminate_set}"
-echo "  (attestation by the operator; not verifiable from inside the pod)"
 
 # ---------------------------------------------------------------------------
 # STEP 1 — image identity. An unknown image tag must FAIL, not be recorded as
@@ -517,7 +576,20 @@ if [[ "${dry_run}" -eq 0 ]]; then
   rm -f "${out_root}/gpu.stderr.txt"
 
   echo "${image_tag}" > "${out_root}/image_tag.txt"
-  echo "${auto_terminate_set}" > "${out_root}/auto_terminate_attestation.txt"
+  # One termination receipt, named for what it actually attests. The manual file
+  # is not a variant spelling of the auto one: it records that no provider bound
+  # existed, which is the opposite claim, and the two must never be confusable
+  # by a later reader working only from a directory listing.
+  if [[ "${termination_mode}" == "provider-auto" ]]; then
+    echo "${auto_terminate_set}" > "${out_root}/${termination_receipt}"
+  else
+    {
+      echo "${manual_termination_set}"
+      echo "mode=manual"
+      echo "provider_hard_stop=none"
+      echo "enforced_by=human timer and/or external watchdog; both can fail"
+    } > "${out_root}/${termination_receipt}"
+  fi
   echo "${commit}" > "${out_root}/reviewed_commit.txt"
 
   # Explicit inventory assertion. Every file below is something a later reader
@@ -528,10 +600,22 @@ if [[ "${dry_run}" -eq 0 ]]; then
   assert_file "${out_root}/pip_freeze.txt"                 "pip freeze receipt"        "${EXIT_ENV}"
   assert_file "${out_root}/gpu.txt"                        "GPU receipt"               "${EXIT_ENV}"
   assert_file "${out_root}/image_tag.txt"                  "image tag receipt"         "${EXIT_ENV}"
-  assert_file "${out_root}/auto_terminate_attestation.txt" "auto-terminate attestation" "${EXIT_ENV}"
+  assert_file "${out_root}/${termination_receipt}"         "${termination_label}"      "${EXIT_ENV}"
   assert_file "${out_root}/reviewed_commit.txt"            "reviewed-commit receipt"   "${EXIT_ENV}"
   assert_file "${out_root}/env_fingerprint.json"           "environment fingerprint"   "${EXIT_ENV}"
   assert_file "${out_root}/bundle_sha256.txt"              "bundle hash receipt"       "${EXIT_ENV}"
+
+  # Reject ambiguity as hard as absence. If a previous run left the other mode's
+  # receipt in this out-root, the directory now makes two contradictory claims
+  # about how the pod was bounded and no reader can tell which one is this run's.
+  if [[ "${termination_mode}" == "provider-auto" ]]; then
+    stale_receipt="${out_root}/manual_termination_plan.txt"
+  else
+    stale_receipt="${out_root}/auto_terminate_attestation.txt"
+  fi
+  [[ ! -e "${stale_receipt}" ]] \
+    || die "both termination receipts are present in ${out_root}; this run wrote ${termination_receipt} and ${stale_receipt##*/} contradicts it — remove the stale one and rerun" \
+           "${EXIT_ENV}"
 
   # Locale collection is best-effort telemetry, not a correctness gate. The
   # monitor's JSON escaping is locale-independent now, so a minimal image that
@@ -563,7 +647,7 @@ PY
   echo "  all 7 environment receipts asserted present and non-empty"
   ls -1 "${out_root}"
 else
-  announce "pip freeze / nvidia-smi / image tag / attestation -> ${out_root}"
+  announce "pip freeze / nvidia-smi / image tag / ${termination_receipt} -> ${out_root}"
   announce "assert all 7 environment receipts exist and are non-empty"
 fi
 

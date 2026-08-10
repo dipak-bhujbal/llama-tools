@@ -126,6 +126,73 @@ def test_launch_hint_is_detached_and_logged() -> None:
     assert "APPROVED_CEILING_AND_LIVE_RATE" not in text
 
 
+def manual_args(value: str = VALID_ATTESTATION) -> list[str]:
+    """Same required flags, but the manual termination mode instead of the
+    provider one."""
+    return full_args({"--manual-termination-set": value},
+                     omit={"--auto-terminate-set"})
+
+
+def test_exactly_one_termination_mode_is_required() -> None:
+    """No stated stop is the case this script exists to refuse; it must not
+    quietly default to either mode."""
+    result = run_script(full_args(omit={"--auto-terminate-set"}))
+    assert result.returncode != 0, out(result)
+    assert "--auto-terminate-set" in out(result)
+    assert "--manual-termination-set" in out(result)
+
+
+def test_termination_modes_are_mutually_exclusive() -> None:
+    """Both flags would leave two receipts making contradictory claims about
+    how the same pod was bounded."""
+    result = run_script(full_args({"--manual-termination-set": VALID_ATTESTATION}))
+    assert result.returncode != 0, out(result)
+    assert "mutually exclusive" in out(result)
+
+
+@pytest.mark.parametrize(
+    "bad_plan",
+    ["sometime", "yes", "2026-08-04T23:00:00Z", "@RATE_FROM_CONSOLE", "later@"],
+)
+def test_manual_termination_plan_must_be_wellformed(bad_plan: str) -> None:
+    """A deadline with no time in it is not a deadline. Manual mode is weaker
+    than provider mode, which is a reason to check its shape, not to skip it."""
+    result = run_script(manual_args(bad_plan))
+    assert result.returncode != 0, out(result)
+    assert "--manual-termination-set" in out(result)
+
+
+def test_manual_mode_says_plainly_that_nothing_will_stop_the_pod() -> None:
+    """The operator reads STEP 0 on a billing pod. Manual mode attests something
+    strictly weaker than provider mode and must not read like it."""
+    text = out(run_script(manual_args()))
+    assert "NO PROVIDER HARD STOP EXISTS" in text
+    assert "WILL NOT STOP ITSELF" in text
+
+
+def test_manual_mode_plans_a_distinctly_named_receipt() -> None:
+    """Never auto_terminate_attestation.txt: that filename asserts the opposite
+    claim, and a later reader working from a directory listing must not be able
+    to confuse the two."""
+    text = out(run_script(manual_args()))
+    assert "manual_termination_plan.txt" in text
+    assert "auto_terminate_attestation.txt" not in text
+
+
+def test_provider_mode_receipt_and_wording_are_unchanged() -> None:
+    """The existing provider path is not being renamed or reworded by this
+    change; only a second mode is added alongside it."""
+    text = out(run_script(full_args()))
+    assert "STEP 0 — provider auto-termination" in text
+    assert "auto_terminate_attestation.txt" in text
+    assert "manual_termination_plan.txt" not in text
+
+
+def test_manual_mode_dry_run_succeeds() -> None:
+    result = run_script(manual_args())
+    assert result.returncode == 0, out(result)
+
+
 def test_unknown_image_tag_is_rejected_on_a_real_run() -> None:
     """A run whose environment cannot be named cannot be reproduced, so
     'unknown' must fail rather than be recorded as evidence. Dry run is

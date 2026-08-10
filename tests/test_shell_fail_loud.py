@@ -157,12 +157,19 @@ def test_bootstrap_asserts_every_environment_receipt_exists_and_is_non_empty() -
         "pip_freeze.txt",
         "gpu.txt",
         "image_tag.txt",
-        "auto_terminate_attestation.txt",
         "reviewed_commit.txt",
         "env_fingerprint.json",
         "bundle_sha256.txt",
     ):
         assert f'assert_file "${{out_root}}/{receipt}"' in source, receipt
+
+    # The termination receipt is asserted through the mode variable, because its
+    # NAME is the claim: auto_terminate_attestation.txt says a provider deadline
+    # existed, manual_termination_plan.txt says none did. Both filenames must
+    # still be reachable from the source, and the assertion must run either way.
+    assert 'assert_file "${out_root}/${termination_receipt}"' in source
+    assert 'termination_receipt="auto_terminate_attestation.txt"' in source
+    assert 'termination_receipt="manual_termination_plan.txt"' in source
     # assert_file checks both existence and non-emptiness; a zero-byte
     # fingerprint is exactly as useless as an absent one.
     assert '[[ -f "${path}" ]] || die' in source
