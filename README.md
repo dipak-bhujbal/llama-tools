@@ -6,7 +6,13 @@ Post-trained Llama-3.1-8B for structured tool-calling in AI agents.
 
 An open-weight fine-tune of `meta-llama/Llama-3.1-8B-Instruct` optimized for reliable function-calling behavior: correct tool selection, correct argument formatting, correct types, no hallucinated tools. The repository contains the SFT and DPO training pipelines, BFCL and MMLU evaluation code, and the evidence behind the decision to ship SFT without either DPO variant. Quantized variants remain planned work.
 
-## Status — 2026-08-04
+## Current project summary - October 2026
+
+The October 2026 owner-confirmed summary reports Llama 3.1 8B LoRA supervised fine-tuning (rank 64) on 12,143 curated examples, BFCL `simple_python` accuracy of **81.8% to 91.5%**, and **53% fewer argument errors (73 to 34 out of 400)**, with MMLU inside the preset band. The reported run cost **$4.55** in GPU time; the current evaluation harness has **687 passing tests**. Both DPO arms remain documented negative results.
+
+See the [versioned October project summary](docs/report/october-2026-owner-reported-summary.md) for the reported configuration, data-integrity work, infrastructure improvements, and evidence scope. This is an owner-reported update. Historical Study 1 reports and the pinned public Hugging Face bundle retain their original values; this documentation update adds no October raw runs, private weights, or training datasets.
+
+## Archived Study 1 status - 2026-08-04
 
 **SFT is the selected final model.** `centuriandip/llama-3.1-8b-tools-sft` remains private on Hugging Face. LoRA-SFT on 12,160 curated tool-calling examples ran for 3 epochs (9h 09m on 1x RTX A6000, approximately $4.55 compute). Eval loss improved at all 11 checkpoints (0.4625 → 0.2117). On the 400-item BFCL v4 `simple_python` set, SFT scored **369/400 = 92.25%** with perfect function-name selection and JSON validity. The accepted study-1 record reports MMLU 5-shot **0.659 vs 0.683 base** (−2.4 points).
 
